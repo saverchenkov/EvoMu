@@ -5,6 +5,17 @@
 use super::*;
 
 pub(crate) fn is_combatant_ship_or_entity_ball(ctx: &ServerContext, ball_id: i64, ball_type_id: u32) -> bool {
+    if !(40_000_000..80_000_000).contains(&ball_id)
+        && crate::services::pve_dungeon_runtime::has_dungeon_runtime_store(ctx)
+        && ctx.db.with_snapshot(|snap| {
+            crate::services::pve_dungeon_runtime_hooks::is_live_destructible_dungeon_object_any_sys_in_snap(
+                snap,
+                ball_id,
+            )
+        })
+    {
+        return true;
+    }
     crate::services::tactical_modules::is_combatant_ship_or_entity_ball(
         Some(&ctx.sde),
         Some(&ctx.db),

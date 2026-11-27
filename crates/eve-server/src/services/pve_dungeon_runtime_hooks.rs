@@ -48,9 +48,9 @@ pub(crate) fn build_destructible_object_combat_state(
     cs
 }
 
-pub fn is_destructible_dungeon_object_in_snap(
+fn has_live_destructible_dungeon_object_in_snap(
     snap: &WorldStateSnapshot,
-    sys_id: SolarSystemId,
+    sys_id_opt: Option<SolarSystemId>,
     ball_id: i64,
 ) -> bool {
     if ball_id <= 0 {
@@ -58,13 +58,30 @@ pub fn is_destructible_dungeon_object_in_snap(
     }
     snap.dungeon_runtime.instances.values().any(|inst| {
         !instance_is_finished(inst)
-            && inst.solar_system_id == sys_id
+            && sys_id_opt.is_none_or(|sid| inst.solar_system_id == sid)
             && inst.rooms.iter().any(|r| {
                 r.objects
                     .iter()
                     .any(|o| o.ball_id == ball_id && o.spawned && !o.destroyed && o.destructible)
             })
     })
+}
+
+pub fn is_destructible_dungeon_object_in_snap(
+    snap: &WorldStateSnapshot,
+    sys_id: SolarSystemId,
+    ball_id: i64,
+) -> bool {
+    has_live_destructible_dungeon_object_in_snap(snap, Some(sys_id), ball_id)
+}
+
+/// System-agnostic sibling of [`is_destructible_dungeon_object_in_snap`] for AoE targeting predicates
+/// that inspect balls without a `SolarSystemId` parameter (`P2-NEW-01`).
+pub fn is_live_destructible_dungeon_object_any_sys_in_snap(
+    snap: &WorldStateSnapshot,
+    ball_id: i64,
+) -> bool {
+    has_live_destructible_dungeon_object_in_snap(snap, None, ball_id)
 }
 
 pub fn is_destructible_dungeon_object(
@@ -217,70 +234,44 @@ pub async fn on_dungeon_container_cargo_changed(
             }
             let inst_sys = inst.solar_system_id;
             let mut ie = TriggerTxEffects::default();
-            for r_idx in 0..inst.rooms.len() {
-                if ie.fail_reason.is_some() || ie.complete_now {
-                    break;
-                }
-                if !room_is_entered(&inst.rooms[r_idx]) {
+            // Process all source withdrawal debits across rooms before destination deposits (`P2-NEW-02`)
+            // so cross-room transfers conserve net counts even when `dst_room_idx < src_room_idx`.
+            for (cont_ball_id, is_deposit) in [(src_loc_id, false), (dst_loc_id, true)] {
+                if cont_ball_id <= 0 {
                     continue;
                 }
-                let has_src = src_loc_id > 0
-                    && inst.rooms[r_idx].objects.iter().any(|o| {
-                        o.is_container && o.spawned && !o.destroyed && o.ball_id == src_loc_id
-                    });
-                let has_dst = dst_loc_id > 0
-                    && inst.rooms[r_idx].objects.iter().any(|o| {
-                        o.is_container && o.spawned && !o.destroyed && o.ball_id == dst_loc_id
-                    });
-                if has_src {
-                    let key = format!("{src_loc_id}:{item_type_id}");
+                for r_idx in 0..inst.rooms.len() {
+                    if ie.fail_reason.is_some() || ie.complete_now {
+                        break;
+                    }
+                    if !room_is_entered(&inst.rooms[r_idx]) {
+                        continue;
+                    }
+                    if !inst.rooms[r_idx].objects.iter().any(|o| {
+                        o.is_container && o.spawned && !o.destroyed && o.ball_id == cont_ball_id
+                    }) {
+                        continue;
+                    }
+                    let key = format!("{cont_ball_id}:{item_type_id}");
                     let cur = inst.rooms[r_idx]
                         .cargo_delivered_net
                         .get(&key)
                         .copied()
                         .unwrap_or(0);
-                    let next = cur.saturating_sub(moved_qty);
-                    if next == 0 {
-                        inst.rooms[r_idx].cargo_delivered_net.remove(&key);
+                    let next = if is_deposit {
+                        cur.saturating_add(moved_qty)
                     } else {
-                        inst.rooms[r_idx].cargo_delivered_net.insert(key, next);
-                    }
-                    let ev = DungeonEvent::CargoDelivered {
-                        container_ball_id: src_loc_id,
-                        item_type_id,
-                        is_deposit: false,
+                        cur.saturating_sub(moved_qty)
                     };
-                    let _ = evaluate_room_triggers_in_inst(
-                        snap,
-                        inst_sys,
-                        &mut inst,
-                        Some(&ctx.sde),
-                        r_idx,
-                        &ev,
-                        char_id,
-                        now_unix,
-                        false,
-                        false,
-                        &mut ie,
-                    );
-                }
-                if has_dst && ie.fail_reason.is_none() && !ie.complete_now {
-                    let key = format!("{dst_loc_id}:{item_type_id}");
-                    let cur = inst.rooms[r_idx]
-                        .cargo_delivered_net
-                        .get(&key)
-                        .copied()
-                        .unwrap_or(0);
-                    let next = cur.saturating_add(moved_qty);
                     if next == 0 {
                         inst.rooms[r_idx].cargo_delivered_net.remove(&key);
                     } else {
                         inst.rooms[r_idx].cargo_delivered_net.insert(key, next);
                     }
                     let ev = DungeonEvent::CargoDelivered {
-                        container_ball_id: dst_loc_id,
+                        container_ball_id: cont_ball_id,
                         item_type_id,
-                        is_deposit: true,
+                        is_deposit,
                     };
                     let _ = evaluate_room_triggers_in_inst(
                         snap,

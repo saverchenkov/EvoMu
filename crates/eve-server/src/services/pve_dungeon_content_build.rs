@@ -6,11 +6,13 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    bind_spawn_object_index_if_omitted, classify_dungeon_object_spawn, get_active_wiki_pve_catalog,
-    has_omitted_object_trigger, rebind_auto_object_targets, select_entry_index_for_dungeon,
-    trigger_binds_spawn_tag_to_object_kind, trigger_has_object_kind, wiki_faction_name_to_id,
-    WikiBuildStats, WikiDungeonBuild, WikiLootItemSpec, WikiObjective, WikiPveEntry, WikiSpawn,
-    WikiTrigger, WikiTriggerActionSpec, WikiWave, WikiWaveDistance,
+    bind_spawn_object_indices_if_omitted, classify_dungeon_object_spawn,
+    get_active_wiki_pve_catalog, has_omitted_object_trigger,
+    is_non_empty_object_or_structure_class, rebind_auto_object_targets,
+    select_entry_index_for_dungeon, trigger_object_hint, trigger_target_object_hint,
+    wiki_faction_name_to_id, ObjectTriggerHint, WikiBuildStats, WikiDungeonBuild, WikiLootItemSpec,
+    WikiObjective, WikiPveEntry, WikiSpawn, WikiTrigger, WikiTriggerActionSpec, WikiWave,
+    WikiWaveDistance,
 };
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_legacy_ess::{
@@ -1150,30 +1152,34 @@ enum ResolvedSpawn {
     Skipped,
 }
 
-fn resolve_spawn_entry(
-    ctx: &ServerContext,
-    entry: &WikiPveEntry,
-    sys_id: u32,
-    dungeon_id: DungeonTemplateId,
-    sp: &WikiSpawn,
-    explicit_object_trigger: bool,
-) -> ResolvedSpawn {
-    let count = pick_spawn_count(ctx, sp.count.min, sp.count.max);
-    if count == 0 {
-        return ResolvedSpawn::Skipped;
-    }
-
-    let has_valid_combat_npc_type = !ctx.sde.types.is_empty()
+fn spawn_has_valid_combat_npc_type(sde: &eve_sde::SdeRegistry, sp: &WikiSpawn) -> bool {
+    !sde.types.is_empty()
         && sp
             .resolution
             .type_ids
             .iter()
             .chain(sp.resolution.candidate_type_ids.iter())
             .copied()
-            .any(|tid| is_valid_combat_npc_type(&ctx.sde, tid));
+            .any(|tid| is_valid_combat_npc_type(sde, tid))
+}
 
-    if !has_valid_combat_npc_type || explicit_object_trigger {
-        if let Some(flags) = classify_dungeon_object_spawn(sp) {
+fn resolve_spawn_entry(
+    ctx: &ServerContext,
+    entry: &WikiPveEntry,
+    sys_id: u32,
+    dungeon_id: DungeonTemplateId,
+    sp: &WikiSpawn,
+    trigger_hint: ObjectTriggerHint,
+) -> ResolvedSpawn {
+    let count = pick_spawn_count(ctx, sp.count.min, sp.count.max);
+    if count == 0 {
+        return ResolvedSpawn::Skipped;
+    }
+
+    let has_valid_combat_npc_type = spawn_has_valid_combat_npc_type(&ctx.sde, sp);
+
+    if !has_valid_combat_npc_type || trigger_hint.has_explicit_object_trigger {
+        if let Some(flags) = classify_dungeon_object_spawn(sp, trigger_hint) {
             let concrete_tid = sp
                 .resolution
                 .type_ids
@@ -1564,7 +1570,7 @@ struct BuiltRoomScratch {
     spawn_tag_type_ids: HashMap<String, Vec<u32>>,
     spawn_tag_counts: HashMap<String, u32>,
     materialized_spawns: HashSet<(usize, usize)>,
-    spawn_object_index: HashMap<(usize, usize), usize>,
+    spawn_object_indices: HashMap<(usize, usize), Vec<usize>>,
     group_unlock_flags: HashMap<u8, bool>,
     spawn_immediate_by_wave: HashMap<usize, bool>,
     active_waves: HashSet<usize>,
@@ -1709,7 +1715,7 @@ pub(crate) fn build_wiki_deadspace_rooms(
         let mut spawn_tag_type_ids: HashMap<String, Vec<u32>> = HashMap::new();
         let mut spawn_tag_counts: HashMap<String, u32> = HashMap::new();
         let mut materialized_spawns: HashSet<(usize, usize)> = HashSet::new();
-        let mut spawn_object_index: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut spawn_object_indices: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
         let mut group_unlock_flags: HashMap<u8, bool> = HashMap::new();
         let mut spawn_immediate_by_wave: HashMap<usize, bool> = HashMap::new();
         let mut active_waves: HashSet<usize> = HashSet::new();
@@ -1721,7 +1727,7 @@ pub(crate) fn build_wiki_deadspace_rooms(
         }
         let mut next_group_id = 1u8;
 
-        for wwave in &wroom.waves {
+        for (wwave_idx, wwave) in wroom.waves.iter().enumerate() {
             let spawn_chance_bps = effective_wave_spawn_chance_bps(wwave).ok()?;
             if spawn_chance_bps == 0 {
                 continue;
@@ -1748,25 +1754,44 @@ pub(crate) fn build_wiki_deadspace_rooms(
                     .or_else(|| backref_tags.get(&(wwave.wave_index, sp_idx + 1)).cloned());
                 let custom_name = trimmed_opt(Some(sp.raw_name.as_str()));
                 let spawn_tag_lc = tag.as_deref().map(str::to_ascii_lowercase);
-                let room_triggers_bind_tag = spawn_tag_lc.as_deref().is_some_and(|tlc| {
-                    wroom.waves.iter().any(|w| {
-                        w.wave_trigger
-                            .as_ref()
-                            .is_some_and(|wtr| trigger_binds_spawn_tag_to_object_kind(wtr, tlc))
-                            || w.spawns.iter().any(|osp| {
-                                osp.trigger
-                                    .as_ref()
-                                    .is_some_and(|strig| trigger_binds_spawn_tag_to_object_kind(strig, tlc))
-                            })
-                    })
-                });
-                let explicit_object_trigger = sp
+                let spawn_tids: Vec<u32> = sp
+                    .resolution
+                    .type_ids
+                    .iter()
+                    .chain(sp.resolution.candidate_type_ids.iter())
+                    .copied()
+                    .filter(|&tid| tid > 0)
+                    .collect();
+                let is_non_npc_struct_cls = is_non_empty_object_or_structure_class(&sp.raw_class)
+                    && !spawn_has_valid_combat_npc_type(&ctx.sde, sp);
+                let mut trigger_hint = sp
                     .trigger
                     .as_ref()
-                    .is_some_and(trigger_has_object_kind)
-                    || room_triggers_bind_tag;
+                    .map(trigger_object_hint)
+                    .unwrap_or_default();
+                for (w_idx, w) in wroom.waves.iter().enumerate() {
+                    if let Some(ref wtr) = w.wave_trigger {
+                        let include_unbound = w_idx == wwave_idx && is_non_npc_struct_cls;
+                        trigger_hint.merge(trigger_target_object_hint(
+                            wtr,
+                            spawn_tag_lc.as_deref(),
+                            &spawn_tids,
+                            include_unbound,
+                        ));
+                    }
+                    for osp in &w.spawns {
+                        if let Some(ref strig) = osp.trigger {
+                            trigger_hint.merge(trigger_target_object_hint(
+                                strig,
+                                spawn_tag_lc.as_deref(),
+                                &spawn_tids,
+                                false,
+                            ));
+                        }
+                    }
+                }
 
-                match resolve_spawn_entry(ctx, entry, sys_id, dungeon_id, sp, explicit_object_trigger) {
+                match resolve_spawn_entry(ctx, entry, sys_id, dungeon_id, sp, trigger_hint) {
                     ResolvedSpawn::CombatNpc {
                         type_id,
                         count,
@@ -1825,14 +1850,15 @@ pub(crate) fn build_wiki_deadspace_rooms(
                         if is_concrete {
                             stats.concrete_rows += 1;
                         }
-                        for dup_i in 0..count {
+                        for _dup_i in 0..count {
                             if is_container {
                                 stats.container_objects += 1;
                             }
                             let obj_idx = objects.len();
-                            if dup_i == 0 {
-                                spawn_object_index.insert((wwave.wave_index, sp_idx), obj_idx);
-                            }
+                            spawn_object_indices
+                                .entry((wwave.wave_index, sp_idx))
+                                .or_default()
+                                .push(obj_idx);
                             let dist = wwave
                                 .distance_m
                                 .map(WikiWaveDistance::effective_m)
@@ -1930,7 +1956,7 @@ pub(crate) fn build_wiki_deadspace_rooms(
             spawn_tag_type_ids,
             spawn_tag_counts,
             materialized_spawns,
-            spawn_object_index,
+            spawn_object_indices,
             group_unlock_flags,
             spawn_immediate_by_wave,
             active_waves,
@@ -2021,16 +2047,16 @@ pub(crate) fn build_wiki_deadspace_rooms(
                     true,
                 )
                 .ok()?;
-                let container_bound_obj = src
-                    .spawn_object_index
-                    .get(&(wwave.wave_index, sp_idx))
-                    .copied();
-                if let Some(obj_idx) = container_bound_obj {
-                    bind_spawn_object_index_if_omitted(
+                let container_bound_objs = src
+                    .spawn_object_indices
+                    .get(&(wwave.wave_index, sp_idx));
+                if let Some(obj_indices) = container_bound_objs {
+                    bind_spawn_object_indices_if_omitted(
                         strig,
                         &mut trig_kind,
-                        obj_idx,
-                        src.objects[obj_idx].position,
+                        obj_indices,
+                        &src.objects,
+                        0,
                     );
                 }
                 push_translated_wiki_trigger(
@@ -2039,7 +2065,7 @@ pub(crate) fn build_wiki_deadspace_rooms(
                     pos_idx,
                     None,
                     strig.unlocks_gate == Some(true),
-                    container_bound_obj.is_none(),
+                    container_bound_objs.is_none(),
                     &room_scratches,
                     &room_index_to_vec_idx,
                     &mut triggers,

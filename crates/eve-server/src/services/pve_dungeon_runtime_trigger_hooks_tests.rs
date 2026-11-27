@@ -2832,10 +2832,10 @@ async fn own_diff_p1_02_dogma_activate_on_destructible_dungeon_container_has_no_
             0.0,
             None,
             &[
-                (114, 120.0),
-                (116, 120.0),
-                (117, 120.0),
-                (118, 120.0),
+                (114, 60.0),
+                (116, 60.0),
+                (117, 60.0),
+                (118, 60.0),
                 (120, 1.0),
                 (128, 1.0),
             ],
@@ -3098,7 +3098,7 @@ async fn own_diff_p1_02_dogma_activate_on_destructible_dungeon_container_has_no_
     // 2. Green-safety fleetmate fires repeatedly via dogmaIM.Activate to finish off the container:
     // must NEVER be rejected by CantDoInCurrentSafetyLevel and must apply NPC aggression + OnStructureDestroyed.
     let mut cont_destroyed = false;
-    for shot_idx in 0..4 {
+    for shot_idx in 0..8 {
         clock.advance_secs(1);
         ctx.clear_all_reactivation_delays();
         let fleet_shot = handle_weapons(
@@ -3350,6 +3350,423 @@ async fn own_diff_p1_03_repeatable_cargo_threshold_and_wildcard_compound_and_lat
             inst.completed && inst.rooms[0].triggers[0].fired,
             "re-depositing into C1 after draining C1 & C2 plus destroying pylon must complete CompoundAnd"
         );
+    });
+}
+
+#[tokio::test]
+async fn own_diff_p1_04_cmd_engage_drones_on_destructible_dungeon_containers_and_cross_room_transfer_order(
+) {
+    use crate::services::combat_crimewatch::combat_missiles_aoe::is_combatant_ship_or_entity_ball;
+    use crate::services::combat_crimewatch::combat_npcs_drones::handle_npcs_drones;
+    use crate::services::combat_crimewatch::{is_npc_timer_active, set_char_safety_level, SafetyLevel};
+    use eve_destiny::{CombatState, TargetLock};
+
+    let (sys_id, owner_char, green_char, red_char, inst_id, inst_xroom) = (
+        30_000_142u32,
+        90_070_420i64,
+        90_070_421i64,
+        90_070_422i64,
+        995_420i64,
+        995_421i64,
+    );
+    let r_pos = [80_000_000.0, 0.0, 0.0];
+
+    let mut sde = (*build_hooks_test_sde()).clone();
+    sde.types.insert(
+        587,
+        mk_inv_type(
+            587,
+            25,
+            6,
+            "Rifter",
+            28_000.0,
+            100.0,
+            None,
+            &[(1271, 50.0), (283, 100.0), (458, 20_000.0)],
+        ),
+    );
+    sde.types.insert(
+        2_456,
+        mk_inv_type(
+            2_456,
+            100,
+            18,
+            "Hobgoblin II",
+            5.0,
+            0.0,
+            None,
+            &[
+                (1272, 5.0),
+                (37, 2_600.0),
+                (54, 2_000.0),
+                (158, 3_000.0),
+                (160, 2.2),
+                (64, 1.5),
+                (118, 24.0),
+                (51, 4_000.0),
+            ],
+        ),
+    );
+
+    let (ctx, _clock, _owner_sess, _owner_ship) = make_space_pilot_ctx(
+        Arc::new(sde),
+        sys_id,
+        owner_char,
+        "p104_owner",
+        587,
+        DVec3::from_array([r_pos[0] + 1_000.0, 0.0, 0.0]),
+    )
+    .await;
+    assert!(
+        ctx.sde
+            .solar_systems
+            .get(&sys_id)
+            .is_some_and(|s| s.security_status >= 0.45),
+        "test must run in high-sec so Green/Yellow/Red safety & CrimeWatch rules apply"
+    );
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let spawn_fleet_drone_pilot = async |char_id: i64, user_tag: &str, drone_id: i64, offset_x: f64, safety: SafetyLevel| {
+        ctx.db.provision_gm_account(user_tag, "pw", char_id, user_tag);
+        let (uid, sid) = ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&char_id).unwrap();
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            let sid = ch.active_ship_id;
+            let uid = ch.user_id;
+            if let Some(it) = snap.items.get_mut(&sid) {
+                it.type_id = 587;
+                it.location_id = i64::from(sys_id);
+                it.flag = InventoryFlag::None;
+            }
+            snap.items.insert(
+                drone_id,
+                InventoryItemRecord {
+                    item_id: drone_id,
+                    type_id: 2_456,
+                    owner_id: char_id,
+                    location_id: sid,
+                    flag: InventoryFlag::DroneBay,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.skills.entry(char_id).or_default().insert(
+                3436,
+                eve_db::TrainedSkillRecord {
+                    type_id: 3436,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+            (uid, sid)
+        });
+        let _ = ctx.db.acquire_online_lock_with_computer_hash(
+            uid,
+            char_id as u64,
+            Some(char_id),
+            None,
+            true,
+            1_785_100_000,
+        );
+        sys_h
+            .spawn_ball_with_combat(
+                Ball {
+                    id: sid,
+                    type_id: 587,
+                    position: DVec3::from_array([r_pos[0] + offset_x, 0.0, 0.0]),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 2_500.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: 500.0,
+                    max_shield_hp: 500.0,
+                    armor_hp: 500.0,
+                    max_armor_hp: 500.0,
+                    structure_hp: 500.0,
+                    max_structure_hp: 500.0,
+                    capacitor: 500.0,
+                    max_capacitor: 500.0,
+                    is_tethered: false,
+                    ..CombatState::default()
+                },
+            )
+            .await
+            .unwrap();
+        ctx.invalidate_ship_fitting(sid);
+        set_char_safety_level(&ctx, char_id, safety);
+        let mut sess = SessionState::new(char_id as u64);
+        sess.user_id = Some(uid);
+        sess.character_id = Some(char_id);
+        sess.solar_system_id = Some(sys_id);
+        sess.ship_id = Some(sid);
+        let kwargs = HashMap::new();
+        let PyRep::List(bids) = handle_npcs_drones(
+            &ctx,
+            &mut sess,
+            "ship",
+            "LaunchDrones",
+            &[PyRep::List(vec![PyRep::Integer(drone_id)])],
+            &kwargs,
+        )
+        .await
+        .unwrap()
+        .expect("LaunchDrones must succeed") else {
+            panic!("expected launched drone list");
+        };
+        (sess, sid, bids[0].as_i64().unwrap())
+    };
+
+    let (mut green_sess, green_ship, green_drone_bid) =
+        spawn_fleet_drone_pilot(green_char, "p104_green", 882_001, 1_100.0, SafetyLevel::Green).await;
+    let (mut red_sess, red_ship, red_drone_bid) =
+        spawn_fleet_drone_pilot(red_char, "p104_red", 882_002, 1_200.0, SafetyLevel::Red).await;
+
+    // Two high-HP destructible dungeon containers (16_757 and 23, both is_container: true, destructible: true).
+    let mut room = make_room(
+        1,
+        9730,
+        r_pos,
+        vec![
+            DungeonRuntimeObject {
+                type_id: 16_757,
+                name: "Angel Relay Cache".into(),
+                position: [r_pos[0] + 400.0, 0.0, 0.0],
+                radius: 150.0,
+                is_container: true,
+                destructible: true,
+                ..Default::default()
+            },
+            DungeonRuntimeObject {
+                type_id: DEFAULT_CONTAINER_TYPE_ID,
+                name: "Volatile Dungeon Box".into(),
+                position: [r_pos[0] + 500.0, 0.0, 0.0],
+                radius: 150.0,
+                is_container: true,
+                destructible: true,
+                ..Default::default()
+            },
+        ],
+        Vec::new(),
+    );
+    room.entered = true;
+    room.entered_unix = Some(1_785_100_000);
+
+    // P2-NEW-02 2-room instance: dst_cont in room[0] (CompleteDungeon at 10) vs src_cont in room[1] (net=10).
+    let mut xr0 = make_room(
+        1,
+        9731,
+        [r_pos[0] + 20_000.0, 0.0, 0.0],
+        vec![DungeonRuntimeObject {
+            type_id: DEFAULT_CONTAINER_TYPE_ID,
+            name: "Room 0 Dropoff".into(),
+            position: [r_pos[0] + 20_100.0, 0.0, 0.0],
+            radius: 150.0,
+            is_container: true,
+            ..Default::default()
+        }],
+        vec![make_trig(
+            1,
+            DungeonTriggerKind::OnCargoDelivered {
+                container_ball_id: None,
+                target_object_index: Some(0),
+                item_type_id: Some(34),
+                required_quantity: 10,
+            },
+            DungeonTriggerAction::CompleteDungeon,
+            false,
+        )],
+    );
+    xr0.entered = true;
+    xr0.entered_unix = Some(1_785_100_000);
+    let mut xr1 = make_room(
+        2,
+        9732,
+        [r_pos[0] + 30_000.0, 0.0, 0.0],
+        vec![DungeonRuntimeObject {
+            type_id: DEFAULT_CONTAINER_TYPE_ID,
+            name: "Room 1 Source".into(),
+            position: [r_pos[0] + 30_100.0, 0.0, 0.0],
+            radius: 150.0,
+            is_container: true,
+            ..Default::default()
+        }],
+        Vec::new(),
+    );
+    xr1.entered = true;
+    xr1.entered_unix = Some(1_785_100_000);
+
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(
+            inst_id,
+            DungeonRuntimeInstance {
+                instance_id: inst_id,
+                dungeon_id: 1,
+                solar_system_id: sys_id,
+                owner_char_id: owner_char,
+                base_position: r_pos,
+                rooms: vec![room],
+                created_unix: 1_785_100_000,
+                ..Default::default()
+            },
+        );
+        s.instances.insert(
+            inst_xroom,
+            DungeonRuntimeInstance {
+                instance_id: inst_xroom,
+                dungeon_id: 1,
+                solar_system_id: sys_id,
+                owner_char_id: owner_char,
+                base_position: [r_pos[0] + 20_000.0, 0.0, 0.0],
+                rooms: vec![xr0, xr1],
+                created_unix: 1_785_100_000,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mat = materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 0)
+        .await
+        .unwrap();
+    let (cont_16757, cont_23) = (mat.object_ids[0], mat.object_ids[1]);
+
+    // P2-NEW-01: AoE ball predicate includes live destructible type_id=23 dungeon containers,
+    // while non-dungeon regular type_id=23 jetcans stay false!
+    assert!(
+        is_combatant_ship_or_entity_ball(&ctx, cont_23, DEFAULT_CONTAINER_TYPE_ID),
+        "P2-NEW-01: live destructible dungeon container (type 23) must be eligible for AoE combat"
+    );
+    let plain_jetcan_id = 882_998i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            plain_jetcan_id,
+            InventoryItemRecord {
+                item_id: plain_jetcan_id,
+                type_id: DEFAULT_CONTAINER_TYPE_ID,
+                owner_id: owner_char,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    assert!(
+        !is_combatant_ship_or_entity_ball(&ctx, plain_jetcan_id, DEFAULT_CONTAINER_TYPE_ID),
+        "regular non-dungeon group 12 Cargo Container must remain ineligible for AoE combat"
+    );
+
+    for ship_id in [green_ship, red_ship] {
+        for tid in [cont_16757, cont_23] {
+            sys_h
+                .add_target_lock(
+                    ship_id,
+                    TargetLock {
+                        target_id: tid,
+                        lock_time_ms: 0.0,
+                        remaining_lock_ms: 0.0,
+                        locked: true,
+                        max_range_m: Some(50_000.0),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    let balls_before: std::collections::HashSet<i64> = sys_h
+        .list_balls()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|b| b.id)
+        .collect();
+    let kwargs = HashMap::new();
+    for (label, sess, drone_bid, char_id) in [
+        ("Green", &mut green_sess, green_drone_bid, green_char),
+        ("Red", &mut red_sess, red_drone_bid, red_char),
+    ] {
+        for (cid_label, cont_id) in [("16757", cont_16757), ("23", cont_23)] {
+            handle_npcs_drones(
+                &ctx,
+                sess,
+                "entity",
+                "CmdEngage",
+                &[PyRep::List(vec![PyRep::Integer(drone_bid)]), PyRep::Integer(cont_id)],
+                &kwargs,
+            )
+            .await
+            .unwrap()
+            .unwrap_or_else(|e| panic!("{label} CmdEngage on dungeon container {cid_label} must succeed: {e:?}"));
+            let _ = handle_npcs_drones(
+                &ctx,
+                sess,
+                "entity",
+                "CmdReturnAndOrbit",
+                &[PyRep::List(vec![PyRep::Integer(drone_bid)])],
+                &kwargs,
+            )
+            .await;
+            if let Ok(Some(mut cs)) = sys_h.get_combat_state(cont_id).await {
+                cs.shield_hp = 500.0;
+                let _ = sys_h.set_combat_state(cont_id, cs).await;
+            }
+        }
+        let now_unix = ctx.now_unix();
+        assert!(
+            is_npc_timer_active(&ctx, char_id, now_unix),
+            "{label} drone CmdEngage on destructible dungeon container must set NPC timer"
+        );
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let st = cw.get_or_create(char_id);
+        assert_eq!(st.pvp_timer_until_unix, 0, "{label} CmdEngage must NOT set PvP timer");
+        assert_eq!(st.suspect_flag_until_unix, 0, "{label} CmdEngage must NOT set Suspect flag");
+        assert_eq!(st.criminal_flag_until_unix, 0, "{label} CmdEngage must NOT set Criminal flag");
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.kill_rights.is_empty(), "drone engagement on dungeon container must create zero kill rights");
+    });
+    let spawned_during_engage: Vec<i64> = sys_h
+        .list_balls()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|b| b.id)
+        .filter(|id| !balls_before.contains(id))
+        .collect();
+    assert!(
+        spawned_during_engage.is_empty(),
+        "no CONCORD response balls may spawn when fleetmates engage destructible dungeon containers: {spawned_during_engage:?}"
+    );
+
+    // P2-NEW-02: cross-room src (room 1) -> dst (room 0, CompleteDungeon) transfer debits room 1 BEFORE completing room 0.
+    let xr_m0 = materialize_dungeon_room_entities(&ctx, sys_id, inst_xroom, 0)
+        .await
+        .unwrap();
+    let xr_m1 = materialize_dungeon_room_entities(&ctx, sys_id, inst_xroom, 1)
+        .await
+        .unwrap();
+    let (dst_r0, src_r1) = (xr_m0.object_ids[0], xr_m1.object_ids[0]);
+    on_dungeon_container_cargo_changed(&ctx, owner_char, Some(sys_id), 9_001, src_r1, 34, 10).await;
+    on_dungeon_container_cargo_changed(&ctx, owner_char, Some(sys_id), src_r1, dst_r0, 34, 10).await;
+    read_dungeon_runtime_store(&ctx, |s| {
+        let inst = &s.instances[&inst_xroom];
+        assert!(inst.completed && inst.rooms[0].triggers[0].fired);
+        assert!(
+            !inst.rooms[1].cargo_delivered_net.contains_key(&format!("{src_r1}:34")),
+            "P2-NEW-02: room[1] source debit must run before room[0] CompleteDungeon"
+        );
+        assert_eq!(inst.rooms[0].cargo_delivered_net.get(&format!("{dst_r0}:34")), Some(&10));
     });
 }
 

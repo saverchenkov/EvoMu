@@ -1028,17 +1028,14 @@ async fn activate_superweapon_with_args_inner(
             ));
         }
         let (vic_char_opt, is_p_struct) = ctx.db.with_snapshot(|snap| {
-            let vc = snap
-                .characters
-                .values()
-                .find(|c| c.active_ship_id == tid)
-                .map(|c| c.character_id)
-                .or_else(|| {
-                    snap.items
-                        .get(&tid)
-                        .map(|i| i.owner_id)
-                        .filter(|oid| snap.characters.contains_key(oid))
-                });
+            let vc = crate::services::combat_crimewatch::resolve_pvp_target_info_in_snap(
+                snap,
+                Some(sys_id),
+                tid,
+                false,
+                false,
+            )
+            .map(|(vcid, _)| vcid);
             let ps = snap.structures.contains_key(&tid);
             (vc, ps)
         });
@@ -1141,7 +1138,11 @@ async fn activate_superweapon_with_args_inner(
             .unwrap_or(default_fwd);
         if let Ok(balls) = sys.list_balls().await {
             for b in balls {
-                if b.id != ship_id && is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) {
+                if b.id != ship_id
+                    && crate::services::combat_crimewatch::combat_missiles_aoe::is_combatant_ship_or_entity_ball(
+                        ctx, b.id, b.type_id,
+                    )
+                {
                     let rel = b.position - ship_ball.position;
                     let al = rel.dot(beam_dir);
                     if (0.0..=beam_len).contains(&al) && (rel - beam_dir * al).length() <= beam_radius {
@@ -1381,7 +1382,18 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
         .values()
         .filter(|b| {
             b.id != cycle.ship_id
-                && is_combatant_ship_or_entity_ball(sde_opt.as_ref(), db_opt.as_ref(), b.id, b.type_id)
+                && (is_combatant_ship_or_entity_ball(
+                    sde_opt.as_ref(),
+                    db_opt.as_ref(),
+                    b.id,
+                    b.type_id,
+                ) || db_opt.as_ref().is_some_and(|db| {
+                    db.with_snapshot(|snap| {
+                        crate::services::pve_dungeon_runtime_hooks::is_live_destructible_dungeon_object_any_sys_in_snap(
+                            snap, b.id,
+                        )
+                    })
+                }))
         })
         .map(|b| (b.id, b.type_id, b.position))
         .collect();
