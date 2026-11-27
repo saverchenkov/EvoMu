@@ -3,7 +3,10 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use crate::combat::npc_ai::npc_test_helpers::{get_npc_entity, update_npc_entity};
+use crate::combat::npc_ai::npc_test_helpers::{
+    get_npc_entity, spawn_decloaked_transmission_relay_for_ctx, spawn_upgraded_avengers_for_ctx,
+    update_npc_entity,
+};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_type,
@@ -131,11 +134,8 @@ async fn spawn_missing_sde_warping_capital_non_cap_and_drifter_core_strength() {
         );
     });
 
-    let relay_bid = spawn_decloaked_transmission_relay_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
+    let relay_bid = spawn_decloaked_transmission_relay_for_ctx(
+        &ctx,
         wh_sys,
         "C5-EDGE-1",
         [0.0, 0.0, 0.0],
@@ -164,23 +164,11 @@ async fn spawn_missing_sde_warping_capital_non_cap_and_drifter_core_strength() {
     let sde_mut = Arc::make_mut(&mut ctx.sde);
     sde_mut.types.remove(&37_472);
     sde_mut.types.remove(&41_589);
-    assert!(spawn_upgraded_avengers_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
-        wh_sys,
-        6,
-        DVec3::ZERO,
-        2,
-    )
-    .await
-    .is_empty());
-    assert!(spawn_decloaked_transmission_relay_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
+    assert!(spawn_upgraded_avengers_for_ctx(&ctx, wh_sys, 6, DVec3::ZERO, 2)
+        .await
+        .is_empty());
+    assert!(spawn_decloaked_transmission_relay_for_ctx(
+        &ctx,
         wh_sys,
         "C5-EDGE-1",
         [0.0, 0.0, 0.0],
@@ -332,17 +320,7 @@ async fn step_wormhole_pve_system_warping_cap_grid_leave_armor_attack_and_drifte
         .unwrap();
 
     // Pre-spawn Avengers tracked on active_escalation_capitals with cap_id currently > 100km from warp_in_pos -> despawns Avengers!
-    let avengers = spawn_upgraded_avengers_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
-        wh_sys,
-        5,
-        DVec3::ZERO,
-        0,
-    )
-    .await;
+    let avengers = spawn_upgraded_avengers_for_ctx(&ctx, wh_sys, 5, DVec3::ZERO, 0).await;
     assert_eq!(avengers.len(), 3);
 
     sys_h
@@ -415,11 +393,8 @@ async fn step_wormhole_pve_system_warping_cap_grid_leave_armor_attack_and_drifte
     });
 
     // Relay 1: damaged armor triggers Drifter; Relay 2: missing ball triggers Drifter; Drifter already in Warp skips re-warp
-    let relay_armor = spawn_decloaked_transmission_relay_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
+    let relay_armor = spawn_decloaked_transmission_relay_for_ctx(
+        &ctx,
         wh_sys,
         "SITE-MAIN",
         site_origin,
@@ -432,11 +407,8 @@ async fn step_wormhole_pve_system_warping_cap_grid_leave_armor_attack_and_drifte
     let _ = sys_h.set_combat_state(relay_armor, cs_armor).await;
 
     // Spawn a triggered relay + Drifter already in MovementMode::Warp -> elapsed_s >= 240.0 should NOT reset spawn_position
-    let relay_for_warp = spawn_decloaked_transmission_relay_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
+    let relay_for_warp = spawn_decloaked_transmission_relay_for_ctx(
+        &ctx,
         wh_sys,
         "SITE-WARP",
         [2_000.0, 0.0, 0.0],
@@ -515,17 +487,7 @@ async fn on_asteroid_mined_noops_and_downtime_preserves_non_wh_and_distant_aster
     // No sites registered -> no-op
     on_asteroid_mined_in_system(&ctx, wh_sys, char_id);
 
-    let avengers = spawn_upgraded_avengers_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
-        wh_sys,
-        5,
-        DVec3::ZERO,
-        0,
-    )
-    .await;
+    let avengers = spawn_upgraded_avengers_for_ctx(&ctx, wh_sys, 5, DVec3::ZERO, 0).await;
 
     with_pve_exploration_reg(&ctx, |reg| {
         reg.sites_by_system.insert(

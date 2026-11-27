@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use crate::combat::npc_ai::npc_test_helpers::get_npc_entity;
+use crate::combat::npc_ai::npc_test_helpers::{get_npc_entity, spawn_sleeper_wave_with_sde_for_ctx};
 use crate::router::ServerContext;
 use crate::services::pve_exploration::SpewedLootCan;
 use eve_db::clock::VirtualServerClock;
@@ -214,11 +214,10 @@ async fn ded_wreck_bands_sleeper_rep_attributes_and_empty_sde_fallbacks() {
     custom_sde.types.insert(30215, rep_sleeper);
 
     let custom_sde_arc = Arc::new(custom_sde);
-    let spawned = spawn_sleeper_wave_core(
-        &ctx_empty.systems,
-        &ctx_empty.db,
+    let spawned = spawn_sleeper_wave_with_sde_for_ctx(
+        &ctx_empty,
         &custom_sde_arc,
-        &ctx_empty.combat_ephemeral,
+        &ctx_empty,
         sys_id,
         1,
         1,

@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::combat::npc_ai::npc_test_helpers::handle_pve_site_npc_destruction_for_ctx;
 use crate::router::cache_notifications::PendingMachoNotification;
 use crate::services::pve_exploration_extra_unit_tests::{make_ctx_and_session, shared_sde};
 use eve_db::{FleetRecord, OwnerNoteRecord};
@@ -415,33 +416,11 @@ async fn npc_destruction_core_wormhole_combat_multiwave_and_advance_guards() {
     });
 
     // Kill non-trigger NPC (index 1) -> returns (None, None, None) because trigger 891_000_001 remains
-    let res1 = handle_pve_site_npc_destruction_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.mechanic_rng,
-        &ctx.combat_ephemeral,
-        wh_sys,
-        891_000_002,
-        cid,
-        true,
-    )
-    .await;
+    let res1 = handle_pve_site_npc_destruction_for_ctx(&ctx, wh_sys, 891_000_002, cid, true).await;
     assert_eq!(res1.0, None);
 
     // Kill final NPC (index 0) -> wave_cleared & final wave -> clears site, drops blue loot & spawns C5 relay
-    let res2 = handle_pve_site_npc_destruction_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.mechanic_rng,
-        &ctx.combat_ephemeral,
-        wh_sys,
-        891_000_001,
-        cid,
-        false,
-    )
-    .await;
+    let res2 = handle_pve_site_npc_destruction_for_ctx(&ctx, wh_sys, 891_000_001, cid, false).await;
     assert_eq!(res2.0.as_deref(), Some("WH-C5-EDGE"));
 
     // RPC dispatch edges: NotInSpace fallback, GetDungeonShipRestrictions variants, GetCombatAnomalyInstances filter,

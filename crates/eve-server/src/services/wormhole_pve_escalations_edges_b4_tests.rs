@@ -3,6 +3,9 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::combat::npc_ai::npc_test_helpers::{
+    spawn_decloaked_transmission_relay_for_ctx, spawn_upgraded_avengers_for_ctx,
+};
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_ctx_and_session;
 use crate::services::pve_exploration::{with_pve_exploration_reg, PveSiteInstance};
 use eve_db::clock::VirtualServerClock;
@@ -54,18 +57,9 @@ async fn missing_sde_types_and_empty_registry_early_returns() {
     let wh_sys: SolarSystemId = 31_000_005;
 
     // spawn_upgraded_avengers_core returns empty when type 37_472 missing from SDE
-    assert!(spawn_upgraded_avengers_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
-        wh_sys,
-        5,
-        DVec3::ZERO,
-        0,
-    )
-    .await
-    .is_empty());
+    assert!(spawn_upgraded_avengers_for_ctx(&ctx, wh_sys, 5, DVec3::ZERO, 0)
+        .await
+        .is_empty());
 
     // Empty registry downtime maintenance returns 0
     assert_eq!(process_wormhole_sites_on_downtime(&ctx), 0);
@@ -88,11 +82,8 @@ async fn missing_sde_types_and_empty_registry_early_returns() {
         );
     });
     // Missing relay type 41_589 in empty SDE -> returns None
-    assert!(spawn_decloaked_transmission_relay_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
+    assert!(spawn_decloaked_transmission_relay_for_ctx(
+        &ctx,
         wh_sys,
         "C6-NO-SDE",
         [0.0, 0.0, 0.0],

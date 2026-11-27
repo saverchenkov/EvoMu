@@ -2421,7 +2421,7 @@ async fn cmb51_npc_spawn_ai_step_via_actor_mailbox_applies_damage_and_skips_non_
         .await
         .expect("spawn_group");
     let npc_bid = spawned[0];
-    ctx.npc_spawns.write().unwrap().insert(sys_id, mgr);
+    crate::combat::npc_ai::npc_test_helpers::insert_npc_spawn_manager(&ctx, sys_id, mgr);
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let npc_pos = sys_handle.view().ball_position(npc_bid).expect("npc position on view");

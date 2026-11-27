@@ -302,15 +302,15 @@ async fn destroy_specialized_npc_sleeper_wormhole_pochven_roguedrone_trig_edenco
 
 mod w4_ops_pve_mut_extra_tests {
     use crate::combat::npc_ai::npc_test_helpers::{
-        get_npc_entity, has_npc_entity, npc_entity_ids, remove_npc_entity, seed_npc_entity,
-        update_npc_entity,
+        get_npc_entity, has_npc_entity, is_ship_npc_scrambled, npc_entity_ids, remove_npc_entity,
+        seed_npc_entity, update_npc_entity,
     };
     use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
         make_fighter_ctx_and_session, make_fighter_type,
     };
     use crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity;
     use crate::services::combat_crimewatch::combat_npc_ai::*;
-    use crate::services::combat_crimewatch::{with_combat_ephemeral, DroneSpaceState};
+    use crate::services::combat_crimewatch::DroneSpaceState;
     use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
     use glam::DVec3;
 
@@ -577,9 +577,7 @@ mod w4_ops_pve_mut_extra_tests {
         assert_eq!(get_npc_entity(&ctx, sle_healer).unwrap().entropic_cycles, 0); // reset on switch!
         assert!(!get_npc_entity(&ctx, seek_id).unwrap().drifter_doomsday_fired);
         assert!(get_npc_entity(&ctx, boss_id).unwrap().drifter_doomsday_fired);
-        with_combat_ephemeral(&ctx, |rt| {
-            assert!(rt.npc_scrambled_ships.get(&sys_id).is_some_and(|s| s.contains(&ship_id)));
-        });
+        assert!(is_ship_npc_scrambled(&ctx, sys_id, ship_id));
         // Ship was scrammed by C3 sleeper; sle_mate healed, sle_other_grp did NOT heal!
         let cs_mate = sys_h.get_combat_state(sle_mate).await.unwrap().unwrap();
         let cs_other = sys_h.get_combat_state(sle_other_grp).await.unwrap().unwrap();
@@ -594,9 +592,7 @@ mod w4_ops_pve_mut_extra_tests {
         }
         let _ = sys_h.remove_ball(sle_healer).await;
         step_extended_npc_ai(&ctx, sys_id).await;
-        with_combat_ephemeral(&ctx, |rt| {
-            assert!(!rt.npc_scrambled_ships.get(&sys_id).is_some_and(|s| s.contains(&ship_id)));
-        });
+        assert!(!is_ship_npc_scrambled(&ctx, sys_id, ship_id));
 
         // Destroy boss_id WITHOUT ball in ballpark via destroy_specialized_npc_with_hint!
         let _ = sys_h.remove_ball(boss_id).await;

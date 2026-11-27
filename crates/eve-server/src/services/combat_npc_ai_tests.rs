@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::combat::npc_ai::npc_test_helpers::{
-    get_npc_entity, has_npc_entity, seed_npc_entity, update_npc_entity,
+    get_npc_entity, has_clone_soldier_cooldown, has_npc_entity, has_npc_scrambled_ships_in_system,
+    seed_npc_entity, seed_npc_scrambled_ships, update_npc_entity,
 };
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_type,
@@ -318,9 +319,7 @@ async fn spawn_threat_ai_step_and_destroy_specialized_npc_loot_and_bounties() {
         destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, clone_id, char_id).await;
     assert!(wreck_clone > 0);
     assert!((bounty_clone - 250_000.0).abs() < 1e-2);
-    with_combat_ephemeral(&ctx, |rt| {
-        assert!(rt.clone_soldier_cooldown_until.contains_key(&sys_id));
-    });
+    assert!(has_clone_soldier_cooldown(&ctx, sys_id));
 
     // Destroy Hauler -> drops mineral types [34, 35, 36, 3828] with 50,000 qty for 34/35
     let (wreck_hauler, _bounty_hauler, drops_hauler) =
@@ -673,17 +672,12 @@ async fn step_ai_scram_cleanup_stale_target_reset_and_slim_meta_field_coverage()
         )
         .await
         .unwrap();
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        rt.npc_scrambled_ships
-            .insert(scram_sys, [scram_ship].into_iter().collect());
-    });
+    seed_npc_scrambled_ships(&ctx, scram_sys, [scram_ship]);
     step_extended_npc_ai(&ctx, scram_sys).await;
-    with_combat_ephemeral(&ctx, |rt| {
-        assert!(
-            !rt.npc_scrambled_ships.contains_key(&scram_sys),
-            "empty-NPC system must still clear stale scram tracking"
-        );
-    });
+    assert!(
+        !has_npc_scrambled_ships_in_system(&ctx, scram_sys),
+        "empty-NPC system must still clear stale scram tracking"
+    );
     assert_eq!(
         scram_handle
             .get_combat_state(scram_ship)

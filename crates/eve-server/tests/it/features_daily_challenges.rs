@@ -2599,21 +2599,26 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
     // 1a (`F-04` regression): 1 Hz `NpcSpawnManager::handle_npc_destroyed` in null-sec splits bounties into
     // `ess_main_bank` + `ess_reserve_bank` and records `pilot_c` in `ess_main_bank_contributors`!
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    let first_belt_rat = ctx.npc_spawns.read().unwrap()[&sys_id]
-        .entities
-        .values()
-        .filter(|e| e.bounty_isk > 0.0)
-        .min_by_key(|e| e.ball_id)
-        .expect("spawned null-sec belt rat with positive bounty")
-        .ball_id;
-    let belt_rat_bounty = ctx
-        .npc_spawns
-        .write()
-        .unwrap()
-        .get_mut(&sys_id)
-        .unwrap()
-        .handle_npc_destroyed(&ctx, sys_id, first_belt_rat, pilot_c, ctx.now_unix())
-        .expect("1 Hz handle_npc_destroyed in null-sec");
+    let first_belt_rat = eve_server::combat::npc_ai::npc_test_helpers::with_npc_spawn_manager(
+        &ctx,
+        sys_id,
+        |m| {
+            m.entities
+                .values()
+                .filter(|e| e.bounty_isk > 0.0)
+                .min_by_key(|e| e.ball_id)
+                .expect("spawned null-sec belt rat with positive bounty")
+                .ball_id
+        },
+    )
+    .unwrap();
+    let belt_rat_bounty = eve_server::combat::npc_ai::npc_test_helpers::with_mut_npc_spawn_manager(
+        &ctx,
+        sys_id,
+        |m| m.handle_npc_destroyed(&ctx, sys_id, first_belt_rat, pilot_c, ctx.now_unix()),
+    )
+    .unwrap()
+    .expect("1 Hz handle_npc_destroyed in null-sec");
     assert!(belt_rat_bounty > 0.0);
     let (c_bal_direct, main_from_1hz, res_from_1hz, c_contrib) = ctx.db.with_snapshot(|s| {
         let st = &s.system_states[&sys_id];

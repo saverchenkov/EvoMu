@@ -5,7 +5,7 @@
 use super::super::*;
 use super::make_test_npc_entity;
 use crate::combat::npc_ai::npc_test_helpers::{
-    get_npc_entity, has_npc_entity, remove_npc_entity, seed_npc_entity,
+    get_npc_entity, has_npc_entity, remove_npc_entity, seed_destroyed_npc_cache, seed_npc_entity,
 };
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_type,
@@ -179,9 +179,7 @@ async fn destroy_npc_cache_fallback_custom_loot_tag_bounty_dedup_and_threat_noop
     cached.bounty_isk = 400_000.0;
     cached.tag_drop_type_id = Some(35); // Pyerite tag stand-in
     cached.custom_cargo_loot = Some((36, 77)); // Mexallon
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        rt.destroyed_npc_cache.insert(cached_ball, cached);
-    });
+    seed_destroyed_npc_cache(&ctx, cached_ball, cached);
 
     let (wreck_id, bounty1, drops) =
         destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, cached_ball, char_id).await;

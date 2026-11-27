@@ -2,14 +2,15 @@
 
 #![forbid(unsafe_code)]
 
-use crate::combat::npc_ai::npc_test_helpers::has_npc_entity;
+use crate::combat::npc_ai::npc_test_helpers::{
+    has_npc_entity, spawn_decloaked_transmission_relay_for_ctx,
+};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_ctx_and_session;
 use crate::services::pve_exploration::{with_pve_exploration_reg, PveSiteInstance};
 use crate::services::wormhole_pve_escalations::{
     on_asteroid_mined_in_system, on_decloaked_relay_attacked_sync,
-    process_wormhole_sites_on_downtime, spawn_decloaked_transmission_relay_core,
-    step_wormhole_pve_system,
+    process_wormhole_sites_on_downtime, step_wormhole_pve_system,
 };
 use eve_db::{
     AsteroidRecord, CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag, InventoryItemRecord,
@@ -105,11 +106,8 @@ async fn relay_qualification_capital_detection_arithmos_vs_hyleus_and_roaming_wa
     });
 
     for non_qual in ["NON-EXISTENT", "C4-COMBAT", "C5-GAS"] {
-        assert!(spawn_decloaked_transmission_relay_core(
-            &ctx.systems,
-            &ctx.db,
-            &ctx.sde,
-            &ctx.combat_ephemeral,
+        assert!(spawn_decloaked_transmission_relay_for_ctx(
+            &ctx,
             wh_sys,
             non_qual,
             [0.0, 0.0, 0.0]
@@ -118,22 +116,16 @@ async fn relay_qualification_capital_detection_arithmos_vs_hyleus_and_roaming_wa
         .is_none());
     }
 
-    let subcap_relay = spawn_decloaked_transmission_relay_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
+    let subcap_relay = spawn_decloaked_transmission_relay_for_ctx(
+        &ctx,
         wh_sys,
         "C5-RELIC-SUBCAP",
         [200_000.0, 0.0, 0.0],
     )
     .await
     .expect("C5 Relic site spawns relay");
-    assert!(spawn_decloaked_transmission_relay_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
+    assert!(spawn_decloaked_transmission_relay_for_ctx(
+        &ctx,
         wh_sys,
         "C5-RELIC-SUBCAP",
         [200_000.0, 0.0, 0.0],
@@ -160,11 +152,8 @@ async fn relay_qualification_capital_detection_arithmos_vs_hyleus_and_roaming_wa
             mode: MovementMode::Stop,
         })
         .await;
-    let cap_relay = spawn_decloaked_transmission_relay_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
+    let cap_relay = spawn_decloaked_transmission_relay_for_ctx(
+        &ctx,
         wh_sys,
         "C6-COMBAT-CAP",
         [800_000.0, 0.0, 0.0],
@@ -675,12 +664,14 @@ fn ops_sentry_stats_npc_builder_and_drifter_boss_configuration_kill_mutations() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn escalations_edge_branches_caps_bubble_scram_warping_guard_shattered_and_downtime_boundaries() {
+    use crate::combat::npc_ai::npc_test_helpers::{
+        spawn_decloaked_transmission_relay_for_ctx, spawn_upgraded_avengers_with_sde_for_ctx,
+    };
     use crate::router::ServerContext;
     use crate::services::pve_exploration::{with_pve_exploration_reg, PveSiteInstance};
     use crate::services::wormhole_pve_escalations::{
         on_asteroid_mined_in_system, on_decloaked_relay_attacked_sync,
-        process_wormhole_sites_on_downtime, spawn_decloaked_transmission_relay_core,
-        spawn_upgraded_avengers_core, step_wormhole_pve_system,
+        process_wormhole_sites_on_downtime, step_wormhole_pve_system,
     };
     use eve_db::clock::{ServerClock, VirtualServerClock};
     use eve_db::WorldRepository;
@@ -702,11 +693,9 @@ async fn escalations_edge_branches_caps_bubble_scram_warping_guard_shattered_and
     // 1. spawn_upgraded_avengers_core returns empty when type 37472 missing from SDE
     let mut empty_sde = (*sde).clone();
     empty_sde.types.remove(&37_472);
-    let av_empty = spawn_upgraded_avengers_core(
-        &ctx.systems,
-        &ctx.db,
+    let av_empty = spawn_upgraded_avengers_with_sde_for_ctx(
+        &ctx,
         &Arc::new(empty_sde),
-        &ctx.combat_ephemeral,
         wh_c5,
         5,
         DVec3::ZERO,
@@ -812,14 +801,14 @@ async fn escalations_edge_branches_caps_bubble_scram_warping_guard_shattered_and
         );
     });
 
-    assert!(spawn_decloaked_transmission_relay_core(
-        &ctx.systems, &ctx.db, &ctx.sde, &ctx.combat_ephemeral, wh_c5, "MISSING-SITE", [0.0; 3]
+    assert!(spawn_decloaked_transmission_relay_for_ctx(
+        &ctx, wh_c5, "MISSING-SITE", [0.0; 3]
     ).await.is_none());
-    assert!(spawn_decloaked_transmission_relay_core(
-        &ctx.systems, &ctx.db, &ctx.sde, &ctx.combat_ephemeral, wh_c3, "C3-SITE", c3_pos
+    assert!(spawn_decloaked_transmission_relay_for_ctx(
+        &ctx, wh_c3, "C3-SITE", c3_pos
     ).await.is_none());
-    assert!(spawn_decloaked_transmission_relay_core(
-        &ctx.systems, &ctx.db, &ctx.sde, &ctx.combat_ephemeral, wh_c5, "C5-ORE", ore_pos
+    assert!(spawn_decloaked_transmission_relay_for_ctx(
+        &ctx, wh_c5, "C5-ORE", ore_pos
     ).await.is_none());
     assert!(on_decloaked_relay_attacked_sync(&ctx, wh_c5, 999_999_999).is_none());
 

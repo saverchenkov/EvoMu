@@ -1,7 +1,10 @@
 //! Unit and integration tests for `pve_exploration_sites`.
 
 use super::*;
-use crate::combat::npc_ai::npc_test_helpers::{get_npc_entity, has_npc_entity, npc_entity_count};
+use crate::combat::npc_ai::npc_test_helpers::{
+    get_npc_entity, handle_pve_site_npc_destruction_for_ctx, has_npc_entity, npc_entity_count,
+    spawn_sleeper_wave_with_sde_for_ctx,
+};
 use crate::router::ServerContext;
 use crate::services::pve_exploration::{
     ensure_system_pve_sites_seeded, handle_pve_exploration, read_pve_exploration_reg,
@@ -145,11 +148,10 @@ async fn test_spewed_cans_ded_wrecks_and_sleeper_waves() {
     assert_eq!(w1_balls.len(), 4);
     assert_eq!(w2_balls.len(), 3);
 
-    let w3_balls = spawn_sleeper_wave_core(
-        &ctx.systems,
-        &ctx.db,
+    let w3_balls = spawn_sleeper_wave_with_sde_for_ctx(
+        &ctx,
         &ctx.sde,
-        &ctx_rehydrated.combat_ephemeral,
+        &ctx_rehydrated,
         sys_id,
         5,
         2,
@@ -406,11 +408,10 @@ async fn empty_sde_wrecks_multi_cans_and_sleeper_remote_rep_attributes() {
     t.default_attributes.insert(68, 250.0); // remote shield rep
     t.default_attributes.insert(84, 180.0); // remote armor rep
     rep_sde.types.insert(trigger_tid, t);
-    let balls = spawn_sleeper_wave_core(
-        &ctx.systems,
-        &ctx.db,
+    let balls = spawn_sleeper_wave_with_sde_for_ctx(
+        &ctx,
         &Arc::new(rep_sde),
-        &ctx.combat_ephemeral,
+        &ctx,
         sys_id,
         4,
         1,
@@ -996,18 +997,8 @@ async fn cleared_preceding_site_does_not_shadow_active_wave2_writeback_or_gate_l
     // 3. Killing Wave-2 NPCs clears active_third_id + its canonical anomaly and signature.
     for (idx, bid) in wave2_balls.iter().enumerate() {
         let _ = sys_handle.remove_ball(*bid).await;
-        let (cleared_opt, _, _) = handle_pve_site_npc_destruction_core(
-            &ctx.systems,
-            &ctx.db,
-            &ctx.sde,
-            &ctx.mechanic_rng,
-            &*ctx.combat_ephemeral,
-            sys_id,
-            *bid,
-            char_id,
-            false,
-        )
-        .await;
+        let (cleared_opt, _, _) =
+            handle_pve_site_npc_destruction_for_ctx(&ctx, sys_id, *bid, char_id, false).await;
         if idx + 1 == wave2_balls.len() {
             assert_eq!(cleared_opt.as_deref(), Some(active_third_id));
         } else {
@@ -1314,32 +1305,14 @@ async fn expired_unpruned_sites_reject_and_prune_on_npc_kill_and_gate_advance() 
     clock.advance_secs(4_000);
 
     // Case 1 & 2: Killing Wave-1 or final-wave NPC in expired site must return None, spawn no Wave 2, drop no loot, and prune site/balls.
-    let res1 = handle_pve_site_npc_destruction_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.mechanic_rng,
-        &*ctx.combat_ephemeral,
-        sys_id,
-        npc_kill_wave1,
-        char_id,
-        false,
-    )
-    .await;
+    let res1 =
+        handle_pve_site_npc_destruction_for_ctx(&ctx, sys_id, npc_kill_wave1, char_id, false)
+            .await;
     assert!(res1.0.is_none() && res1.1.is_none() && res1.2.is_none());
 
-    let res2 = handle_pve_site_npc_destruction_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.mechanic_rng,
-        &*ctx.combat_ephemeral,
-        sys_id,
-        npc_kill_final,
-        char_id,
-        false,
-    )
-    .await;
+    let res2 =
+        handle_pve_site_npc_destruction_for_ctx(&ctx, sys_id, npc_kill_final, char_id, false)
+            .await;
     assert!(res2.0.is_none() && res2.1.is_none() && res2.2.is_none());
 
     // Case 3: Gate / wave advance on expired site must reject with SiteExpired and prune site + live NPC ball.
@@ -1349,12 +1322,8 @@ async fn expired_unpruned_sites_reject_and_prune_on_npc_kill_and_gate_advance() 
     assert_eq!(gate_err.code, "SiteExpired");
 
     // Case 4: Active-lifetime_seconds==0 site linked to an expired EscalatingPathEntry must reject on NPC kill and prune escalation + bookmark + ball.
-    let res4 = handle_pve_site_npc_destruction_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.mechanic_rng,
-        &*ctx.combat_ephemeral,
+    let res4 = handle_pve_site_npc_destruction_for_ctx(
+        &ctx,
         sys_id,
         npc_linked_esc_expired,
         char_id,
@@ -2155,12 +2124,8 @@ async fn concurrent_npc_destruction_and_gate_advance_preserve_wave_next_balls() 
         let (ctx_kill, b_kill) = (Arc::clone(&ctx), Arc::clone(&barrier));
         let h_kill = tokio::spawn(async move {
             b_kill.wait().await;
-            handle_pve_site_npc_destruction_core(
-                &ctx_kill.systems,
-                &ctx_kill.db,
-                &ctx_kill.sde,
-                &ctx_kill.mechanic_rng,
-                &*ctx_kill.combat_ephemeral,
+            handle_pve_site_npc_destruction_for_ctx(
+                &ctx_kill,
                 sys_id,
                 last_npc_id,
                 char_id,

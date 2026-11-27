@@ -1,7 +1,9 @@
 //! Unit and mutation-killing tests for `combat_npc_encounters`.
 
 use super::*;
-use crate::combat::npc_ai::npc_test_helpers::seed_npc_entity;
+use crate::combat::npc_ai::npc_test_helpers::{
+    handle_npc_destroyed_in_space_for_ctx, seed_npc_entity,
+};
 use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::get_container_lifetime;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
@@ -51,16 +53,7 @@ async fn multi_wave_encounter_site_spawns_progresses_and_completes_on_trigger_ki
     let auto_wave1 =
         create_encounter_wave_site(&ctx, 88, sys_id, 10_001, 2, DVec3::ZERO).await;
     assert_eq!(auto_wave1.len(), 2);
-    handle_npc_destroyed_in_space(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
-        sys_id,
-        auto_wave1[0],
-        Some(90_000_001),
-    )
-    .await;
+    handle_npc_destroyed_in_space_for_ctx(&ctx, sys_id, auto_wave1[0], Some(90_000_001)).await;
 }
 
 #[test]

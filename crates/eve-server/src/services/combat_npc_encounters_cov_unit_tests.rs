@@ -10,8 +10,11 @@
 
 use super::*;
 use crate::combat::crimewatch_tail_test_helpers::sec_status_txs;
-use crate::combat::npc_ai::npc_test_helpers::{seed_npc_entity, update_npc_entity};
-use crate::combat::npc_ai::{NpcAiState, NpcCombatEntity, NpcSpawnManager};
+use crate::combat::npc_ai::npc_test_helpers::{
+    handle_npc_destroyed_in_space_for_ctx, seed_npc_entity, update_npc_entity,
+    with_npc_spawn_manager, with_or_insert_npc_spawn_manager,
+};
+use crate::combat::npc_ai::{NpcAiState, NpcCombatEntity};
 use crate::living_world::{LivingWorldConvoy, NpcArchetype};
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
@@ -135,16 +138,7 @@ async fn wave_creation_spawn_groups_trigger_and_empty_wave_advancement_and_space
     drifter.sleeper_wh_class = 5;
     seed_npc_entity(&ctx, drifter);
 
-    handle_npc_destroyed_in_space(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
-        sys_id,
-        space_w1[0],
-        Some(char_id),
-    )
-    .await;
+    handle_npc_destroyed_in_space_for_ctx(&ctx, sys_id, space_w1[0], Some(char_id)).await;
 
     // Stage 4 suppression gives 100,000 * 1.20 = 120,000 pending bounty + sec status gain!
     let pending = ctx
@@ -161,16 +155,7 @@ async fn wave_creation_spawn_groups_trigger_and_empty_wave_advancement_and_space
     update_npc_entity(&ctx, space_w2_trigger, |n| {
         n.bounty_isk = 50_000.0;
     });
-    handle_npc_destroyed_in_space(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
-        sys_id,
-        space_w2_trigger,
-        Some(char_id),
-    )
-    .await;
+    handle_npc_destroyed_in_space_for_ctx(&ctx, sys_id, space_w2_trigger, Some(char_id)).await;
 
     // Kill all wave 3 balls with killer_char_id = None -> marks encounter 4 completed without crediting bounty;
     // also verify Sleeper archetype does not credit pending_bounty_ticks!
@@ -181,27 +166,9 @@ async fn wave_creation_spawn_groups_trigger_and_empty_wave_advancement_and_space
     let bounty_before = ctx
         .db
         .with_snapshot(|snap| snap.combat_crimewatch_state.pending_bounty_ticks[&(sys_id, char_id)]);
-    handle_npc_destroyed_in_space(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
-        sys_id,
-        888_901,
-        Some(char_id),
-    )
-    .await;
+    handle_npc_destroyed_in_space_for_ctx(&ctx, sys_id, 888_901, Some(char_id)).await;
     for bid in w3_ids {
-        handle_npc_destroyed_in_space(
-            &ctx.systems,
-            &ctx.db,
-            &ctx.sde,
-            &ctx.combat_ephemeral,
-            sys_id,
-            bid,
-            None,
-        )
-        .await;
+        handle_npc_destroyed_in_space_for_ctx(&ctx, sys_id, bid, None).await;
     }
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
@@ -407,9 +374,7 @@ async fn drops_convoys_spawn_groups_cycle_finalize_and_kill_progression_all_bran
     }
 
     // 1. NpcSpawnManager respawn timer: 2 entities in group 9 -> 1st kill keeps timer empty, 2nd kill sets +1200s!
-    {
-        let mut spawns = ctx.npc_spawns.write().unwrap();
-        let mgr = spawns.entry(sys_id).or_insert_with(NpcSpawnManager::new);
+    with_or_insert_npc_spawn_manager(&ctx, sys_id, |mgr| {
         for bid in [960_001_i64, 960_002] {
             mgr.entities.insert(
                 bid,
@@ -432,7 +397,7 @@ async fn drops_convoys_spawn_groups_cycle_finalize_and_kill_progression_all_bran
                 },
             );
         }
-    }
+    });
     let wreck_id = 970_001_i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -442,9 +407,15 @@ async fn drops_convoys_spawn_groups_cycle_finalize_and_kill_progression_all_bran
     });
     let mut dropped = Vec::new();
     populate_npc_wreck_on_turret_kill(&ctx, sys_id, 960_001, 945_030, DVec3::ZERO, wreck_id, char_id, &mut dropped).await;
-    assert!(!ctx.npc_spawns.read().unwrap()[&sys_id].respawn_timers.contains_key(&(sys_id, 9)));
+    assert!(!with_npc_spawn_manager(&ctx, sys_id, |m| {
+        m.respawn_timers.contains_key(&(sys_id, 9))
+    })
+    .unwrap());
     populate_npc_wreck_on_turret_kill(&ctx, sys_id, 960_002, 945_030, DVec3::ZERO, wreck_id, char_id, &mut dropped).await;
-    assert!(ctx.npc_spawns.read().unwrap()[&sys_id].respawn_timers.contains_key(&(sys_id, 9)));
+    assert!(with_npc_spawn_manager(&ctx, sys_id, |m| {
+        m.respawn_timers.contains_key(&(sys_id, 9))
+    })
+    .unwrap());
 
     // 2. LivingWorldConvoy kills: wreck_id > 0 (drops convoy cargo & defaults to "Hauler") vs wreck_id == 0 (interdicts)!
     for (cid, wid) in [(960_010_i64, wreck_id), (960_011, 0)] {

@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use crate::combat::npc_ai::npc_test_helpers::{remove_npc_entity, seed_npc_entity};
+use crate::combat::npc_ai::npc_test_helpers::{
+    handle_npc_destroyed_in_space_for_ctx, remove_npc_entity, seed_npc_entity,
+};
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{ExtendedNpcEntity, with_mut_combat_runtime};
 use eve_db::{CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents};
@@ -83,16 +85,7 @@ async fn handle_destroyed_dedup_wh_zero_bounty_and_wave_advancement_without_npc(
     .await;
     if let Some(&bid) = spawned_balls.first() {
         remove_npc_entity(&ctx, bid);
-        handle_npc_destroyed_in_space(
-            &ctx.systems,
-            &ctx.db,
-            &ctx.sde,
-            &ctx.combat_ephemeral,
-            sys_id,
-            bid,
-            Some(cid),
-        )
-        .await;
+        handle_npc_destroyed_in_space_for_ctx(&ctx, sys_id, bid, Some(cid)).await;
     }
 
     // 2. Duplicate bounty_credited_balls guard, wormhole (>=31_000_000) skip, bounty_isk <= 0 skip, killer == 0 skip
@@ -117,16 +110,7 @@ async fn handle_destroyed_dedup_wh_zero_bounty_and_wave_advancement_without_npc(
         (sys_id, zero_killer_npc, Some(0)),
         (sys_id, dup_npc, Some(cid)),
     ] {
-        handle_npc_destroyed_in_space(
-            &ctx.systems,
-            &ctx.db,
-            &ctx.sde,
-            &ctx.combat_ephemeral,
-            s,
-            bid,
-            killer,
-        )
-        .await;
+        handle_npc_destroyed_in_space_for_ctx(&ctx, s, bid, killer).await;
     }
 
     let has_pending = ctx.db.with_snapshot(|snap| {

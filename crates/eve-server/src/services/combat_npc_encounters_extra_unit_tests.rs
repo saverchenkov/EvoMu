@@ -5,7 +5,9 @@
 use std::sync::Arc;
 
 use crate::combat::crimewatch_tail_test_helpers::sec_status_txs;
-use crate::combat::npc_ai::npc_test_helpers::seed_npc_entity;
+use crate::combat::npc_ai::npc_test_helpers::{
+    handle_npc_destroyed_in_space_for_ctx, seed_npc_entity,
+};
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
@@ -14,7 +16,7 @@ use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
 use crate::services::combat_npc_encounters::{
     create_encounter_wave_site, finalize_cycle_destroyed_npcs, flush_npc_bounty_tick,
-    handle_npc_destroyed_in_space, populate_npc_wreck_on_turret_kill, record_npc_kill_progression,
+    populate_npc_wreck_on_turret_kill, record_npc_kill_progression,
     resolve_officer_or_commander_sde_drop, step_encounter_wave_on_kill,
 };
 use eve_db::{CorporationRecord, InventoryFlag, IskCents, SystemDynamicState};
@@ -72,16 +74,7 @@ async fn test_handle_npc_destroyed_bounty_sec_status_drifter_and_wave_fallback()
     });
 
     // Kill wave 1 trigger -> spawns wave 2 (931_002 with zero dmg default), credits bounty + sec status + drops drifter wreck
-    handle_npc_destroyed_in_space(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
-        sys_id,
-        wave_balls[0],
-        Some(char_id),
-    )
-    .await;
+    handle_npc_destroyed_in_space_for_ctx(&ctx, sys_id, wave_balls[0], Some(char_id)).await;
 
     ctx.db.with_snapshot(|snap| {
         assert!(
@@ -102,16 +95,7 @@ async fn test_handle_npc_destroyed_bounty_sec_status_drifter_and_wave_fallback()
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().security_status = 5.0;
     });
-    handle_npc_destroyed_in_space(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
-        sys_id,
-        wave2_trigger,
-        Some(char_id),
-    )
-    .await;
+    handle_npc_destroyed_in_space_for_ctx(&ctx, sys_id, wave2_trigger, Some(char_id)).await;
     with_combat_runtime(&ctx, |rt| {
         assert_eq!(rt.encounter_waves[&502].current_wave, 3);
     });
@@ -350,16 +334,7 @@ async fn issue_544_pending_npc_bounty_persists_sqlite_and_flushes_on_downtime() 
     let mut ent = make_test_npc_entity(npc_ball_id, 932_010, null_sys_id, "Pirate");
     ent.bounty_isk = 800_000.0;
     seed_npc_entity(&ctx1, ent);
-    handle_npc_destroyed_in_space(
-        &ctx1.systems,
-        &ctx1.db,
-        &ctx1.sde,
-        &ctx1.combat_ephemeral,
-        null_sys_id,
-        npc_ball_id,
-        Some(char_id),
-    )
-    .await;
+    handle_npc_destroyed_in_space_for_ctx(&ctx1, null_sys_id, npc_ball_id, Some(char_id)).await;
     crate::combat::crimewatch::credit_specialized_npc_bounty_and_sec_status(
         &ctx1,
         hs_sys_id,

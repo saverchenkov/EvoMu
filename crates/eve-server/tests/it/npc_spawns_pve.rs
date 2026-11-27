@@ -14,7 +14,7 @@ use eve_destiny::{Ball, DVec3, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::combat::npc_ai::npc_test_helpers::{
-    any_npc_entity_in_system, find_npc_entity_in_system, get_npc_entity,
+    any_npc_entity_in_system, find_npc_entity_in_system, get_npc_entity, with_npc_spawn_manager,
 };
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::combat_npc_encounters::flush_npc_bounty_tick;
@@ -389,7 +389,7 @@ async fn test_belt_rats_clone_soldier_mordu_and_officer_spawns() {
     let (mut jita_sess, _) = setup_docked_pilot(&ctx, 7101, "demo", "demo-secret", 90_000_001, 30_000_142, 60_003_760, 910_001, 639, 2961, 21894, 920_000).await;
     rpc(&ctx, &mut jita_sess, "stationSvc", "Undock", &[]).await.expect("Undock Jita");
     tick_background_cluster(&ctx).await;
-    let jita_rats = ctx.npc_spawns.read().unwrap().get(&30_000_142).map(|m| m.entities.len()).unwrap_or(0);
+    let jita_rats = with_npc_spawn_manager(&ctx, 30_000_142, |m| m.entities.len()).unwrap_or(0);
     assert_eq!(jita_rats, 0, "Beltless Jita must spawn 0 belt rats");
     assert!(!any_npc_entity_in_system(&ctx, 30_000_142, |n| matches!(n.archetype.as_str(), "CloneSoldier" | "Officer" | "MorduCommander")));
 
@@ -398,7 +398,7 @@ async fn test_belt_rats_clone_soldier_mordu_and_officer_spawns() {
     let (mut tanoo_sess, _) = setup_docked_pilot(&ctx, 7102, "other", "other-secret", 90_000_002, 30_000_001, tanoo_stn, 910_002, 639, 2961, 21894, 920_100).await;
     rpc(&ctx, &mut tanoo_sess, "stationSvc", "Undock", &[]).await.expect("Undock Tanoo");
     tick_background_cluster(&ctx).await;
-    let tanoo_groups: Vec<u32> = ctx.npc_spawns.read().unwrap()[&30_000_001].entities.values().map(|e| e.spawn_group_id).collect();
+    let tanoo_groups: Vec<u32> = with_npc_spawn_manager(&ctx, 30_000_001, |m| m.entities.values().map(|e| e.spawn_group_id).collect()).unwrap();
     assert!(!tanoo_groups.is_empty(), "High-sec system with belts must spawn regional belt rats");
     for sg in &tanoo_groups {
         assert!(ctx.sde.npc_spawn_groups[sg].ship_class <= 2, "High-sec belt rats must be Frigate/Destroyer class (<= 2)");

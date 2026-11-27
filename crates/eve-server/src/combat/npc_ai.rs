@@ -2348,16 +2348,21 @@ pub(crate) fn compute_sleeper_sentry_interval_s(ctx: &ServerContext, npc_type_id
 
 #[cfg(any(test, feature = "testkit"))]
 pub mod npc_test_helpers {
-    //! Test-only façade over runtime NPC entity tracking (`#1541` Track C2b/C2c).
+    //! Test-only façade over runtime NPC entity, spawn manager, and encounter tracking (`#1541` Track C2a/C2b/C2c).
     //!
     //! Compiled under `#[cfg(any(test, feature = "testkit"))]` so both unit tests (`--lib`) and
-    //! integration tests (`--test it`) access NPC entity state without reaching directly into
-    //! `CombatRuntimeState::npc_entities`.
+    //! integration tests (`--test it`) access NPC runtime state without reaching directly into
+    //! `ServerContext::npc_spawns` or `CombatRuntimeState`.
 
+    use super::NpcSpawnManager;
     use crate::router::ServerContext;
     use crate::services::combat_crimewatch::{
         with_combat_ephemeral, with_mut_combat_ephemeral, ExtendedNpcEntity,
     };
+    use crate::services::pve_expeditions::EscalatingPathEntry;
+    use eve_sde::{SdeRegistry, SolarSystemId};
+    use glam::DVec3;
+    use std::sync::Arc;
 
     /// Inserts or replaces an [`ExtendedNpcEntity`] keyed by `entity.ball_id`.
     pub fn seed_npc_entity(ctx: &ServerContext, entity: ExtendedNpcEntity) {
@@ -2482,6 +2487,261 @@ pub mod npc_test_helpers {
                 .values()
                 .any(|n| n.solar_system_id == solar_system_id && pred(n))
         })
+    }
+
+    /// Inserts or replaces the [`NpcSpawnManager`] for `solar_system_id`.
+    pub fn insert_npc_spawn_manager(
+        ctx: &ServerContext,
+        solar_system_id: u32,
+        mgr: NpcSpawnManager,
+    ) {
+        ctx.npc_spawns.write().unwrap().insert(solar_system_id, mgr);
+    }
+
+    /// Runs `f` with a shared reference to `solar_system_id`'s [`NpcSpawnManager`], if present.
+    pub fn with_npc_spawn_manager<R>(
+        ctx: &ServerContext,
+        solar_system_id: u32,
+        f: impl FnOnce(&NpcSpawnManager) -> R,
+    ) -> Option<R> {
+        let spawns = ctx.npc_spawns.read().unwrap();
+        spawns.get(&solar_system_id).map(f)
+    }
+
+    /// Runs `f` with a mutable reference to `solar_system_id`'s [`NpcSpawnManager`], if present.
+    pub fn with_mut_npc_spawn_manager<R>(
+        ctx: &ServerContext,
+        solar_system_id: u32,
+        f: impl FnOnce(&mut NpcSpawnManager) -> R,
+    ) -> Option<R> {
+        let mut spawns = ctx.npc_spawns.write().unwrap();
+        spawns.get_mut(&solar_system_id).map(f)
+    }
+
+    /// Runs `f` with a mutable reference to `solar_system_id`'s [`NpcSpawnManager`],
+    /// inserting a default manager if the system has none yet.
+    pub fn with_or_insert_npc_spawn_manager<R>(
+        ctx: &ServerContext,
+        solar_system_id: u32,
+        f: impl FnOnce(&mut NpcSpawnManager) -> R,
+    ) -> R {
+        let mut spawns = ctx.npc_spawns.write().unwrap();
+        let mgr = spawns
+            .entry(solar_system_id)
+            .or_insert_with(NpcSpawnManager::new);
+        f(mgr)
+    }
+
+    /// Marks `npc_ball_id` as active in runtime NPC behavior debugging.
+    pub fn enable_behavior_debugging(ctx: &ServerContext, npc_ball_id: i64) {
+        with_mut_combat_ephemeral(ctx, |rt| {
+            rt.behavior_debugging_active.insert(npc_ball_id);
+        });
+    }
+
+    /// Inserts or replaces a destroyed-NPC cache entry keyed by `ball_id`.
+    pub fn seed_destroyed_npc_cache(
+        ctx: &ServerContext,
+        ball_id: i64,
+        entity: ExtendedNpcEntity,
+    ) {
+        with_mut_combat_ephemeral(ctx, |rt| {
+            rt.destroyed_npc_cache.insert(ball_id, entity);
+        });
+    }
+
+    /// Returns `true` if `ball_id` is currently present in `destroyed_npc_cache`.
+    pub fn has_destroyed_npc_cached(ctx: &ServerContext, ball_id: i64) -> bool {
+        with_combat_ephemeral(ctx, |rt| rt.destroyed_npc_cache.contains_key(&ball_id))
+    }
+
+    /// Replaces the set of NPC-scrambled ship ball IDs tracked for `solar_system_id`.
+    pub fn seed_npc_scrambled_ships(
+        ctx: &ServerContext,
+        solar_system_id: u32,
+        ships: impl IntoIterator<Item = i64>,
+    ) {
+        with_mut_combat_ephemeral(ctx, |rt| {
+            rt.npc_scrambled_ships
+                .insert(solar_system_id, ships.into_iter().collect());
+        });
+    }
+
+    /// Returns `true` if `ship_id` is currently marked as NPC-scrambled in `solar_system_id`.
+    pub fn is_ship_npc_scrambled(
+        ctx: &ServerContext,
+        solar_system_id: u32,
+        ship_id: i64,
+    ) -> bool {
+        with_combat_ephemeral(ctx, |rt| {
+            rt.npc_scrambled_ships
+                .get(&solar_system_id)
+                .is_some_and(|s| s.contains(&ship_id))
+        })
+    }
+
+    /// Returns `true` if `solar_system_id` has an entry in `npc_scrambled_ships`.
+    pub fn has_npc_scrambled_ships_in_system(
+        ctx: &ServerContext,
+        solar_system_id: u32,
+    ) -> bool {
+        with_combat_ephemeral(ctx, |rt| {
+            rt.npc_scrambled_ships.contains_key(&solar_system_id)
+        })
+    }
+
+    /// Returns `true` if `solar_system_id` has a recorded Clone Soldier respawn cooldown.
+    pub fn has_clone_soldier_cooldown(ctx: &ServerContext, solar_system_id: u32) -> bool {
+        with_combat_ephemeral(ctx, |rt| {
+            rt.clone_soldier_cooldown_until.contains_key(&solar_system_id)
+        })
+    }
+
+    /// Marks `solar_system_id` as having a deployed CONCORD/insurgency CI sentry.
+    pub fn mark_ci_sentry_deployed(ctx: &ServerContext, solar_system_id: u32) {
+        with_mut_combat_ephemeral(ctx, |rt| {
+            rt.ci_sentry_deployed_systems.insert(solar_system_id);
+        });
+    }
+
+    /// Returns `true` if `solar_system_id` is marked as having a deployed CI sentry.
+    pub fn is_ci_sentry_deployed(ctx: &ServerContext, solar_system_id: u32) -> bool {
+        with_combat_ephemeral(ctx, |rt| {
+            rt.ci_sentry_deployed_systems.contains(&solar_system_id)
+        })
+    }
+
+    /// Returns `true` if `ball_id` has already been recorded in `bounty_credited_balls`.
+    pub fn is_bounty_credited(ctx: &ServerContext, ball_id: i64) -> bool {
+        with_combat_ephemeral(ctx, |rt| rt.bounty_credited_balls.contains(&ball_id))
+    }
+
+    /// Context-taking wrapper over `handle_npc_destroyed_in_space` (keeping `notify_ctx = None`).
+    pub async fn handle_npc_destroyed_in_space_for_ctx(
+        ctx: &ServerContext,
+        solar_system_id: SolarSystemId,
+        killed_ball_id: i64,
+        killer_char_id: Option<i64>,
+    ) {
+        crate::services::combat_npc_encounters::handle_npc_destroyed_in_space(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            &*ctx.combat_ephemeral,
+            solar_system_id,
+            killed_ball_id,
+            killer_char_id,
+        )
+        .await;
+    }
+
+    /// Context-taking wrapper over `handle_pve_site_npc_destruction_core`.
+    pub async fn handle_pve_site_npc_destruction_for_ctx(
+        ctx: &ServerContext,
+        solar_system_id: SolarSystemId,
+        npc_ball_id: i64,
+        killer_char_id: i64,
+        drop_npc_wreck: bool,
+    ) -> (
+        Option<String>,
+        Option<EscalatingPathEntry>,
+        Option<EscalatingPathEntry>,
+    ) {
+        crate::services::pve_exploration_sites::handle_pve_site_npc_destruction_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            &ctx.mechanic_rng,
+            &*ctx.combat_ephemeral,
+            solar_system_id,
+            npc_ball_id,
+            killer_char_id,
+            drop_npc_wreck,
+        )
+        .await
+    }
+
+    /// Context-taking wrapper over `spawn_sleeper_wave_core` accepting custom `sde` and `state_ctx`.
+    pub async fn spawn_sleeper_wave_with_sde_for_ctx(
+        ctx: &ServerContext,
+        sde: &Arc<SdeRegistry>,
+        state_ctx: &ServerContext,
+        solar_system_id: SolarSystemId,
+        wh_class: u8,
+        wave: u8,
+        center: DVec3,
+    ) -> Vec<i64> {
+        crate::services::pve_exploration_sites::spawn_sleeper_wave_core(
+            &ctx.systems,
+            &ctx.db,
+            sde,
+            &*state_ctx.combat_ephemeral,
+            solar_system_id,
+            wh_class,
+            wave,
+            center,
+        )
+        .await
+    }
+
+    /// Context-taking wrapper over `spawn_upgraded_avengers_core` using `ctx.sde`.
+    pub async fn spawn_upgraded_avengers_for_ctx(
+        ctx: &ServerContext,
+        solar_system_id: SolarSystemId,
+        wh_class: u8,
+        center: DVec3,
+        batch_offset: usize,
+    ) -> Vec<i64> {
+        spawn_upgraded_avengers_with_sde_for_ctx(
+            ctx,
+            &ctx.sde,
+            solar_system_id,
+            wh_class,
+            center,
+            batch_offset,
+        )
+        .await
+    }
+
+    /// Context-taking wrapper over `spawn_upgraded_avengers_core` accepting a custom `sde`.
+    pub async fn spawn_upgraded_avengers_with_sde_for_ctx(
+        ctx: &ServerContext,
+        sde: &Arc<SdeRegistry>,
+        solar_system_id: SolarSystemId,
+        wh_class: u8,
+        center: DVec3,
+        batch_offset: usize,
+    ) -> Vec<i64> {
+        crate::services::wormhole_pve_escalations::spawn_upgraded_avengers_core(
+            &ctx.systems,
+            &ctx.db,
+            sde,
+            &*ctx.combat_ephemeral,
+            solar_system_id,
+            wh_class,
+            center,
+            batch_offset,
+        )
+        .await
+    }
+
+    /// Context-taking wrapper over `spawn_decloaked_transmission_relay_core`.
+    pub async fn spawn_decloaked_transmission_relay_for_ctx(
+        ctx: &ServerContext,
+        solar_system_id: SolarSystemId,
+        site_id: &str,
+        pos: [f64; 3],
+    ) -> Option<i64> {
+        crate::services::wormhole_pve_escalations::spawn_decloaked_transmission_relay_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            &*ctx.combat_ephemeral,
+            solar_system_id,
+            site_id,
+            pos,
+        )
+        .await
     }
 }
 
