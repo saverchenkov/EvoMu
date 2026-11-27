@@ -1334,16 +1334,24 @@ fn count_notify_registry_pyrep_fields(src: &str) -> (usize, usize) {
     let mut opt_pyrep_fields = 0usize;
     let mut idx = 0usize;
 
+    let is_pyrep_leaf = |ty: &str| ty == "PyRep" || ty.ends_with("::PyRep");
+    fn strip_generic<'a>(ty: &'a str, wrapper: &str) -> Option<&'a str> {
+        ty.strip_prefix(wrapper)?.strip_prefix('<')?.strip_suffix('>')
+    }
     let mut count_field_block = |block: &str| {
         for decl in block.split(',') {
             let Some((_, raw_ty)) = decl.split_once(':') else {
                 continue;
             };
             let norm_ty: String = raw_ty.chars().filter(|c| !c.is_whitespace()).collect();
-            if norm_ty == "PyRep" {
+            if let Some(inner) = strip_generic(&norm_ty, "Option") {
+                if is_pyrep_leaf(inner) || strip_generic(inner, "Vec").is_some_and(is_pyrep_leaf) {
+                    opt_pyrep_fields += 1;
+                }
+            } else if is_pyrep_leaf(&norm_ty)
+                || strip_generic(&norm_ty, "Vec").is_some_and(is_pyrep_leaf)
+            {
                 pyrep_fields += 1;
-            } else if norm_ty == "Option<PyRep>" {
-                opt_pyrep_fields += 1;
             }
         }
     };
@@ -1365,13 +1373,15 @@ fn count_notify_registry_pyrep_fields(src: &str) -> (usize, usize) {
         let open_pos = after_kw + open_rel;
         let between = body[after_kw..open_pos].trim();
         let is_header = matches!(between, "fields:" | "optional:");
+        if !is_header {
+            idx = after_kw + 1;
+            continue;
+        }
         let Some(close_rel) = body[open_pos + 1..].find('}') else {
             break;
         };
         let close_pos = open_pos + 1 + close_rel;
-        if is_header {
-            count_field_block(&body[open_pos + 1..close_pos]);
-        }
+        count_field_block(&body[open_pos + 1..close_pos]);
         idx = close_pos + 1;
     }
 
@@ -1380,8 +1390,8 @@ fn count_notify_registry_pyrep_fields(src: &str) -> (usize, usize) {
 
 #[test]
 fn notify_registry_pyrep_field_count_respects_monotonic_ratchet() {
-    // Track 6a baseline: 179 PyRep + 25 Option<PyRep> = 204 (must remain <= 237).
-    const PYREP_FIELD_BASELINE: usize = 204;
+    // Track 6a baseline: 179 PyRep + 16 Vec<PyRep> + 25 Option<PyRep> = 220 (must remain <= 237).
+    const PYREP_FIELD_BASELINE: usize = 220;
     const _: () = assert!(PYREP_FIELD_BASELINE <= 237);
 
     let src = include_str!("notify_registry.rs");
@@ -1397,12 +1407,12 @@ fn notify_registry_pyrep_field_count_respects_monotonic_ratchet() {
     );
 
     let synthetic_regressed = concat!(
-        r#"define_notifications! { Foo => "Foo" ("charid") { fields: { x: PyRep }, optional: { y: Option<PyRep> }, samples: || vec![], }, }"#,
+        r#"define_notifications! { Foo => "Foo" ("charid") { /* fields: fake comment */ fields: { x: eve_proto::PyRep, xs: Vec<PyRep> }, optional: { y: Option<PyRep> }, samples: || vec![], }, }"#,
         "\n",
         r#"define_notification_item!(Bar => "Bar" ("charid") { fields: { z: PyRep }, samples: || vec![], });"#,
     );
     let (syn_raw, syn_opt) = count_notify_registry_pyrep_fields(synthetic_regressed);
-    assert_eq!((syn_raw, syn_opt), (2, 1));
+    assert_eq!((syn_raw, syn_opt), (3, 1));
     assert!(syn_raw + syn_opt > 2);
 }
 

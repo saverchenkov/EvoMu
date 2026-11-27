@@ -821,6 +821,205 @@ async fn test_xmpp_chat_acl_moderation_mute_rate_limit_cspa_and_prefs() {
         panic!("expected native ResyncSystemChannelAccess list, got {wh_native_sync:?}");
     };
     assert!(wh_native_chans.contains(&PyRep::String(format!("local_{WORMHOLE_SYS}"))));
+
+    // Native constellation_<cid> and region_<rid> resync must canonicalize to constellationid:<cid> / regionid:<rid>,
+    // round-trip wire prefixes, keep owner_id/operators unset, and reject non-GM moderation & cross-scope access (BF-01).
+    let s1_sys = s1.solar_system_id.expect("s1 solar_system_id");
+    let s1_sys_info = ctx
+        .sde
+        .solar_systems
+        .get(&s1_sys)
+        .expect("s1 SDE solar system");
+    let const_wire = format!("constellation_{}", s1_sys_info.constellation_id);
+    let const_key = format!("constellationid:{}", s1_sys_info.constellation_id);
+    let reg_wire = format!("region_{}", s1_sys_info.region_id);
+    let reg_key = format!("regionid:{}", s1_sys_info.region_id);
+    for (wire_arg, canon_key) in [(&const_wire, &const_key), (&reg_wire, &reg_key)] {
+        let resync = rpc(
+            &ctx,
+            &mut s1,
+            "XmppChatMgr",
+            "ResyncSystemChannelAccess",
+            &[PyRep::String(wire_arg.clone())],
+        )
+        .await
+        .expect("native constellation/region ResyncSystemChannelAccess");
+        let PyRep::List(resync_items) = &resync else {
+            panic!("expected ResyncSystemChannelAccess list, got {resync:?}");
+        };
+        assert!(
+            resync_items.contains(&PyRep::String(wire_arg.clone())),
+            "wire reply {resync_items:?} must contain {wire_arg}"
+        );
+        ctx.db.with_snapshot(|snap| {
+            assert!(
+                !snap.chat_channels.contains_key(wire_arg),
+                "raw wire key {wire_arg} must not exist in snap.chat_channels"
+            );
+            let rec = snap
+                .chat_channels
+                .get(canon_key)
+                .unwrap_or_else(|| panic!("canonical key {canon_key} must exist in snap.chat_channels"));
+            assert!(rec.owner_id.is_none(), "{canon_key} owner_id must be None");
+            assert!(rec.operators.is_empty(), "{canon_key} operators must be empty");
+            assert!(rec.password.is_none(), "{canon_key} password must be None");
+        });
+        for chan_arg in [wire_arg.as_str(), canon_key.as_str()] {
+            assert_eq!(
+                rpc(
+                    &ctx,
+                    &mut s1,
+                    "LSC",
+                    "SetChannelPassword", // rpc-lint: allow regression test for legacy LSC server method (Refs #933 BF-01)
+                    &[PyRep::String(chan_arg.into()), PyRep::String("pw".into())],
+                )
+                .await
+                .unwrap_err()
+                .code,
+                "NotChannelOwner"
+            );
+            assert_eq!(
+                rpc(
+                    &ctx,
+                    &mut s1,
+                    "LSC",
+                    "RenameChannel", // rpc-lint: allow regression test for legacy LSC server method (Refs #933 BF-01)
+                    &[PyRep::String(chan_arg.into()), PyRep::String("hijack".into())],
+                )
+                .await
+                .unwrap_err()
+                .code,
+                "NotChannelOwner"
+            );
+            assert_eq!(
+                rpc(
+                    &ctx,
+                    &mut s1,
+                    "XmppChatMgr",
+                    "SetMotd",
+                    &[PyRep::String(chan_arg.into()), PyRep::String("hijack".into())],
+                )
+                .await
+                .unwrap_err()
+                .code,
+                "NotChannelOperator"
+            );
+            assert_eq!(
+                rpc(
+                    &ctx,
+                    &mut s1,
+                    "LSC",
+                    "SetChannelMOTD", // rpc-lint: allow regression test for legacy LSC server method (Refs #933 BF-01)
+                    &[PyRep::String(chan_arg.into()), PyRep::String("hijack".into())],
+                )
+                .await
+                .unwrap_err()
+                .code,
+                "NotChannelOperator"
+            );
+            assert_eq!(
+                rpc(
+                    &ctx,
+                    &mut s1,
+                    "XmppChatMgr",
+                    "GrantChannelOwnership",
+                    &[PyRep::String(chan_arg.into()), PyRep::Integer(PILOT_2)],
+                )
+                .await
+                .unwrap_err()
+                .code,
+                "NotChannelOwner"
+            );
+            assert_eq!(
+                rpc(
+                    &ctx,
+                    &mut s1,
+                    "XmppChatMgr",
+                    "AccessControl",
+                    &[
+                        PyRep::String(chan_arg.into()),
+                        PyRep::Integer(PILOT_2),
+                        PyRep::Integer(2),
+                    ],
+                )
+                .await
+                .unwrap_err()
+                .code,
+                "NotChannelOperator"
+            );
+        }
+    }
+    let mixed_case_members = rpc(
+        &ctx,
+        &mut s1,
+        "LSC",
+        "GetMembers",
+        &[PyRep::String("Player_t64_vault".into())],
+    )
+    .await
+    .expect("mixed-case Player_ alias GetMembers");
+    assert_eq!(field(&mixed_case_members, "channelID"), &PyRep::String("channel:t64_vault".into()));
+    ctx.advance_secs(1);
+    for wire_arg in [&const_wire, &reg_wire] {
+        rpc(
+            &ctx,
+            &mut s1,
+            "LSC",
+            "SendMessage",
+            &[PyRep::String(wire_arg.clone()), PyRep::String("same-scope".into())],
+        )
+        .await
+        .expect("same-scope SendMessage on constellation/region");
+    }
+    let saved_p2_loc = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&PILOT_2).expect("PILOT_2 char");
+        let saved = (ch.solar_system_id, ch.station_id, ch.structure_id);
+        ch.solar_system_id = AMARR;
+        ch.station_id = None;
+        ch.structure_id = None;
+        saved
+    });
+    let mut amarr_sess = s2.clone();
+    amarr_sess.solar_system_id = Some(AMARR);
+    amarr_sess.station_id = None;
+    amarr_sess.structure_id = None;
+    amarr_sess.constellation_id = None;
+    amarr_sess.region_id = None;
+    for wire_arg in [&const_wire, &reg_wire] {
+        assert_eq!(
+            rpc(
+                &ctx,
+                &mut amarr_sess,
+                "LSC",
+                "JoinChannel",
+                &[PyRep::String(wire_arg.clone())],
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "ChannelAccessDenied"
+        );
+        assert_eq!(
+            rpc(
+                &ctx,
+                &mut amarr_sess,
+                "LSC",
+                "SendMessage",
+                &[PyRep::String(wire_arg.clone()), PyRep::String("cross-scope".into())],
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "ChannelAccessDenied"
+        );
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&PILOT_2).expect("PILOT_2 char");
+        ch.solar_system_id = saved_p2_loc.0;
+        ch.station_id = saved_p2_loc.1;
+        ch.structure_id = saved_p2_loc.2;
+    });
+
     rpc(&ctx, &mut gm, "LSC", "JoinChannel", &[PyRep::String(wh_local.clone())])
         .await
         .expect("Join delayed WH local");

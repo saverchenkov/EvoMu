@@ -286,11 +286,11 @@ fn handle_chat_rpc(
                     explicit_arg.map(|s| s.to_string()).unwrap_or_else(|| format!("resourcewars:{sys_id}"))
                 } else {
                     explicit_arg
-                        .filter(|s| {
-                            let lower = s.to_ascii_lowercase();
-                            !lower.starts_with("solarsystemid2:") && !lower.starts_with("local_")
+                        .map(|s| {
+                            let localpart = s.split('@').next().unwrap_or(s);
+                            crate::services::fleet_social_chat_acl_helpers::xmpp_alias_to_channel_key(localpart)
+                                .unwrap_or_else(|| s.to_string())
                         })
-                        .map(|s| s.to_string())
                         .unwrap_or_else(|| format!("solarsystemid2:{sys_id}"))
                 };
                 let corp_chan = format!("corpid:{corp_id}");

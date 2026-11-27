@@ -7,6 +7,12 @@ use std::collections::HashSet;
 pub(crate) fn format_xmpp_channel_wire_id(internal: &str) -> String {
     if let Some(rest) = internal.strip_prefix("solarsystemid2:") {
         format!("local_{rest}")
+    } else if let Some(rest) = internal.strip_prefix("constellationid:") {
+        format!("constellation_{rest}")
+    } else if let Some(rest) = internal.strip_prefix("regionid:") {
+        format!("region_{rest}")
+    } else if let Some(rest) = internal.strip_prefix("factionid:") {
+        format!("faction_{rest}")
     } else if let Some(rest) = internal.strip_prefix("corpid:") {
         format!("corp_{rest}")
     } else if let Some(rest) = internal.strip_prefix("allianceid:") {
@@ -69,11 +75,10 @@ pub(crate) fn find_existing_channel_key(
         return Some(found.clone());
     }
     let localpart = chan_id.split('@').next().unwrap_or(chan_id);
-    if let Some(candidate) = localpart
+    let lower_localpart = localpart.to_ascii_lowercase();
+    if let Some(candidate) = lower_localpart
         .strip_prefix("player_")
-        .or_else(|| localpart.strip_prefix("PLAYER_"))
-        .or_else(|| localpart.strip_prefix("channel_"))
-        .or_else(|| localpart.strip_prefix("CHANNEL_"))
+        .or_else(|| lower_localpart.strip_prefix("channel_"))
         .map(|slug| format!("channel:{slug}"))
         .or_else(|| xmpp_alias_to_channel_key(localpart))
     {

@@ -1284,9 +1284,16 @@ async fn arch_933_t6_migrated_rpc_families_emit_native_v24_without_compat() {
     let corp_id = 98_000_001_i64;
     let ship_id = 100_000_001_i64;
     let sys_id = 30_000_142_u32;
+    let peer_sys_id = 30_000_144_u32;
     let struct_id = 1_000_000_000_999_i64;
+    let jb_a = 1_000_000_001_001_i64;
+    let jb_b = 1_000_000_001_002_i64;
 
     let setup_world = || -> (crate::router::ServerContext, SessionState) {
+        use crate::services::station_structure::{
+            structure_ansiblex_navigation::ANSIBLEX_TYPE_ID,
+            structure_upwell_ops::{load_ext_state, save_ext_state},
+        };
         let ctx = crate::router::ServerContext::with_sde_and_repository(
             shared_sde(),
             Arc::new(WorldRepository::with_demo_seed()),
@@ -1322,6 +1329,33 @@ async fn arch_933_t6_migrated_rpc_families_emit_native_v24_without_compat() {
                     self_destruct_at_unix: None,
                 },
             );
+            for (sid, s_sys) in [(jb_a, sys_id), (jb_b, peer_sys_id)] {
+                snap.structures.insert(
+                    sid,
+                    UpwellStructureRecord {
+                        structure_id: sid,
+                        type_id: ANSIBLEX_TYPE_ID,
+                        owner_corp_id: corp_id,
+                        solar_system_id: s_sys,
+                        name: format!("T6 Ansiblex {sid}"),
+                        position: [10_000.0, 0.0, 0.0],
+                        state: "ShieldVulnerable".into(),
+                        quantum_core_installed: true,
+                        fuel_blocks: 500,
+                        shield_hp: 100.0,
+                        armor_hp: 100.0,
+                        hull_hp: 100.0,
+                        reinforced_until_unix: 0,
+                        last_damage_tick: 0,
+                        last_damage_unix: 0,
+                        self_destruct_at_unix: None,
+                    },
+                );
+            }
+            let mut ext = load_ext_state(snap);
+            ext.jump_bridge_links.insert(jb_a, jb_b);
+            ext.jump_bridge_links.insert(jb_b, jb_a);
+            save_ext_state(snap, &ext);
         });
         ctx.db
             .acquire_online_lock(1, 87_611, Some(char_id), true, now_unix)
@@ -1385,9 +1419,26 @@ async fn arch_933_t6_migrated_rpc_families_emit_native_v24_without_compat() {
         jb_d,
         PyRep::Tuple(ref parts)
             if parts.len() == 3
-                && matches!(parts[0], PyRep::List(_))
-                && matches!(parts[1], PyRep::List(_))
-                && matches!(parts[2], PyRep::Dict(_))
+                && matches!(
+                    &parts[0],
+                    PyRep::List(pairs)
+                        if pairs.len() == 2
+                            && pairs.iter().any(|p| matches!(
+                                p,
+                                PyRep::Tuple(edge)
+                                    if edge.len() == 2
+                                        && edge[0].dict_get("structureID") == Some(&PyRep::Integer(jb_a))
+                                        && edge[0].dict_get("solarSystemID") == Some(&PyRep::Integer(i64::from(sys_id)))
+                                        && edge[1].dict_get("structureID") == Some(&PyRep::Integer(jb_b))
+                                        && edge[1].dict_get("solarSystemID") == Some(&PyRep::Integer(i64::from(peer_sys_id)))
+                            ))
+                )
+                && matches!(
+                    &parts[1],
+                    PyRep::List(ids)
+                        if ids.contains(&PyRep::Integer(jb_a)) && ids.contains(&PyRep::Integer(jb_b))
+                )
+                && matches!(&parts[2], PyRep::Dict(d) if d.is_empty())
     ));
 
     let expected_state = crate::services::station_structure::structure_lifecycle::structure_state_wire_code("ShieldVulnerable");

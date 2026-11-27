@@ -912,7 +912,7 @@ pub fn build_session_state_keyval(session: &SessionState, char_id: i64) -> PyRep
 /// Builds the full keyval representation of a character's session state for `OnSessionChanged`
 /// when a handler operates outside the target character's live `SessionState`.
 pub fn build_character_session_state_keyval(ctx: &ServerContext, char_id: i64) -> PyRep {
-    let mut s = ctx
+    let s = ctx
         .db
         .with_snapshot(|snap| {
             snap.characters
@@ -924,13 +924,6 @@ pub fn build_character_session_state_keyval(ctx: &ServerContext, char_id: i64) -
             s.character_id = Some(char_id);
             s
         });
-    if let Some(online) = s
-        .user_id
-        .and_then(|uid| ctx.db.get_online_session(uid))
-        .filter(|o| o.character_id == Some(char_id))
-    {
-        s.session_id = online.session_id;
-    }
     build_session_state_keyval(&s, char_id)
 }
 
