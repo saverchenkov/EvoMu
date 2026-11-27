@@ -961,7 +961,7 @@ async fn apply_fit_projection_updates_baseline_preserving_active_multipliers_and
     assert!((snap_ball.max_velocity - 420.0).abs() < 1e-6);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn system_view_updates_across_commands_steps_sync_mutators_and_lock_free_under_ballpark_lock() {
     let reg = SystemRegistry::new();
     let handle = reg.get_or_spawn(30_000_142);
@@ -2979,6 +2979,117 @@ async fn system_actor_command_panic_recovers_poison_and_keeps_all_read_paths_coh
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn panic_before_defer_reply_recovers_locks_views_and_telemetry_before_unblocking_caller() {
+    use std::sync::atomic::Ordering;
+
+    let reg = SystemRegistry::new();
+    let sys = reg.get_or_spawn(30_000_142);
+    let ship_id: BallId = 840_000_201;
+    let init_pos = DVec3::new(2_500.0, 0.0, 0.0);
+
+    sys.spawn_ball_with_combat(
+        make_actor_ball(ship_id, 587, init_pos),
+        CombatState {
+            shield_hp: 500.0,
+            armor_hp: 500.0,
+            structure_hp: 500.0,
+            max_shield_hp: 500.0,
+            max_armor_hp: 500.0,
+            max_structure_hp: 500.0,
+            ..CombatState::default()
+        },
+    )
+    .await
+    .expect("spawn live ship");
+    assert_eq!(sys.command_panics.load(Ordering::SeqCst), 0);
+
+    // 1. `ModifyCombatState` closure panic (occurs inside match arm before `commit_combat_state_update` / `defer_reply`).
+    let mod_res = sys
+        .modify_combat_state(ship_id, |cs| {
+            cs.shield_hp = 321.0;
+            panic!("pre-defer_reply ModifyCombatState closure panic for #1173 test");
+        })
+        .await;
+    assert!(mod_res.is_err(), "panicked ModifyCombatState must return Err");
+    assert_eq!(sys.command_panics.load(Ordering::SeqCst), 1);
+    assert!(!sys.ballpark.is_poisoned());
+    assert!(!sys.actor_state.is_poisoned());
+    let view1 = sys.view();
+    let cs1 = view1
+        .combat_state(ship_id)
+        .expect("combat state must remain intact in SystemView after ModifyCombatState panic");
+    assert!((cs1.shield_hp - 500.0).abs() < 1e-6);
+
+    // 2. `TestAccess` closure panic (occurs before `defer_reply`), directly mutating ballpark, combat state, and `sim_elapsed_secs`.
+    let panicking_pos = DVec3::new(9_123.0, 456.0, 0.0);
+    let (ta_tx, ta_rx) = tokio::sync::oneshot::channel();
+    sys.cmd_tx
+        .send(SystemCommand::TestAccess {
+            op: TestAccessOp::new(move |bp, st| {
+                bp.set_ball_position(ship_id, panicking_pos);
+                if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                    cs.shield_hp = 321.0;
+                    cs.is_tethered = true;
+                    cs.warp_scramble_strength = 4;
+                }
+                st.sim_elapsed_secs = 77.5;
+                panic!("pre-defer_reply TestAccess closure panic for #1173 test");
+            }),
+            mutated: true,
+            reply: ta_tx,
+        })
+        .await
+        .expect("send TestAccess");
+    assert!(ta_rx.await.is_err(), "panicked TestAccess must drop reply with Err");
+    assert_eq!(sys.command_panics.load(Ordering::SeqCst), 2);
+    assert!(!sys.ballpark.is_poisoned());
+    assert!(!sys.actor_state.is_poisoned());
+    let view2 = sys.view();
+    let cs2 = view2
+        .combat_state(ship_id)
+        .expect("combat state must reflect pre-panic TestAccess mutations in SystemView");
+    assert!((cs2.shield_hp - 321.0).abs() < 1e-6);
+    assert!(view2.is_ball_tethered(ship_id) && sys.is_ball_tethered_sync(ship_id));
+    assert!(view2.is_ball_scrambled(ship_id) && sys.is_ball_scrambled_sync(ship_id));
+    assert_eq!(view2.ball_position(ship_id), Some(panicking_pos));
+    assert_eq!(sys.get_ball_position_sync(ship_id), Some(panicking_pos));
+    assert!((view2.sim_elapsed_secs - 77.5).abs() < 1e-12);
+    assert!(
+        (f64::from_bits(sys.sim_elapsed_secs_bits.load(Ordering::Acquire)) - 77.5).abs() < 1e-12
+    );
+
+    // 3a. `StepManual` panic while write guards are held (`panic_after_command_guards_for_test`).
+    sys.panic_after_command_guards_for_test
+        .store(true, Ordering::SeqCst);
+    let step_err_guards = sys.step_manual(1.0).await;
+    assert!(
+        step_err_guards.is_err(),
+        "StepManual under panic_after_command_guards_for_test must return Err"
+    );
+    assert_eq!(sys.command_panics.load(Ordering::SeqCst), 3);
+    assert!(!sys.ballpark.is_poisoned());
+    assert!(!sys.actor_state.is_poisoned());
+    assert_eq!(sys.get_ball_position_sync(ship_id), Some(panicking_pos));
+
+    // 3b. `StepManual` panic before guards (`panic_next_command_for_test`).
+    sys.panic_next_command_for_test
+        .store(true, Ordering::SeqCst);
+    let step_err_next = sys.step_manual(1.0).await;
+    assert!(
+        step_err_next.is_err(),
+        "StepManual under panic_next_command_for_test must return Err"
+    );
+    assert_eq!(sys.command_panics.load(Ordering::SeqCst), 4);
+    assert!(!sys.ballpark.is_poisoned());
+    assert!(!sys.actor_state.is_poisoned());
+    assert_eq!(sys.view().ball_position(ship_id), Some(panicking_pos));
+
+    // Actor keeps processing subsequent commands cleanly after pre-defer_reply panics.
+    let step_ok = sys.step_manual(1.0).await;
+    assert!(step_ok.is_ok(), "StepManual must succeed after panic recovery: {step_ok:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn poisoned_ballpark_and_actor_state_do_not_degrade_tidi_or_view_publication() {
     let reg = SystemRegistry::new();
     let sys = reg.get_or_spawn(30_000_142);
@@ -3004,7 +3115,7 @@ async fn poisoned_ballpark_and_actor_state_do_not_degrade_tidi_or_view_publicati
     .expect("add module cycle");
 
     // Deliberately poison both locks externally so `is_poisoned() == true` directly exercises
-    // `celestials.rs` sites `:193`, `:366`, and `:1069`.
+    // `celestials.rs` sites `:205`, `:378`, and `:1074`.
     let sys_poison = sys.clone();
     let _ = std::thread::spawn(move || {
         let mut bp = sys_poison.ballpark.write().unwrap();
@@ -3022,7 +3133,7 @@ async fn poisoned_ballpark_and_actor_state_do_not_degrade_tidi_or_view_publicati
     assert!(sys.ballpark.is_poisoned());
     assert!(sys.actor_state.is_poisoned());
 
-    // `set_tidi_factor_raw` (`celestials.rs:1069`) + `publish_view_from` (`celestials.rs:366`)
+    // `set_tidi_factor_raw` (`celestials.rs:1074`) + `publish_view_from` (`celestials.rs:378`)
     // must recover poisoned guards instead of skipping republish or dropping actor_state.
     let _ = sys.set_tidi_factor_raw(0.25);
     let view_tidi = sys.view();
@@ -3034,7 +3145,7 @@ async fn poisoned_ballpark_and_actor_state_do_not_degrade_tidi_or_view_publicati
     assert!(view_tidi.has_active_module(ship_id));
     assert!((view_tidi.sim_elapsed_secs - 42.0).abs() < 1e-12);
 
-    // Clean `BallparkWriteGuard` drop (`celestials.rs:193`) must likewise recover poisoned `actor_state`.
+    // Clean `BallparkWriteGuard` drop (`celestials.rs:205`) must likewise recover poisoned `actor_state`.
     {
         let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.set_ball_position(ship_id, DVec3::new(8_888.0, 0.0, 0.0));
@@ -3126,6 +3237,46 @@ fn non_test_eve_server_has_no_poison_dropping_ballpark_or_actor_state_lock_patte
                     }
                     i = k;
                     continue;
+                }
+            }
+            // Byte character literal: `b'x'`, `b'"'`, `b'\''`, `b'\x41'`, ...
+            if i + 2 < n
+                && bytes[i] == b'b'
+                && bytes[i + 1] == b'\''
+                && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
+            {
+                let mut k = i + 2;
+                if k < n && bytes[k] == b'\\' {
+                    k = (k + 2).min(n);
+                    while k < n && bytes[k] != b'\'' && bytes[k] != b'\n' {
+                        k += 1;
+                    }
+                    if k < n && bytes[k] == b'\'' {
+                        i = k + 1;
+                        continue;
+                    }
+                } else if k + 1 < n && bytes[k] != b'\'' && bytes[k] != b'\n' && bytes[k + 1] == b'\'' {
+                    i = k + 2;
+                    continue;
+                }
+            }
+            // Character literal (`'x'`, `'"'`, `'\''`, `'\x41'`, `'\u{...}'`), distinguished from lifetimes (`'a`, `'static`, `'_`).
+            if bytes[i] == b'\'' && i + 1 < n {
+                if bytes[i + 1] == b'\\' {
+                    let mut k = (i + 3).min(n);
+                    while k < n && bytes[k] != b'\'' && bytes[k] != b'\n' {
+                        k += 1;
+                    }
+                    if k < n && bytes[k] == b'\'' {
+                        i = k + 1;
+                        continue;
+                    }
+                } else if let Some(ch) = src[i + 1..].chars().next() {
+                    let close_idx = i + 1 + ch.len_utf8();
+                    if ch != '\'' && ch != '\n' && close_idx < n && bytes[close_idx] == b'\'' {
+                        i = close_idx + 1;
+                        continue;
+                    }
                 }
             }
             // Normal / byte string literal
@@ -3285,29 +3436,93 @@ fn non_test_eve_server_has_no_poison_dropping_ballpark_or_actor_state_lock_patte
             }
         }
 
-        // 2. `if let Ok(..) = <target lock call>` or `while let Ok(..) = <target lock call>`
-        for kw in ["if let Ok(", "while let Ok("] {
+        // 2. `if let Ok(..) =`, `while let Ok(..) =`, or `let Ok(..) = ... else` on a target lock call.
+        for kw in ["if let Ok(", "while let Ok(", "let Ok("] {
             let mut search_from = 0usize;
             while let Some(off) = prod_src[search_from..].find(kw) {
                 let start = search_from + off;
-                let rest = &prod_src[start..];
-                if let Some(brace_off) = rest.find('{') {
-                    let header_compact: String = rest[..brace_off]
-                        .chars()
-                        .filter(|c| !c.is_ascii_whitespace())
-                        .collect();
-                    if is_target_lock_call(&header_compact) {
-                        let line = prod_src[..start].bytes().filter(|&b| b == b'\n').count() + 1;
-                        violations.push(format!(
-                            "{rel_path}:{line}: `{kw}..` drops PoisonError on ballpark/actor_state lock"
-                        ));
+                let bytes = prod_src.as_bytes();
+                let prev_ok = start == 0
+                    || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+                if prev_ok {
+                    let rest = &prod_src[start..];
+                    let brace_or_semi = rest
+                        .bytes()
+                        .position(|b| b == b'{' || b == b';');
+                    if let Some(end_off) = brace_or_semi {
+                        if rest.as_bytes()[end_off] == b'{' {
+                            let header_compact: String = rest[..end_off]
+                                .chars()
+                                .filter(|c| !c.is_ascii_whitespace())
+                                .collect();
+                            let valid_form =
+                                kw != "let Ok(" || header_compact.ends_with("else");
+                            if valid_form && is_target_lock_call(&header_compact) {
+                                let line = prod_src[..start]
+                                    .bytes()
+                                    .filter(|&b| b == b'\n')
+                                    .count()
+                                    + 1;
+                                violations.push(format!(
+                                    "{rel_path}:{line}: `{kw}..` drops PoisonError on ballpark/actor_state lock"
+                                ));
+                            }
+                        }
                     }
                 }
                 search_from = start + kw.len();
             }
         }
 
-        // 3. `match <target lock call> { ... Err(...) => ... }` without `into_inner` / `PoisonError`
+        // 3. `match <target lock call> { ... Err(..)/Poisoned(..)/_ => ... }` without `into_inner()`
+        fn has_unrecovered_error_arm(body_compact: &str) -> bool {
+            if body_compact.contains("into_inner()") {
+                return false;
+            }
+            if body_compact.contains(",_=>") || body_compact.contains("}_=>") {
+                return true;
+            }
+            let b = body_compact.as_bytes();
+            for pat in ["Err(", "Poisoned("] {
+                let mut pos = 0usize;
+                while let Some(off) = body_compact[pos..].find(pat) {
+                    let start = pos + off;
+                    let boundary_ok = start == 0
+                        || matches!(
+                            b[start - 1],
+                            b'{' | b',' | b';' | b'|' | b':' | b'}'
+                        );
+                    if boundary_ok {
+                        let mut depth = 0usize;
+                        let mut k = start + pat.len() - 1;
+                        while k < b.len() {
+                            if b[k] == b'(' {
+                                depth += 1;
+                            } else if b[k] == b')' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    k += 1;
+                                    break;
+                                }
+                            }
+                            k += 1;
+                        }
+                        if depth == 0 && k < b.len() {
+                            let tail = &body_compact[k..];
+                            if tail.starts_with("=>")
+                                || tail.starts_with("if")
+                                || tail.starts_with('|')
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    pos = start + pat.len();
+                }
+            }
+            false
+        }
+
         let bytes = prod_src.as_bytes();
         let mut idx = 0usize;
         while let Some(off) = prod_src[idx..].find("match") {
@@ -3339,10 +3554,7 @@ fn non_test_eve_server_has_no_poison_dropping_ballpark_or_actor_state_lock_patte
                             .chars()
                             .filter(|c| !c.is_ascii_whitespace())
                             .collect();
-                        let drops_poison = (body_compact.contains("Err(_)=>")
-                            || body_compact.contains("Poisoned(_)=>"))
-                            && !body_compact.contains("into_inner()");
-                        if drops_poison {
+                        if has_unrecovered_error_arm(&body_compact) {
                             let line = prod_src[..start].bytes().filter(|&b| b == b'\n').count() + 1;
                             violations.push(format!(
                                 "{rel_path}:{line}: `match` drops PoisonError on ballpark/actor_state lock"
@@ -3356,7 +3568,8 @@ fn non_test_eve_server_has_no_poison_dropping_ballpark_or_actor_state_lock_patte
         violations
     }
 
-    // Self-check synthetic poison-dropping patterns to ensure the static guard cannot pass vacuously.
+    // Self-check synthetic poison-dropping patterns (including char/byte quotes before lock calls)
+    // to ensure the static guard cannot pass vacuously or lose quote parity.
     assert!(!find_poison_dropping_lock_violations(
         "synthetic.rs",
         "fn f() { let bp = sys.ballpark.read().ok()?; }"
@@ -3382,6 +3595,37 @@ fn non_test_eve_server_has_no_poison_dropping_ballpark_or_actor_state_lock_patte
         "fn f() { match self.actor_state.try_read() { Ok(g) => Some(g), Err(_) => None }; }"
     )
     .is_empty());
+    assert!(!find_poison_dropping_lock_violations(
+        "synthetic.rs",
+        "fn f() { match self.ballpark.try_read() { Ok(g) => Some(g), Err(e) => None }; }"
+    )
+    .is_empty());
+    assert!(!find_poison_dropping_lock_violations(
+        "synthetic.rs",
+        "fn f() { match self.ballpark.try_read() { Ok(g) => Some(g), Err(_e) => None }; }"
+    )
+    .is_empty());
+    assert!(!find_poison_dropping_lock_violations(
+        "synthetic.rs",
+        "fn f() { match self.ballpark.try_read() { Ok(g) => Some(g), Err(TryLockError::Poisoned(e)) => None }; }"
+    )
+    .is_empty());
+    assert!(!find_poison_dropping_lock_violations(
+        "synthetic.rs",
+        "fn f() { let Ok(g) = self.ballpark.try_read() else { return None }; }"
+    )
+    .is_empty());
+    for char_quote_fixture in [
+        "fn f<'static>(_x: &'static str) -> Option<()> { let _ = b'\"'; let _ = self.ballpark.try_read().ok()?; Some(()) }",
+        "fn f() -> Option<()> { let _ = '\"'; let _ = '\\''; match self.ballpark.try_read() { Ok(g) => Some(()), Err(e) => return None } }",
+        "fn f() -> Option<()> { let _ = b'\"'; let Ok(g) = self.ballpark.try_read() else { return None }; Some(()) }",
+    ] {
+        let stripped = strip_comments_strings_and_cfg_test(char_quote_fixture);
+        assert!(
+            !find_poison_dropping_lock_violations("synthetic_char_quote.rs", &stripped).is_empty(),
+            "char/byte quote parity broke poison guard for fixture: {char_quote_fixture}\nstripped: {stripped}"
+        );
+    }
     assert!(find_poison_dropping_lock_violations(
         "system_actor/celestials.rs",
         "fn f() { match self.inner.write() { Ok(g) => Ok(g), Err(p) => Err(PoisonError::new(p.into_inner())) }; }"

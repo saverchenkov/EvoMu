@@ -356,6 +356,7 @@ fn recover_reader_facing_state_after_panic(
     cooldown_persist_gate: &Arc<CooldownPersistGate>,
     cmd_tx_weak: &tokio::sync::mpsc::WeakSender<SystemCommand>,
     tidi_factor_bits: &std::sync::atomic::AtomicU64,
+    sim_elapsed_secs_bits_actor: &std::sync::atomic::AtomicU64,
     view_tx: &tokio::sync::watch::Sender<Arc<SystemView>>,
     active_subscribers: usize,
 ) {
@@ -373,6 +374,10 @@ fn recover_reader_facing_state_after_panic(
         );
         protection::sync_all_protection_registry_in_actor(&ballpark, &mut actor_st);
         celestials::update_system_hibernation_flag(&actor_st, &ballpark, active_subscribers);
+        sim_elapsed_secs_bits_actor.store(
+            actor_st.sim_elapsed_secs.to_bits(),
+            std::sync::atomic::Ordering::Release,
+        );
         let mut dropped_ops = post_unlock::PostUnlockOps::default();
         finalize_reader_facing_end_of_command(
             solar_system_id,
@@ -1541,8 +1546,12 @@ impl SystemRegistry {
                 let mut batch_deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let mut batch_deferred_db_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let mut batch_unsent_direct_items: Vec<post_unlock::PostUnlockWorkItem> = Vec::new();
-                let mut batch_delivery: Option<PendingActorDelivery> = None;
-                for cmd in cmd_batch {
+                let mut batch_deliveries: Vec<(PendingActorDelivery, Option<commands::ParkedActorReply>)> = Vec::new();
+                for mut cmd in cmd_batch {
+                if cmd.is_cancelled_spawn_with_meta() {
+                    continue;
+                }
+                let parked_reply = cmd.park_reply_for_unwind();
                 let cmd_may_mutate_view = cmd.may_mutate_system_view();
                 let (raw_hook_cmd, post_hook_cmd) = ewar_cooldowns::read_deactivation_hooks(
                     &module_deactivation_hook_actor,
@@ -2379,10 +2388,18 @@ impl SystemRegistry {
                         } else if cmd_may_mutate_view || cmd_slim_changed || deact_mutated_actor {
                             batch_view_dirty = true;
                         }
+                        if let Some(delivery) = actor_delivery_out {
+                            batch_deliveries.push((delivery, parked_reply));
+                        } else if !deferred_db_replies.is_empty() {
+                            if let Some(parked) = parked_reply {
+                                deferred_db_replies.push(Box::new(move || parked.forward(solar_system_id)));
+                            }
+                        } else if let Some(parked) = parked_reply {
+                            deferred_replies.push(Box::new(move || parked.forward(solar_system_id)));
+                        }
                         batch_deferred_replies.extend(deferred_replies);
                         batch_deferred_db_replies.extend(deferred_db_replies);
                         batch_unsent_direct_items.extend(unsent_for_db_waiter);
-                        if let Some(delivery) = actor_delivery_out { batch_delivery = Some(delivery); }
                     }
                     Err(panic_payload) => {
                         recover_reader_facing_state_after_panic(
@@ -2397,6 +2414,7 @@ impl SystemRegistry {
                             &cooldown_persist_gate_actor,
                             &cmd_tx_weak_actor,
                             &tidi_factor_bits_actor,
+                            &sim_elapsed_secs_bits_actor,
                             &view_tx_actor,
                             event_tx_actor.receiver_count(),
                         );
@@ -2413,10 +2431,11 @@ impl SystemRegistry {
                             panic = %msg,
                             "SystemActor caught panic while handling command; continuing actor loop"
                         );
-                        // Drop deferred reply senders only after recovery & telemetry finish so
+                        // Drop real/deferred reply senders only after recovery & telemetry finish so
                         // callers awaiting `Err` never observe stale views or unrecovered poison.
                         drop(deferred_replies);
                         drop(deferred_db_replies);
+                        drop(parked_reply);
                     }
                 }
                 let _ = flush_post_unlock_actions_on_actor(&post_unlock_actions_actor, &actor_flush_thread_actor, solar_system_id, &command_panics_actor);
@@ -2488,7 +2507,7 @@ impl SystemRegistry {
                         }
                     }
                 }
-                if let Some(actor_delivery) = batch_delivery {
+                for (actor_delivery, parked_reply) in batch_deliveries {
                     let delivery_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         #[cfg(test)]
                         if panic_after_destruction_actor
@@ -2539,19 +2558,27 @@ impl SystemRegistry {
                             }
                         }
                     }));
-                    if let Err(panic_payload) = delivery_outcome {
-                        let panic_count = command_panics_actor.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                        let msg = panic_payload
-                            .downcast_ref::<&str>()
-                            .copied()
-                            .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
-                            .unwrap_or("non-string panic payload");
-                        tracing::error!(
-                            solar_system_id,
-                            panic_count,
-                            panic = %msg,
-                            "SystemActor caught panic while delivering reply; continuing actor loop"
-                        );
+                    match delivery_outcome {
+                        Ok(()) => {
+                            if let Some(parked) = parked_reply {
+                                parked.forward(solar_system_id);
+                            }
+                        }
+                        Err(panic_payload) => {
+                            let panic_count = command_panics_actor.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                            let msg = panic_payload
+                                .downcast_ref::<&str>()
+                                .copied()
+                                .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+                                .unwrap_or("non-string panic payload");
+                            tracing::error!(
+                                solar_system_id,
+                                panic_count,
+                                panic = %msg,
+                                "SystemActor caught panic while delivering reply; continuing actor loop"
+                            );
+                            drop(parked_reply);
+                        }
                     }
                 }
                 flush_post_unlock_actions_on_actor(
