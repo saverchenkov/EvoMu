@@ -241,7 +241,6 @@ pub struct TacticalModulesState {
     pub lance_victim_debuff_until: HashMap<(usize, i64), u64>,
     pub pending_wubble_probes: Vec<(usize, PendingWubbleProbe)>,
     pub active_wubble_debuffs: HashMap<(usize, i64), ActiveWubbleDebuff>,
-    pub tsb_self_penalty_until: HashMap<(usize, i64), u64>,
     pub active_interdiction_probes: HashMap<(usize, i64), super::tactical_module_mechanics::ActiveInterdictionProbe>,
     pub launcher_last_fire: HashMap<(usize, i64), super::tactical_module_mechanics::LauncherFireStamp>,
     pub system_sim_time_s: HashMap<(usize, u32), f64>,
@@ -527,9 +526,10 @@ pub fn apply_projected_remote_assistance(
 
 /// Applies V24 Bastion, Siege, Triage, CEHE, TSB, Entosis, Cargohold Rig, Wubble, and Remote Assistance Impedance attributes.
 pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, attrs: &mut HashMap<u16, f64>) {
-    let (owner_id, ship_type_id, active_mod_tids, online_mod_tids) = ctx.db.with_snapshot(|snap| {
+    let now_unix = ctx.now_unix_secs();
+    let (owner_id, ship_type_id, active_mod_tids, online_mod_tids, tsb_penalty_active) = ctx.db.with_snapshot(|snap| {
         let Some(ship) = snap.items.get(&ship_id) else {
-            return (0, 0, Vec::new(), Vec::new());
+            return (0, 0, Vec::new(), Vec::new(), false);
         };
         let mut act = Vec::new();
         let mut onl = Vec::new();
@@ -543,7 +543,12 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
                 }
             }
         }
-        (ship.owner_id, ship.type_id, act, onl)
+        let tsb_active = snap
+            .combat_crimewatch_state
+            .tsb_self_penalty_until
+            .get(&ship_id)
+            .is_some_and(|&u| now_unix < u);
+        (ship.owner_id, ship.type_id, act, onl, tsb_active)
     });
     if ship_type_id == 0 {
         return;
@@ -594,8 +599,7 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
     }
 
     let db_key = db_key_of(ctx);
-    let now_unix = ctx.now_unix_secs();
-    if ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner()).tsb_self_penalty_until.get(&(db_key, ship_id)).is_some_and(|&u| now_unix < u) {
+    if tsb_penalty_active {
         if let Some(sr) = attrs.get_mut(&564) {
             *sr *= 0.75;
         }
@@ -784,10 +788,15 @@ pub async fn activate_target_spectrum_breaker(
         }
     }
 
-    let db_key = db_key_of(ctx);
     let now_unix = ctx.now_unix_secs();
-    ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner()).tsb_self_penalty_until.insert((db_key, ship_id), now_unix + (duration_s.round() as u64).max(12));
-    set_module_active_in_db(ctx, module_id, true);
+    let penalty_until = now_unix + (duration_s.round() as u64).max(12);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .tsb_self_penalty_until
+            .insert(ship_id, penalty_until);
+        set_module_active_in_snap(snap, module_id, true);
+    });
     ctx.record_module_reactivation_delay(ship_id, module_id, react_delay_s);
     ctx.invalidate_and_push_fit(ship_id);
 
@@ -1109,14 +1118,17 @@ pub async fn handle_entosis_link_activation(
     ]))
 }
 
+fn set_module_active_in_snap(snap: &mut eve_db::WorldStateSnapshot, module_id: i64, active: bool) {
+    if active {
+        snap.module_active_states.insert(module_id);
+    } else {
+        snap.module_active_states.remove(&module_id);
+    }
+}
+
 fn set_module_active_in_db(ctx: &ServerContext, module_id: i64, active: bool) {
-    ctx.db.with_mut_snapshot(|snap| {
-        if active {
-            snap.module_active_states.insert(module_id);
-        } else {
-            snap.module_active_states.remove(&module_id);
-        }
-    });
+    ctx.db
+        .with_mut_snapshot(|snap| set_module_active_in_snap(snap, module_id, active));
 }
 
 /// Applies Command Burst (`group_id == 1770`) fleet `dbuffs` with V24 range, strength, duration, reload, Omega clone, and Industrial Core bonuses.
@@ -1539,42 +1551,26 @@ pub mod tactical_test_helpers {
         st.lance_victim_debuff_until.remove(&(inst_key, ship_id));
     }
 
-    /// Sets the Target Spectrum Breaker self sensor-penalty expiry timestamp for `ship_id` under `scope`.
-    #[cfg(test)]
-    pub(crate) fn set_tsb_self_penalty_until_for_scope(
-        ctx: &ServerContext,
-        scope: TacticalKeyScope,
-        ship_id: i64,
-        until_unix: u64,
-    ) {
-        let key = scope_key(ctx, scope);
-        ctx.tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .tsb_self_penalty_until
-            .insert((key, ship_id), until_unix);
-    }
-
     /// Sets the Target Spectrum Breaker self sensor-penalty expiry timestamp for `ship_id`.
     #[cfg(test)]
     pub(crate) fn set_tsb_self_penalty_until(ctx: &ServerContext, ship_id: i64, until_unix: u64) {
-        set_tsb_self_penalty_until_for_scope(ctx, TacticalKeyScope::Db, ship_id, until_unix);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .tsb_self_penalty_until
+                .insert(ship_id, until_unix);
+        });
     }
 
-    /// Returns the stored Target Spectrum Breaker self penalty expiry timestamp for `ship_id` under `scope`.
+    /// Returns the stored Target Spectrum Breaker self penalty expiry timestamp for `ship_id`.
     #[cfg(test)]
-    pub(crate) fn get_tsb_self_penalty_until_for_scope(
-        ctx: &ServerContext,
-        scope: TacticalKeyScope,
-        ship_id: i64,
-    ) -> Option<u64> {
-        let key = scope_key(ctx, scope);
-        ctx.tactical_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .tsb_self_penalty_until
-            .get(&(key, ship_id))
-            .copied()
+    pub(crate) fn get_tsb_self_penalty_until(ctx: &ServerContext, ship_id: i64) -> Option<u64> {
+        ctx.db.with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .tsb_self_penalty_until
+                .get(&ship_id)
+                .copied()
+        })
     }
 
     /// Sets the simulation time for `sys_id` under `scope`.

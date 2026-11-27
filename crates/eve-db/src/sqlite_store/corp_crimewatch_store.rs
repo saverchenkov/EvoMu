@@ -358,6 +358,7 @@ impl_decomposed_domain_struct!(
         ess_reserve_unlocked_until,
         ess_reserve_bank_thefts,
         ess_main_bank_thefts,
+        tsb_self_penalty_until,
     ],
     sorted_set_maps: [],
     sets: [],

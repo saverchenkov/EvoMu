@@ -206,8 +206,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             let mut tac = ctx.tactical_state.write().unwrap();
             tac.lance_caster_lock_until
                 .insert((dk, ship_id), 1_700_000_120);
-            tac.tsb_self_penalty_until
-                .insert((dk, ship_id), 1_700_000_300);
         }
         ctx.fleet_extras
             .lock()
@@ -270,6 +268,7 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             cw.pending_bounty_ticks.insert((sys_id, cid), 125_000.0);
             cw.bounty_tick_next_flush_unix
                 .insert((sys_id, cid), 1_700_001_200);
+            cw.tsb_self_penalty_until.insert(ship_id, 1_700_000_300);
             cw.record_destroyed_item_id(888_777_666);
         });
         with_mut_combat_ephemeral(&ctx, |st| {
@@ -404,11 +403,13 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
                 tac.lance_caster_lock_until.get(&(dk, ship_id)),
                 Some(&1_700_000_120)
             );
-            assert_eq!(
-                tac.tsb_self_penalty_until.get(&(dk, ship_id)),
-                Some(&1_700_000_300)
-            );
         }
+        assert_eq!(
+            crate::services::tactical_modules::tactical_test_helpers::get_tsb_self_penalty_until(
+                &ctx2, ship_id
+            ),
+            Some(1_700_000_300)
+        );
         assert_eq!(
             ctx2.fleet_extras
                 .lock()
@@ -463,6 +464,10 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             assert_eq!(
                 cw.bounty_tick_next_flush_unix.get(&(sys_id, cid)),
                 Some(&1_700_001_200)
+            );
+            assert_eq!(
+                cw.tsb_self_penalty_until.get(&ship_id),
+                Some(&1_700_000_300)
             );
             assert!(cw.is_recently_destroyed_item_id(888_777_666));
         });
@@ -1024,12 +1029,32 @@ async fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync(
         assert_tac_persists("lance_victim_debuff_until", &|ts, k| {
             ts.lance_victim_debuff_until.insert((k, 12), 600);
         });
-        assert_tac_persists("tsb_self_penalty_until", &|ts, k| {
-            ts.tsb_self_penalty_until.insert((k, 18), 700);
-        });
         assert_tac_persists("system_sim_time_s", &|ts, k| {
             ts.system_sim_time_s.insert((k, 30_000_142), 12.5);
         });
+        {
+            use crate::services::tactical_modules::tactical_test_helpers::{
+                get_tsb_self_penalty_until, set_tsb_self_penalty_until,
+            };
+            set_tsb_self_penalty_until(&ctx, 18, 700);
+            ctx.persist_server_runtime_to_db();
+            assert!(
+                !db.with_sqlite_conn(|conn| {
+                    eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn)
+                })
+                .expect("check checkpoints"),
+                "snapshot-owned tsb_self_penalty_until must NOT emit system_checkpoint rows"
+            );
+            let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+            ctx2.hydrate_server_runtime_from_db();
+            assert_eq!(get_tsb_self_penalty_until(&ctx2, 18), Some(700));
+            db.with_mut_snapshot(|snap| {
+                snap.combat_crimewatch_state
+                    .as_inner_mut()
+                    .tsb_self_penalty_until
+                    .clear();
+            });
+        }
 
         let assert_tac_crash_lost = |label: &str, set: &dyn Fn(&mut crate::services::tactical_modules::TacticalModulesState, usize)| {
             {
