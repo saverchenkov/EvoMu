@@ -96,7 +96,7 @@ fn char_station_notification_missing_char_and_alliance_war_faction_populated() {
     assert_eq!(drained[0].event, "OnCharNowInStation");
     assert_eq!(
         drained[0].args,
-        vec![PyRep::List(vec![
+        vec![PyRep::Tuple(vec![
             PyRep::Integer(missing_char),
             PyRep::Integer(0),
             PyRep::None,
@@ -106,7 +106,7 @@ fn char_station_notification_missing_char_and_alliance_war_faction_populated() {
     assert_eq!(drained[1].event, "OnCharNoLongerInStation");
     assert_eq!(
         drained[1].args,
-        vec![PyRep::List(vec![
+        vec![PyRep::Tuple(vec![
             PyRep::Integer(char_id),
             PyRep::Integer(1_000_170),
             PyRep::Integer(99_000_777),

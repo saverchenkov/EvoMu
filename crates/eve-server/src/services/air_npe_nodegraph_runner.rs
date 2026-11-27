@@ -430,28 +430,25 @@ fn emit_graph_update_and_message(
     ctx: &ServerContext,
     char_id: i64,
     instance_id: i64,
-    node_id: i64,
-    active_nodes: &[i64],
+    _node_id: i64,
+    _active_nodes: &[i64],
     bb: &BTreeMap<String, String>,
     msg_key: &str,
     msg_payload: PyRep,
 ) {
-    let nodes_list = PyRep::List(active_nodes.iter().copied().map(PyRep::Integer).collect());
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnClientNodeGraphUpdate {
             node_graph_instance_id: instance_id,
-            arg1: nodes_list,
-            arg2: Some(bb_to_py_dict(bb)),
+            blackboard_parameters: bb_to_py_dict(bb),
         },
     );
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnClientNodeGraphMessage {
             node_graph_instance_id: instance_id,
-            arg1: PyRep::Integer(node_id),
-            arg2: PyRep::String(msg_key.to_string()),
-            arg3: Some(msg_payload),
+            key: msg_key.to_string(),
+            value: msg_payload,
         },
     );
 }

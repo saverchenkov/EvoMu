@@ -42,7 +42,19 @@ fn skill_alpha_injector_subscription_and_trade_repackage_emitters() {
     emit_redeeming_queue_updated_for_user(&ctx, 1, Some(char_id));
     emit_redeeming_queue_updated_for_user(&ctx, 1, None);
     emit_pod_or_corvette_assembly(&ctx, char_id, 900_001, 670);
-    emit_player_state_updated(&ctx, char_id, PyRep::Integer(1));
+    emit_player_state_updated(
+        &ctx,
+        char_id,
+        PyRep::keyval([
+            ("rank", PyRep::Integer(1)),
+            ("experience", PyRep::Real(100.0)),
+            ("totalXP", PyRep::Real(100.0)),
+            ("accuracy", PyRep::Real(0.9)),
+            ("score", PyRep::Real(0.9)),
+            ("analysisKredits", PyRep::Integer(10)),
+            ("finishedTutorial", PyRep::Bool(true)),
+        ]),
+    );
     emit_subscription_changed_server(&ctx, char_id, 2);
     emit_subscription_time_update_server(&ctx, 1, 0);
     emit_subscription_time_update_server(&ctx, 1, 1_800_000_000);

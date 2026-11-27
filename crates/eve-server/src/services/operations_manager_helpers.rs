@@ -577,12 +577,12 @@ impl OperationRewardNotif {
             Self::RedeemingQueueUpdated(n) => (
                 OnRedeemingQueueUpdated::EVENT,
                 OnRedeemingQueueUpdated::DEFAULT_ID_TYPE,
-                n.into_args(),
+                crate::router::notify_registry::typed_args_checked(n),
             ),
             Self::RedeemingTokensUpdated(n) => (
                 OnRedeemingTokensUpdated::EVENT,
                 OnRedeemingTokensUpdated::DEFAULT_ID_TYPE,
-                n.into_args(),
+                crate::router::notify_registry::typed_args_checked(n),
             ),
         }
     }
@@ -1171,12 +1171,13 @@ pub fn advance_and_notify_server_operation_tasks(
                         NotificationTarget::Character(char_id),
                         OnOperationTaskCompleted::EVENT,
                         OnOperationTaskCompleted::DEFAULT_ID_TYPE,
-                        OnOperationTaskCompleted {
-                            category_id: cat_id,
-                            operation_id: op_id,
-                            task_id: tid,
-                        }
-                        .into_args(),
+                        crate::router::notify_registry::typed_args_checked(
+                            OnOperationTaskCompleted {
+                                category_id: cat_id,
+                                operation_id: op_id,
+                                task_id: tid,
+                            },
+                        ),
                     );
                 }
             }

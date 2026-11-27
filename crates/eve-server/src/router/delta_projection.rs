@@ -72,17 +72,19 @@ pub struct ProjectedNotification {
 impl ProjectedNotification {
     /// Builds a [`ProjectedNotification`] from a strongly typed [`TypedNotification`] using its
     /// registered `EVENT` and `DEFAULT_ID_TYPE`.
+    #[track_caller]
     pub fn from_typed<N: TypedNotification>(target: ProjectedTarget, notif: N) -> Self {
         Self {
             target,
             event: N::EVENT,
             id_type: N::DEFAULT_ID_TYPE,
-            args: notif.into_args(),
+            args: crate::router::notify_registry::typed_args_checked(notif),
         }
     }
 
     /// Builds a [`ProjectedNotification`] from a strongly typed [`TypedNotification`] with an
     /// explicit Macho `id_type` (for scope-dependent events like `OnItemChange` or `OnAccountChange`).
+    #[track_caller]
     pub fn from_typed_with_id_type<N: TypedNotification>(
         target: ProjectedTarget,
         id_type: &'static str,
@@ -92,7 +94,7 @@ impl ProjectedNotification {
             target,
             event: N::EVENT,
             id_type,
-            args: notif.into_args(),
+            args: crate::router::notify_registry::typed_args_checked(notif),
         }
     }
 }
@@ -1999,7 +2001,7 @@ pub(crate) fn push_item_diffs_tx_effects(
     }
 
     for (owner_id, target) in bp_owners_to_notify {
-        let args = OnBlueprintsUpdated { owner_id }.into_args();
+        let args = crate::router::notify_registry::typed_args_checked(OnBlueprintsUpdated { owner_id });
         match target {
             ProjectedTarget::Character(cid) => {
                 effects.notify_character(

@@ -83,7 +83,15 @@ fn station_scanner_mining_damage_and_ess_notifications() {
         crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
             .expect("non-zero scene"),
     );
-    emit_system_ess_data_changed(&ctx, i64::from(sys_id), PyRep::Integer(1));
+    emit_system_ess_data_changed(
+        &ctx,
+        i64::from(sys_id),
+        PyRep::keyval([
+            ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+            ("mainBank", PyRep::Real(50_000_000.0)),
+            ("reserveBank", PyRep::Real(100_000_000.0)),
+        ]),
+    );
     emit_system_dynamic_bounty_state_changed(&ctx, i64::from(sys_id), 1.35);
     emit_ess_main_bank_link_notification(&ctx, sys_id);
     emit_ess_reserve_bank_link_notification(&ctx, sys_id);
@@ -97,7 +105,7 @@ fn station_scanner_mining_damage_and_ess_notifications() {
     assert_eq!(drained[0].event, "OnCharNowInStation");
     assert_eq!(
         drained[0].args,
-        vec![PyRep::List(vec![
+        vec![PyRep::Tuple(vec![
             PyRep::Integer(char_id),
             PyRep::Integer(1_000_170),
             PyRep::None,
@@ -238,7 +246,7 @@ fn broadcast_delivery_station_alliance_faction_fields_negative_guards_and_empty_
     assert_eq!(d2.len(), 1);
     assert_eq!(
         d1[0].args,
-        vec![PyRep::List(vec![
+        vec![PyRep::Tuple(vec![
             PyRep::Integer(char_id),
             PyRep::Integer(1_000_170),
             PyRep::Integer(99_000_010),

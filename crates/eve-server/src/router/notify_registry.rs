@@ -174,6 +174,20 @@ pub trait TypedNotification {
     fn scene_scope(&self) -> Option<OutboundSceneScope> {
         None
     }
+
+    #[cfg(any(test, feature = "testkit"))]
+    fn sample_payloads() -> Vec<Vec<PyRep>>;
+}
+
+/// Converts `notif` into wire arguments and, in `test`/`testkit` builds, enforces strict recursive
+/// shape matching against registered `sample_payloads` (`#933` Track 6b).
+#[inline]
+#[track_caller]
+pub fn typed_args_checked<N: TypedNotification>(notif: N) -> Vec<PyRep> {
+    let args = notif.into_args();
+    #[cfg(any(test, feature = "testkit"))]
+    super::notify_shape_check::assert_typed_notification_shape::<N>(&args);
+    args
 }
 
 /// Static descriptor entry exposed for contract verification across all registered events.
@@ -195,15 +209,16 @@ impl ServerContext {
         notif: N,
     ) -> Vec<PendingMachoNotification> {
         let scope = notif.scene_scope();
+        let args = typed_args_checked(notif);
         match scope {
             Some(_) => self.notify_in_scene(
                 target,
                 N::EVENT,
                 N::DEFAULT_ID_TYPE,
-                notif.into_args(),
+                args,
                 scope,
             ),
-            None => self.notify(target, N::EVENT, N::DEFAULT_ID_TYPE, notif.into_args()),
+            None => self.notify(target, N::EVENT, N::DEFAULT_ID_TYPE, args),
         }
     }
     /// Emits a typed notification with an explicit MachoNet `id_type` override (for events whose
@@ -215,15 +230,17 @@ impl ServerContext {
         notif: N,
     ) -> Vec<PendingMachoNotification> {
         let scope = notif.scene_scope();
+        let args = typed_args_checked(notif);
         match scope {
-            Some(_) => self.notify_in_scene(target, N::EVENT, id_type, notif.into_args(), scope),
-            None => self.notify(target, N::EVENT, id_type, notif.into_args()),
+            Some(_) => self.notify_in_scene(target, N::EVENT, id_type, args, scope),
+            None => self.notify(target, N::EVENT, id_type, args),
         }
     }
 
     /// Emits a registered notification by event name to a single character after verifying
     /// that `event` is registered in [`all_registered_notifications`] and `args.len()`
     /// satisfies its registered arity bounds.
+    #[track_caller]
     pub fn emit_registered_to_char(
         &self,
         char_id: i64,
@@ -235,6 +252,8 @@ impl ServerContext {
         if entry.is_ballpark_scoped {
             return None;
         }
+        #[cfg(any(test, feature = "testkit"))]
+        super::notify_shape_check::assert_registered_notification_shape(entry, &args);
         Some(self.notify(
             NotificationTarget::Character(char_id),
             entry.event,
@@ -242,6 +261,68 @@ impl ServerContext {
             args,
         ))
     }
+}
+
+/// Emits a V24 4-argument `ProcessInventoryChange(items, change, isRemote, inventory2)` notice.
+pub(crate) fn emit_process_inventory_change(
+    ctx: &ServerContext,
+    target_char_id: i64,
+    item: &eve_db::InventoryItemRecord,
+    old_location_id: i64,
+    old_flag_id: i64,
+) {
+    let (category_id, group_id) = ctx
+        .sde
+        .types
+        .get(&item.type_id)
+        .map(|t| (i64::from(t.category_id), i64::from(t.group_id)))
+        .unwrap_or((0, 0));
+    let item_kv = PyRep::keyval([
+        ("itemID", PyRep::Integer(item.item_id)),
+        ("typeID", PyRep::Integer(i64::from(item.type_id))),
+        ("ownerID", PyRep::Integer(item.owner_id)),
+        ("locationID", PyRep::Integer(item.location_id)),
+        ("flagID", PyRep::Integer(item.flag as i64)),
+        ("categoryID", PyRep::Integer(category_id)),
+        ("groupID", PyRep::Integer(group_id)),
+        ("singleton", PyRep::Bool(item.singleton)),
+        ("quantity", PyRep::Integer(i64::from(item.quantity))),
+        ("stacksize", PyRep::Integer(i64::from(item.quantity))),
+    ]);
+    let change_dict = PyRep::Dict(vec![
+        (
+            PyRep::Integer(3),
+            PyRep::Tuple(vec![
+                PyRep::Integer(old_location_id),
+                PyRep::Integer(item.location_id),
+            ]),
+        ),
+        (
+            PyRep::Integer(4),
+            PyRep::Tuple(vec![
+                PyRep::Integer(old_flag_id),
+                PyRep::Integer(item.flag as i64),
+            ]),
+        ),
+    ]);
+    ctx.emit_typed(
+        NotificationTarget::Character(target_char_id),
+        ProcessInventoryChange {
+            arg0: PyRep::List(vec![item_kv]),
+            arg1: change_dict,
+            arg2: PyRep::Bool(true),
+            arg3: Some(PyRep::None),
+        },
+    );
+}
+
+#[cfg(any(test, feature = "testkit"))]
+#[track_caller]
+pub(super) fn assert_registered_entry_shape(
+    entry: &NotificationRegistryEntry,
+    args: &[PyRep],
+) {
+    super::notify_shape_check::assert_registered_notification_shape(entry, args);
 }
 
 pub(super) fn find_registered_notification_checked(
@@ -297,6 +378,12 @@ macro_rules! define_notification_item {
             fn into_args(self) -> Vec<PyRep> {
                 Vec::new()
             }
+
+            #[cfg(any(test, feature = "testkit"))]
+            fn sample_payloads() -> Vec<Vec<PyRep>> {
+                let f: fn() -> Vec<Vec<PyRep>> = $samples;
+                f()
+            }
         }
     };
 
@@ -318,6 +405,12 @@ macro_rules! define_notification_item {
 
             fn into_args(self) -> Vec<PyRep> {
                 vec![$(ToNotifyArg::into_notify_arg(self.$field)),+]
+            }
+
+            #[cfg(any(test, feature = "testkit"))]
+            fn sample_payloads() -> Vec<Vec<PyRep>> {
+                let f: fn() -> Vec<Vec<PyRep>> = $samples;
+                f()
             }
         }
     };
@@ -349,6 +442,12 @@ macro_rules! define_notification_item {
                 )+
                 args
             }
+
+            #[cfg(any(test, feature = "testkit"))]
+            fn sample_payloads() -> Vec<Vec<PyRep>> {
+                let f: fn() -> Vec<Vec<PyRep>> = $samples;
+                f()
+            }
         }
     };
 
@@ -377,6 +476,12 @@ macro_rules! define_notification_item {
                 )+
                 args
             }
+
+            #[cfg(any(test, feature = "testkit"))]
+            fn sample_payloads() -> Vec<Vec<PyRep>> {
+                let f: fn() -> Vec<Vec<PyRep>> = $samples;
+                f()
+            }
         }
     };
 
@@ -404,6 +509,12 @@ macro_rules! define_notification_item {
             fn scene_scope(&self) -> Option<OutboundSceneScope> {
                 Some(self.scene.into_outbound_scope())
             }
+
+            #[cfg(any(test, feature = "testkit"))]
+            fn sample_payloads() -> Vec<Vec<PyRep>> {
+                let f: fn() -> Vec<Vec<PyRep>> = $samples;
+                f()
+            }
         }
     };
 
@@ -430,6 +541,12 @@ macro_rules! define_notification_item {
 
             fn scene_scope(&self) -> Option<OutboundSceneScope> {
                 Some(self.scene.into_outbound_scope())
+            }
+
+            #[cfg(any(test, feature = "testkit"))]
+            fn sample_payloads() -> Vec<Vec<PyRep>> {
+                let f: fn() -> Vec<Vec<PyRep>> = $samples;
+                f()
             }
         }
     };
@@ -466,6 +583,12 @@ macro_rules! define_notification_item {
             fn scene_scope(&self) -> Option<OutboundSceneScope> {
                 Some(self.scene.into_outbound_scope())
             }
+
+            #[cfg(any(test, feature = "testkit"))]
+            fn sample_payloads() -> Vec<Vec<PyRep>> {
+                let f: fn() -> Vec<Vec<PyRep>> = $samples;
+                f()
+            }
         }
     };
 
@@ -498,6 +621,12 @@ macro_rules! define_notification_item {
 
             fn scene_scope(&self) -> Option<OutboundSceneScope> {
                 Some(self.scene.into_outbound_scope())
+            }
+
+            #[cfg(any(test, feature = "testkit"))]
+            fn sample_payloads() -> Vec<Vec<PyRep>> {
+                let f: fn() -> Vec<Vec<PyRep>> = $samples;
+                f()
             }
         }
     };
@@ -587,6 +716,90 @@ fn sample_keyval_item() -> PyRep {
     ])
 }
 
+/// Sample `seasons.common.challenge.Challenge` `ObjectEx` payload matching
+/// `services/season_manager.rs:322-454` (`challenge_to_v24_object`).
+fn sample_season_challenge_object() -> PyRep {
+    let state_dict = PyRep::Dict(vec![
+        (PyRep::String("challenge_id".into()), PyRep::Integer(43)),
+        (PyRep::String("challengeID".into()), PyRep::Integer(43)),
+        (PyRep::String("challenge_type_id".into()), PyRep::Integer(43)),
+        (PyRep::String("character_id".into()), PyRep::Integer(90_000_001)),
+        (PyRep::String("season_id".into()), PyRep::Integer(1)),
+        (PyRep::String("seasonID".into()), PyRep::Integer(1)),
+        (PyRep::String("season_points".into()), PyRep::Integer(10)),
+        (PyRep::String("seasonPoints".into()), PyRep::Integer(10)),
+        (PyRep::String("event_type".into()), PyRep::String("combat".into())),
+        (
+            PyRep::String("expiration_date".into()),
+            PyRep::Integer(1_335_000_000_000_000_00),
+        ),
+        (
+            PyRep::String("expirationDate".into()),
+            PyRep::Integer(1_335_000_000_000_000_00),
+        ),
+        (PyRep::String("finish_date".into()), PyRep::None),
+        (
+            PyRep::String("finish_date".into()),
+            PyRep::Integer(1_335_000_000_000_000_00),
+        ),
+        (PyRep::String("is_expired".into()), PyRep::Bool(false)),
+        (PyRep::String("progress".into()), PyRep::Integer(0)),
+        (PyRep::String("max_progress".into()), PyRep::Integer(1)),
+        (PyRep::String("maxProgress".into()), PyRep::Integer(1)),
+        (PyRep::String("message_text".into()), PyRep::None),
+        (PyRep::String("message_text".into()), PyRep::Integer(1)),
+        (PyRep::String("progress_text".into()), PyRep::None),
+        (PyRep::String("progress_text".into()), PyRep::Integer(1)),
+        (PyRep::String("name".into()), PyRep::None),
+        (PyRep::String("name".into()), PyRep::Integer(1)),
+        (PyRep::String("challenge_category".into()), PyRep::String("PvE".into())),
+        (PyRep::String("challenge_security".into()), PyRep::String(String::new())),
+        (PyRep::String("points_awarded".into()), PyRep::Integer(10)),
+        (PyRep::String("isk_awarded".into()), PyRep::Integer(0)),
+        (PyRep::String("is_coop".into()), PyRep::Bool(false)),
+        (PyRep::String("expiration_minutes".into()), PyRep::Integer(0)),
+        (
+            PyRep::String("received_date".into()),
+            PyRep::Integer(1_335_000_000_000_000_00),
+        ),
+        (
+            PyRep::String("start_date".into()),
+            PyRep::Integer(1_335_000_000_000_000_00),
+        ),
+        (PyRep::String("should_be_active_on_season_start".into()), PyRep::Bool(true)),
+        (PyRep::String("should_only_appear_once_per_season".into()), PyRep::Bool(false)),
+        (PyRep::String("next_challenge".into()), PyRep::None),
+        (PyRep::String("next_challenge".into()), PyRep::Integer(44)),
+        (PyRep::String("is_chained".into()), PyRep::Bool(false)),
+        (PyRep::String("should_not_expire_at_downtime".into()), PyRep::Bool(false)),
+        (PyRep::String("is_dormant".into()), PyRep::Bool(false)),
+        (PyRep::String("isDormant".into()), PyRep::Bool(false)),
+        (PyRep::String("reward_type".into()), PyRep::None),
+        (PyRep::String("reward_type".into()), PyRep::Integer(34)),
+        (PyRep::String("reward_amount".into()), PyRep::Integer(0)),
+        (PyRep::String("reward_date".into()), PyRep::None),
+        (
+            PyRep::String("reward_date".into()),
+            PyRep::Integer(1_335_000_000_000_000_00),
+        ),
+        (PyRep::String("reward_type_soul_bound".into()), PyRep::Bool(false)),
+        (PyRep::String("title".into()), PyRep::String("Challenge".into())),
+        (PyRep::String("description".into()), PyRep::String(String::new())),
+        (PyRep::String("points".into()), PyRep::Integer(10)),
+        (PyRep::String("completed".into()), PyRep::Bool(false)),
+        (PyRep::String("claimed".into()), PyRep::Bool(false)),
+    ]);
+    PyRep::ObjectEx {
+        is_type_2: true,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Tuple(vec![PyRep::Token("seasons.common.challenge.Challenge".into())]),
+            state_dict,
+        ])),
+        list: Vec::new(),
+        dict: Vec::new(),
+    }
+}
+
 fn sample_dbrow_item() -> PyRep {
     eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(vec![
         PyRep::Integer(100_000_001),
@@ -599,6 +812,151 @@ fn sample_dbrow_item() -> PyRep {
         PyRep::Integer(4),
         PyRep::String(String::new()),
     ])
+}
+
+fn sample_session_change_dict() -> PyRep {
+    // Session change dicts emit `(old, new)` transitions across nullable integer/string/bool keys
+    // (`router/session_transition.rs:1578-1632` and `SessionMgr.OnSessionChanged`).
+    let mut entries = Vec::new();
+    for key in [
+        "solarsystemid2",
+        "solarsystemid",
+        "stationid",
+        "structureid",
+        "shipid",
+        "locationid",
+        "charid",
+        "corpid",
+        "allianceid",
+        "userid",
+        "constellationid",
+        "regionid",
+        "fleetid",
+        "fleetrole",
+        "wingid",
+        "squadid",
+        "warfactionid",
+        "corprole",
+        "role",
+        "hqid",
+        "corpAccountKey",
+        "raceID",
+        "bloodlineID",
+        "genderID",
+    ] {
+        entries.push((
+            PyRep::String(key.into()),
+            PyRep::Tuple(vec![PyRep::Integer(30_000_142), PyRep::Integer(30_000_144)]),
+        ));
+        entries.push((
+            PyRep::String(key.into()),
+            PyRep::Tuple(vec![PyRep::None, PyRep::Integer(60_003_760)]),
+        ));
+        entries.push((
+            PyRep::String(key.into()),
+            PyRep::Tuple(vec![PyRep::Integer(60_003_760), PyRep::None]),
+        ));
+        // Undock / transition clears or re-emits nullable session keys with `(None, None)`
+        // (`router/session_transition.rs:1592`).
+        entries.push((
+            PyRep::String(key.into()),
+            PyRep::Tuple(vec![PyRep::None, PyRep::None]),
+        ));
+    }
+    entries.push((
+        PyRep::String("charname".into()),
+        PyRep::Tuple(vec![PyRep::None, PyRep::String("Pilot".into())]),
+    ));
+    entries.push((
+        PyRep::String("flag".into()),
+        PyRep::Tuple(vec![PyRep::Bool(false), PyRep::Bool(true)]),
+    ));
+    PyRep::Dict(entries)
+}
+
+fn sample_godma_env(char_id: PyRep, target_id: PyRep, charge_type_id: PyRep) -> PyRep {
+    PyRep::Tuple(vec![
+        PyRep::Integer(100_000_020),
+        char_id,
+        PyRep::Integer(100_000_010),
+        target_id,
+        charge_type_id,
+        PyRep::List(Vec::new()),
+        PyRep::Integer(10),
+    ])
+}
+
+fn sample_skill_info_kv(level: i64, sp: f64) -> PyRep {
+    PyRep::keyval([
+        ("typeID", PyRep::Integer(3402)),
+        ("skillLevel", PyRep::Integer(level)),
+        ("trainedSkillLevel", PyRep::Integer(level)),
+        ("effectiveSkillLevel", PyRep::Integer(level)),
+        ("activeSkillLevel", PyRep::Integer(level)),
+        ("virtualSkillLevel", PyRep::None),
+        ("skillPoints", PyRep::Real(sp)),
+        ("trainedSkillPoints", PyRep::Real(sp)),
+        ("skillRank", PyRep::Real(1.0)),
+    ])
+}
+
+fn sample_godma_ship_effect_variants() -> Vec<Vec<PyRep>> {
+    // V24.02 `Godma.OnGodmaShipEffect`:
+    // - 3-arg minimal `(itemID, effect_str_or_id, active_bool)` (`combat_weapons_spool.rs:82`,
+    //   `tactical_modules_superweapon_ops.rs:1288`, `fitting_module_cycles_pending_actions.rs:101`).
+    // - 10-arg (`cache_notifications.rs:1952`, `binding.rs:1837`) and 11-arg
+    //   (`outbound_scene_scope.rs:865`, `mining_cycle.rs:871`) with `Integer(effect_id)` and 7-tuple
+    //   `environment = (moduleID, charID|None, shipID, targetID|None, chargeTypeID|None, sublocs, effectID)`.
+    let sim_ft = 1_335_000_000_000_000_00_i64;
+    let mut out = vec![
+        vec![
+            PyRep::Integer(200_018_015),
+            PyRep::String("online".into()),
+            PyRep::Bool(false),
+        ],
+        vec![
+            PyRep::Integer(200_018_015),
+            PyRep::Integer(16),
+            PyRep::Bool(true),
+        ],
+    ];
+    let env_shapes = [
+        sample_godma_env(PyRep::None, PyRep::None, PyRep::None),
+        sample_godma_env(PyRep::Integer(90_000_001), PyRep::None, PyRep::None),
+        sample_godma_env(PyRep::Integer(90_000_001), PyRep::Integer(100_000_099), PyRep::None),
+        sample_godma_env(
+            PyRep::Integer(90_000_001),
+            PyRep::Integer(100_000_099),
+            PyRep::Integer(219),
+        ),
+        sample_godma_env(PyRep::Integer(90_000_001), PyRep::None, PyRep::Integer(219)),
+    ];
+    for env in env_shapes {
+        for dur in [PyRep::Real(1000.0), PyRep::Integer(1000)] {
+            for err in [PyRep::None, PyRep::Integer(0)] {
+                let base10 = vec![
+                    PyRep::Integer(200_018_015),
+                    PyRep::Integer(10),
+                    PyRep::Integer(sim_ft),
+                    PyRep::Integer(1),
+                    PyRep::Integer(1),
+                    env.clone(),
+                    PyRep::Integer(sim_ft),
+                    dur.clone(),
+                    PyRep::Integer(0),
+                    err,
+                ];
+                let mut with_stop_none = base10.clone();
+                with_stop_none.push(PyRep::None);
+                let mut with_stop_time = base10.clone();
+                with_stop_time.push(PyRep::Integer(sim_ft));
+                out.push(base10);
+                out.push(with_stop_none);
+                out.push(with_stop_time);
+            }
+        }
+    }
+    out
 }
 
 define_notifications! {
@@ -732,9 +1090,16 @@ define_notifications! {
     },
     OnCfgDataChanged => "OnCfgDataChanged" ("solarsystemid") {
         fields: { what: String, data: PyRep },
+        // `services/notify_emitters_skills_trade_godma.rs:1122` & `notify_emitters_space_dungeons.rs:112`.
         samples: || vec![vec![
             PyRep::String("evelocations".into()),
-            PyRep::List(vec![PyRep::Integer(60_003_760), PyRep::String("Station".into())]),
+            PyRep::List(vec![
+                PyRep::Integer(60_003_760),
+                PyRep::String("Station".into()),
+                PyRep::Integer(30_000_142),
+                PyRep::Real(0.0),
+                PyRep::None,
+            ]),
         ]],
     },
     OnChallengeCompleted => "OnChallengeCompleted" ("charid") {
@@ -743,7 +1108,11 @@ define_notifications! {
     },
     OnChallengeExpired => "OnChallengeExpired" ("charid") {
         fields: { challenge_id: i64, new_challenge: PyRep },
-        samples: || vec![vec![PyRep::Integer(42), PyRep::keyval([("challengeID", PyRep::Integer(43))])]],
+        // `services/season_manager.rs:74` emits `seasons.common.challenge.Challenge` `ObjectEx`.
+        samples: || vec![
+            vec![PyRep::Integer(42), sample_season_challenge_object()],
+            vec![PyRep::Integer(42), PyRep::keyval([("challengeID", PyRep::Integer(43))])],
+        ],
     },
     OnChallengeProgressUpdate => "OnChallengeProgressUpdate" ("charid") {
         fields: { challenge_id: i64, new_progress: i64 },
@@ -759,25 +1128,72 @@ define_notifications! {
     },
     OnChannelLeft => "OnChannelLeft" ("channelid") {
         fields: { channel: PyRep },
-        samples: || vec![vec![PyRep::Tuple(vec![PyRep::String("fleet".into()), PyRep::Integer(1)])]],
+        // `XmppChatChannels.OnChannelLeft(channel)` (`services/fleet_social_notify.rs:396`)
+        // emits bare string channel IDs; legacy tuple form still normalized by `client_compat`.
+        samples: || vec![
+            vec![PyRep::Tuple(vec![PyRep::String("fleet".into()), PyRep::Integer(1)])],
+            vec![PyRep::String("fleet_1".into())],
+        ],
     },
     OnCharNoLongerInStation => "OnCharNoLongerInStation" ("charid") {
         fields: { rec: PyRep },
-        samples: || vec![vec![PyRep::Tuple(vec![
-            PyRep::Integer(90_000_001),
-            PyRep::Integer(98_000_001),
-            PyRep::None,
-            PyRep::Integer(0),
-        ])]],
+        // `allianceID` and `warFactionID` are nullable (`None` or `Integer`, `router/dispatch.rs:445-455`).
+        samples: || vec![
+            vec![PyRep::Tuple(vec![
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(98_000_001),
+                PyRep::None,
+                PyRep::Integer(0),
+            ])],
+            vec![PyRep::Tuple(vec![
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(98_000_001),
+                PyRep::None,
+                PyRep::None,
+            ])],
+            vec![PyRep::Tuple(vec![
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(98_000_001),
+                PyRep::Integer(99_000_001),
+                PyRep::Integer(500_001),
+            ])],
+            vec![PyRep::Tuple(vec![
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(98_000_001),
+                PyRep::Integer(99_000_001),
+                PyRep::None,
+            ])],
+        ],
     },
     OnCharNowInStation => "OnCharNowInStation" ("charid") {
         fields: { rec: PyRep },
-        samples: || vec![vec![PyRep::Tuple(vec![
-            PyRep::Integer(90_000_001),
-            PyRep::Integer(98_000_001),
-            PyRep::None,
-            PyRep::Integer(0),
-        ])]],
+        // `allianceID` and `warFactionID` are nullable (`None` or `Integer`, `router/dispatch.rs:445-455`).
+        samples: || vec![
+            vec![PyRep::Tuple(vec![
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(98_000_001),
+                PyRep::None,
+                PyRep::Integer(0),
+            ])],
+            vec![PyRep::Tuple(vec![
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(98_000_001),
+                PyRep::None,
+                PyRep::None,
+            ])],
+            vec![PyRep::Tuple(vec![
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(98_000_001),
+                PyRep::Integer(99_000_001),
+                PyRep::Integer(500_001),
+            ])],
+            vec![PyRep::Tuple(vec![
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(98_000_001),
+                PyRep::Integer(99_000_001),
+                PyRep::None,
+            ])],
+        ],
     },
     OnCharacterPermanentlyBanned => "OnCharacterPermanentlyBanned" ("charid") {
         samples: || vec![vec![]],
@@ -837,9 +1253,17 @@ define_notifications! {
     },
     OnCombatMessage => "OnCombatMessage" ("charid") {
         fields: { message_name: String, message_args: PyRep },
+        // `services/notify_emitters_combat_ess_progression.rs:117` & `notify_emitters_ess_bounties.rs:167`.
         samples: || vec![vec![
             PyRep::String("Hit".into()),
-            PyRep::Dict(vec![(PyRep::String("specialObject".into()), PyRep::Integer(100_000_010))]),
+            PyRep::Dict(vec![
+                (PyRep::String("specialObject".into()), PyRep::Integer(100_000_010)),
+                (PyRep::String("damage".into()), PyRep::Real(42.5)),
+                (PyRep::String("type".into()), PyRep::Integer(561)),
+                (PyRep::String("weapon".into()), PyRep::Integer(561)),
+                (PyRep::String("hitQualityText".into()), PyRep::String("Wrecks".into())),
+                (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
+            ]),
         ]],
     },
     OnCommunityFittingsUpdated => "OnCommunityFittingsUpdated" ("clientID") {
@@ -885,9 +1309,12 @@ define_notifications! {
     OnCriminalTimerUpdate => "OnCriminalTimerUpdate" ("charid") {
         fields: { state: i64, expiry_time: Option<SimFileTime> },
         optional: { do_alert: Option<bool> },
+        // `services/notify_emitters_fleet_combat.rs:184` emits `expiry_time = None` on timer expiry.
         samples: || vec![
             vec![PyRep::Integer(301), PyRep::Integer(1_335_000_000_000_000_00)],
+            vec![PyRep::Integer(300), PyRep::None],
             vec![PyRep::Integer(301), PyRep::Integer(1_335_000_000_000_000_00), PyRep::Bool(true)],
+            vec![PyRep::Integer(300), PyRep::None, PyRep::Bool(false)],
         ],
     },
     OnDamageStateChange => "OnDamageStateChange" ("charid") @ballpark {
@@ -907,11 +1334,22 @@ define_notifications! {
     },
     OnDeathzoneStateUpdate => "OnDeathzoneStateUpdate" ("charid") {
         fields: { solar_system_id: i64, ship_id: i64, tracking_data: PyRep },
-        samples: || vec![vec![
-            PyRep::Integer(32_000_001),
-            PyRep::Integer(100_000_010),
-            PyRep::None,
-        ]],
+        // `services/notify_emitters_space_dungeons.rs:1059` passes `Dict` inside zone, `None` outside.
+        samples: || vec![
+            vec![
+                PyRep::Integer(32_000_001),
+                PyRep::Integer(100_000_010),
+                PyRep::None,
+            ],
+            vec![
+                PyRep::Integer(32_000_001),
+                PyRep::Integer(100_000_010),
+                PyRep::Dict(vec![
+                    (PyRep::String("timeRemainingMs".into()), PyRep::Real(15_000.0)),
+                    (PyRep::String("dangerLevel".into()), PyRep::Real(1.0)),
+                ]),
+            ],
+        ],
     },
     OnDestinationChange => "OnDestinationChange" ("charid") {
         fields: { solar_system_id: i64, clear_other_waypoints: bool, first: bool },
@@ -920,9 +1358,12 @@ define_notifications! {
     OnDisapprovalTimerUpdate => "OnDisapprovalTimerUpdate" ("charid") {
         fields: { state: i64, expiry_time: Option<SimFileTime> },
         optional: { do_alert: Option<bool> },
+        // `services/crimewatch_timers.rs:341` emits `expiry_time = None` on timer expiry.
         samples: || vec![
             vec![PyRep::Integer(501), PyRep::Integer(1_335_000_000_000_000_00)],
+            vec![PyRep::Integer(500), PyRep::None],
             vec![PyRep::Integer(501), PyRep::Integer(1_335_000_000_000_000_00), PyRep::Bool(true)],
+            vec![PyRep::Integer(500), PyRep::None, PyRep::Bool(false)],
         ],
     },
     OnDuelChallenge => "OnDuelChallenge" ("charid") {
@@ -964,7 +1405,11 @@ define_notifications! {
     },
     OnDungeonTriggerAmbientSound => "OnDungeonTriggerAmbientSound" ("charid") {
         fields: { dungeon_id: i64, sound_id: i64, entity_item_id: i64 },
-        samples: || vec![vec![PyRep::Integer(42), PyRep::Integer(7), PyRep::Integer(100_000_010)]],
+        // Accepts both integer and string sound IDs (`notify_emitters_tournaments_anomalies.rs:451`).
+        samples: || vec![
+            vec![PyRep::Integer(42), PyRep::Integer(7), PyRep::Integer(100_000_010)],
+            vec![PyRep::Integer(42), PyRep::String("amb".into()), PyRep::Integer(100_000_010)],
+        ],
     },
     OnDungeonTriggerAudio => "OnDungeonTriggerAudio" ("charid") {
         fields: { dungeon_id: i64, audio_url: String },
@@ -972,7 +1417,11 @@ define_notifications! {
     },
     OnDungeonTriggerMessage => "OnDungeonTriggerMessage" ("charid") {
         fields: { message_type: i64, message_id: i64 },
-        samples: || vec![vec![PyRep::Integer(1), PyRep::Integer(5001)]],
+        // Accepts both integer and string message types (`OnDungeonTriggerMessageStr`).
+        samples: || vec![
+            vec![PyRep::Integer(1), PyRep::Integer(5001)],
+            vec![PyRep::String("warn".into()), PyRep::Integer(5001)],
+        ],
     },
     OnDungeonTriggerMusic => "OnDungeonTriggerMusic" ("charid") {
         fields: { dungeon_id: i64, music_trigger_id: i64 },
@@ -988,7 +1437,19 @@ define_notifications! {
     },
     OnEffectMessage => "OnEffectMessage" ("charid") {
         fields: { msgkey: String, args: PyRep },
-        samples: || vec![vec![PyRep::String("CustomError".into()), PyRep::Dict(Vec::new())]],
+        // `Godma.OnEffectMessage` forwards formatting kwargs (`Integer`, `Real`, `String`)
+        // from `services/mining_cycle.rs:376` and `services/notify_emitters_missing.rs:16`.
+        samples: || vec![vec![
+            PyRep::String("CustomError".into()),
+            PyRep::Dict(vec![
+                (PyRep::String("k".into()), PyRep::Integer(1)),
+                (PyRep::String("detail".into()), PyRep::String("msg".into())),
+                (PyRep::String("effectname".into()), PyRep::String("mining".into())),
+                (PyRep::String("need".into()), PyRep::Real(10.0)),
+                (PyRep::String("got".into()), PyRep::Real(5.0)),
+                (PyRep::String("moduleID".into()), PyRep::Integer(100_000_001)),
+            ]),
+        ]],
     },
     OnEnterTournamentSystem => "OnEnterTournamentSystem" ("charid") {
         samples: || vec![vec![]],
@@ -1079,7 +1540,16 @@ define_notifications! {
     },
     OnFleetRespawnPointsUpdate => "OnFleetRespawnPointsUpdate" ("fleetid") {
         fields: { respawn_points: PyRep },
-        samples: || vec![vec![PyRep::List(Vec::new())]],
+        // `services/notify_emitters_character_services.rs:678-683` emits `KeyVal` respawn entries.
+        samples: || vec![
+            vec![PyRep::List(vec![PyRep::keyval([
+                ("solarsystemID", PyRep::Integer(30_000_142)),
+                ("extraInfo", PyRep::Integer(1_000_000_000_001)),
+                ("locationID", PyRep::Integer(1_000_000_000_001)),
+                ("typeID", PyRep::Integer(35_832)),
+            ])])],
+            vec![PyRep::List(Vec::new())],
+        ],
     },
     OnFleetStateChange => "OnFleetStateChange" ("charid") {
         fields: { fleet_state: PyRep },
@@ -1090,13 +1560,27 @@ define_notifications! {
     },
     OnGlobalConfigUpdated => "OnGlobalConfigUpdated" ("clientID") {
         fields: { key: String, val: PyRep },
-        samples: || vec![vec![PyRep::String("featureFlag".into()), PyRep::Bool(true)]],
+        // `services/auth_cache.rs:223` & `DynamicResourceSvc.OnGlobalConfigUpdated` (`compareisnull`).
+        samples: || vec![
+            vec![PyRep::String("featureFlag".into()), PyRep::Bool(true)],
+            vec![PyRep::String("featureFlag".into()), PyRep::String("enabled".into())],
+            vec![PyRep::String("featureFlag".into()), PyRep::Integer(1)],
+            vec![PyRep::String("featureFlag".into()), PyRep::Real(1.5)],
+            vec![PyRep::String("featureFlag".into()), PyRep::None],
+        ],
     },
     OnIncomingAgentMessage => "OnIncomingAgentMessage" ("charid") {
         fields: { agent_id: i64, message: PyRep },
+        // `services/notify_emitters_character_services.rs:147-160`.
         samples: || vec![vec![
             PyRep::Integer(3_000_001),
-            PyRep::Tuple(vec![PyRep::String("MissionOffered".into()), PyRep::Dict(Vec::new())]),
+            PyRep::Tuple(vec![
+                PyRep::String("UI/Agents/Dialogue/StandardMissionAccepted".into()),
+                PyRep::Dict(vec![
+                    (PyRep::String("missionName".into()), PyRep::String("Agent Transmission".into())),
+                    (PyRep::String("agentID".into()), PyRep::Integer(3_000_001)),
+                ]),
+            ]),
         ]],
     },
     OnIncomingTransmission => "OnIncomingTransmission" ("charid") {
@@ -1257,24 +1741,39 @@ define_notifications! {
     },
     OnMainBankPlayerHackSuccess => "OnMainBankPlayerHackSuccess" ("charid") {
         fields: { data: PyRep },
+        // `notify_emitters_space_dungeons.rs:160` optionally includes `"amount": Real`.
         samples: || vec![vec![PyRep::Dict(vec![
             (PyRep::String("characterID".into()), PyRep::Integer(90_000_001)),
             (PyRep::String("linkID".into()), PyRep::Integer(1)),
             (PyRep::String("solarSystemID".into()), PyRep::Integer(30_000_142)),
+            (PyRep::String("amount".into()), PyRep::Real(50_000_000.0)),
         ])]],
     },
     OnMainBankPlayerLinkDisconnected => "OnMainBankPlayerLinkDisconnected" ("charid") {
         fields: { data: PyRep },
-        samples: || vec![vec![PyRep::Dict(vec![
-            (PyRep::String("characterID".into()), PyRep::Integer(90_000_001)),
-            (PyRep::String("linkID".into()), PyRep::Integer(1)),
-            (PyRep::String("reason".into()), PyRep::Integer(1)),
-            (PyRep::String("solarSystemID".into()), PyRep::Integer(30_000_142)),
-        ])]],
+        // `services/notify_emitters_combat_ess_progression.rs:324` emits String `reason`.
+        samples: || vec![
+            vec![PyRep::Dict(vec![
+                (PyRep::String("characterID".into()), PyRep::Integer(90_000_001)),
+                (PyRep::String("linkID".into()), PyRep::Integer(1)),
+                (PyRep::String("reason".into()), PyRep::String("Completed".into())),
+                (PyRep::String("solarSystemID".into()), PyRep::Integer(30_000_142)),
+            ])],
+            vec![PyRep::Dict(vec![
+                (PyRep::String("characterID".into()), PyRep::Integer(90_000_001)),
+                (PyRep::String("linkID".into()), PyRep::Integer(1)),
+                (PyRep::String("reason".into()), PyRep::Integer(1)),
+                (PyRep::String("solarSystemID".into()), PyRep::Integer(30_000_142)),
+            ])],
+        ],
     },
     OnMatchMakingFailure => "OnMatchMakingFailure" ("charid") {
         fields: { errors: Vec<String> },
-        samples: || vec![vec![PyRep::List(vec![PyRep::String("InvalidFleet".into())])]],
+        // Accepts both string codes and numeric `OnMatchMakingFailureCodes` (`notify_emitters_space_dungeons.rs:1001`).
+        samples: || vec![
+            vec![PyRep::List(vec![PyRep::String("InvalidFleet".into())])],
+            vec![PyRep::List(vec![PyRep::Integer(404)])],
+        ],
     },
     OnMilestoneTimerStarted => "OnMilestoneTimerStarted" ("charid") {
         fields: { time_left: i64 },
@@ -1360,9 +1859,12 @@ define_notifications! {
     OnNpcTimerUpdate => "OnNpcTimerUpdate" ("charid") {
         fields: { state: i64, expiry_time: Option<SimFileTime> },
         optional: { do_alert: Option<bool> },
+        // `services/crimewatch_timers.rs:331` emits `expiry_time = None` on timer expiry.
         samples: || vec![
             vec![PyRep::Integer(401), PyRep::Integer(1_335_000_000_000_000_00)],
+            vec![PyRep::Integer(401), PyRep::None],
             vec![PyRep::Integer(401), PyRep::Integer(1_335_000_000_000_000_00), PyRep::Bool(true)],
+            vec![PyRep::Integer(400), PyRep::None, PyRep::Bool(false)],
         ],
     },
     OnOfferReceived => "OnOfferReceived" ("charid") {
@@ -1382,13 +1884,22 @@ define_notifications! {
     },
     OnOperationTaskSkipped => "OnOperationTaskSkipped" ("charid") {
         fields: { task_list: PyRep, includes_current: bool },
+        // `services/notify_emitters_operations_nodegraph.rs:330` sets element 3 to `Some(next_task)` or `None`.
         samples: || vec![vec![
-            PyRep::List(vec![PyRep::Tuple(vec![
-                PyRep::Integer(1),
-                PyRep::Integer(10),
-                PyRep::Integer(100),
-                PyRep::None,
-            ])]),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(10),
+                    PyRep::Integer(100),
+                    PyRep::None,
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(10),
+                    PyRep::Integer(100),
+                    PyRep::Integer(101),
+                ]),
+            ]),
             PyRep::Bool(true),
         ]],
     },
@@ -1433,7 +1944,18 @@ define_notifications! {
     },
     OnPasswordChanged => "OnPasswordChanged" ("charid") {
         fields: { which: i64, container_item: PyRep },
-        samples: || vec![vec![PyRep::Integer(1), sample_keyval_item()]],
+        // `services/notify_emitters_fleet_combat.rs:57` emits `(which, KeyVal { itemID, typeID })`
+        // for `invCache.RemoveInventoryContainer`.
+        samples: || vec![
+            vec![PyRep::Integer(1), sample_keyval_item()],
+            vec![
+                PyRep::Integer(1),
+                PyRep::keyval([
+                    ("itemID", PyRep::Integer(100_000_010)),
+                    ("typeID", PyRep::Integer(17366)),
+                ]),
+            ],
+        ],
     },
     OnPlayerPodDeath => "OnPlayerPodDeath" ("charid") {
         samples: || vec![vec![]],
@@ -1443,7 +1965,16 @@ define_notifications! {
     },
     OnPlayerStateUpdated => "OnPlayerStateUpdated" ("charid") {
         fields: { player_state: PyRep },
-        samples: || vec![vec![PyRep::Dict(Vec::new())]],
+        // `services/project_discovery_rewards.rs:331-342` emits `util.KeyVal` read by `Rewards.OnPlayerStateUpdated`.
+        samples: || vec![vec![PyRep::keyval([
+            ("rank", PyRep::Integer(1)),
+            ("experience", PyRep::Real(100.0)),
+            ("totalXP", PyRep::Real(100.0)),
+            ("accuracy", PyRep::Real(0.9)),
+            ("score", PyRep::Real(0.9)),
+            ("analysisKredits", PyRep::Integer(10)),
+            ("finishedTutorial", PyRep::Bool(true)),
+        ])]],
     },
     OnPlexDepositFailed => "OnPlexDepositFailed" ("charid") {
         fields: { error_key: String, reference: PyRep },
@@ -1493,9 +2024,12 @@ define_notifications! {
     OnPvpTimerUpdate => "OnPvpTimerUpdate" ("charid") {
         fields: { state: i64, expiry_time: Option<SimFileTime> },
         optional: { do_alert: Option<bool> },
+        // `services/notify_emitters_fleet_combat.rs:166` emits `expiry_time = None` on timer expiry.
         samples: || vec![
             vec![PyRep::Integer(201), PyRep::Integer(1_335_000_000_000_000_00)],
+            vec![PyRep::Integer(200), PyRep::None],
             vec![PyRep::Integer(201), PyRep::Integer(1_335_000_000_000_000_00), PyRep::Bool(true)],
+            vec![PyRep::Integer(200), PyRep::None, PyRep::Bool(false)],
         ],
     },
     OnRecommendationsChanged => "OnRecommendationsChanged" ("charid") {
@@ -1540,10 +2074,20 @@ define_notifications! {
     },
     OnSeasonSelected => "OnSeasonSelected" ("charid") {
         fields: { character_id: i64, season_data: PyRep, character_progress: PyRep },
+        // `services/season_manager.rs:459-497` (`build_character_progress_keyval`).
         samples: || vec![vec![
             PyRep::Integer(90_000_001),
             PyRep::keyval([("seasonID", PyRep::Integer(1))]),
-            PyRep::keyval([("points", PyRep::Integer(10))]),
+            PyRep::keyval([
+                ("characterID", PyRep::Integer(90_000_001)),
+                ("seasonID", PyRep::Integer(1)),
+                ("total_points", PyRep::Integer(10)),
+                ("season_points", PyRep::Integer(10)),
+                (
+                    "challenges",
+                    PyRep::Dict(vec![(PyRep::Integer(43), sample_season_challenge_object())]),
+                ),
+            ]),
         ]],
     },
     OnSeasonSelectionCleared => "OnSeasonSelectionCleared" ("charid") {
@@ -1554,7 +2098,19 @@ define_notifications! {
     },
     OnSeasonalGoalCompleted => "OnSeasonalGoalCompleted" ("charid") {
         fields: { goal_index: i64, goal_data: PyRep },
-        samples: || vec![vec![PyRep::Integer(1), PyRep::Dict(Vec::new())]],
+        // `services/season_manager_ops.rs:204-222` (`build_seasonal_goal_dict`).
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::Dict(vec![
+                (PyRep::String("goal_index".into()), PyRep::Integer(1)),
+                (PyRep::String("points_required".into()), PyRep::Integer(20)),
+                (PyRep::String("reward_type_id".into()), PyRep::Integer(34)),
+                (PyRep::String("reward_amount".into()), PyRep::Integer(1)),
+                (PyRep::String("omega_only".into()), PyRep::Bool(false)),
+                (PyRep::String("completed".into()), PyRep::Bool(true)),
+                (PyRep::String("claimed".into()), PyRep::Bool(false)),
+            ]),
+        ]],
     },
     OnSeasonalGoalsReset => "OnSeasonalGoalsReset" ("charid") {
         samples: || vec![vec![]],
@@ -1587,7 +2143,11 @@ define_notifications! {
     },
     OnServerBrainUpdated => "OnServerBrainUpdated" ("charid") {
         fields: { brain_data: PyRep },
-        samples: || vec![vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::None])]],
+        // `services/notify_emitters_missing2.rs:144` emits `(version, bytes)` for `ProcessBrainData`.
+        samples: || vec![
+            vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Bytes(vec![0])])],
+            vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::None])],
+        ],
     },
     OnServerMapDataPush => "OnServerMapDataPush" ("charid") {
         fields: { tricolors: PyRep, data: PyRep },
@@ -1612,34 +2172,14 @@ define_notifications! {
     },
     OnSessionChanged => "OnSessionChanged" ("charid") {
         fields: { is_remote: bool, session: PyRep, change: PyRep },
-        samples: || {
-            let sample_change = PyRep::Dict(vec![
-                (
-                    PyRep::String("solarsystemid2".into()),
-                    PyRep::Tuple(vec![PyRep::Integer(30_000_142), PyRep::Integer(30_000_144)]),
-                ),
-                (
-                    PyRep::String("stationid".into()),
-                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(60_003_760)]),
-                ),
-                (
-                    PyRep::String("charname".into()),
-                    PyRep::Tuple(vec![PyRep::None, PyRep::String("Pilot".into())]),
-                ),
-                (
-                    PyRep::String("flag".into()),
-                    PyRep::Tuple(vec![PyRep::Bool(false), PyRep::Bool(true)]),
-                ),
-            ]);
+        samples: || vec![
+            vec![PyRep::Bool(false), PyRep::None, sample_session_change_dict()],
             vec![
-                vec![PyRep::Bool(false), PyRep::None, sample_change.clone()],
-                vec![
-                    PyRep::Bool(false),
-                    PyRep::keyval([("charid", PyRep::Integer(90_000_001))]),
-                    sample_change,
-                ],
-            ]
-        },
+                PyRep::Bool(false),
+                PyRep::keyval([("charid", PyRep::Integer(90_000_001))]),
+                sample_session_change_dict(),
+            ],
+        ],
     },
     OnSetAllianceStanding => "OnSetAllianceStanding" ("allianceid") {
         fields: { contact_id: i64, standing: f64 },
@@ -1668,13 +2208,137 @@ define_notifications! {
     },
     OnSignalTrackerFullState => "OnSignalTrackerFullState" ("charid") {
         fields: { solar_system_id: i64, full_state: PyRep, should_remove_old_sites: bool },
+        // `services/notify_emitters_tournaments_anomalies.rs:197-377` emits 4 `Dict` buckets:
+        // `(anomalies, signatures, static_sites, structures)`.
         samples: || vec![vec![
             PyRep::Integer(30_000_142),
             PyRep::Tuple(vec![
-                PyRep::List(Vec::new()),
-                PyRep::List(Vec::new()),
-                PyRep::List(Vec::new()),
-                PyRep::List(Vec::new()),
+                PyRep::Dict(vec![
+                    (
+                        PyRep::String("ANOM-1".into()),
+                        PyRep::keyval([
+                            ("instanceID", PyRep::Integer(1)),
+                            ("siteID", PyRep::String("ANOM-1".into())),
+                            ("targetID", PyRep::String("ANOM-1".into())),
+                            ("dungeonID", PyRep::Integer(100)),
+                            ("dungeonName", PyRep::String("Combat Anomaly".into())),
+                            ("dungeonNameID", PyRep::None),
+                            ("anomalyType", PyRep::String("Combat".into())),
+                            ("archetypeID", PyRep::Integer(1)),
+                            ("difficulty", PyRep::Integer(1)),
+                            ("factionID", PyRep::Integer(500_010)),
+                            ("scanStrength", PyRep::Real(100.0)),
+                            ("signalStrength", PyRep::Real(100.0)),
+                            ("scanStrengthAttribute", PyRep::Integer(10)),
+                            ("deviation", PyRep::Real(0.0)),
+                            ("groupID", PyRep::None),
+                            ("typeID", PyRep::None),
+                            ("expiryTime", PyRep::None),
+                            ("isSiteExpired", PyRep::Bool(false)),
+                            ("allowedTypes", PyRep::None),
+                            (
+                                "position",
+                                PyRep::Tuple(vec![
+                                    PyRep::Real(0.0),
+                                    PyRep::Real(0.0),
+                                    PyRep::Real(0.0),
+                                ]),
+                            ),
+                        ]),
+                    ),
+                    (
+                        PyRep::String("ANOM-2".into()),
+                        PyRep::keyval([
+                            ("instanceID", PyRep::Integer(2)),
+                            ("siteID", PyRep::String("ANOM-2".into())),
+                            ("targetID", PyRep::String("ANOM-2".into())),
+                            ("dungeonID", PyRep::Integer(101)),
+                            ("dungeonName", PyRep::String("Combat Anomaly 2".into())),
+                            ("dungeonNameID", PyRep::Integer(1_000)),
+                            ("anomalyType", PyRep::String("Combat".into())),
+                            ("archetypeID", PyRep::Integer(1)),
+                            ("difficulty", PyRep::Integer(1)),
+                            ("factionID", PyRep::Integer(500_010)),
+                            ("scanStrength", PyRep::Real(100.0)),
+                            ("signalStrength", PyRep::Real(100.0)),
+                            ("scanStrengthAttribute", PyRep::Integer(10)),
+                            ("deviation", PyRep::Real(0.0)),
+                            ("groupID", PyRep::None),
+                            ("typeID", PyRep::None),
+                            ("expiryTime", PyRep::None),
+                            ("isSiteExpired", PyRep::Bool(false)),
+                            ("allowedTypes", PyRep::None),
+                            (
+                                "position",
+                                PyRep::Tuple(vec![
+                                    PyRep::Real(1.0),
+                                    PyRep::Real(0.0),
+                                    PyRep::Real(0.0),
+                                ]),
+                            ),
+                        ]),
+                    ),
+                ]),
+                PyRep::Dict(vec![(
+                    PyRep::String("SIG-1".into()),
+                    PyRep::keyval([
+                        ("targetID", PyRep::String("SIG-1".into())),
+                        ("sigGroup", PyRep::String("Relic".into())),
+                        ("typeName", PyRep::String("Relic Site".into())),
+                        ("scanStrength", PyRep::Real(25.0)),
+                        ("difficulty", PyRep::Integer(1)),
+                        ("dungeonID", PyRep::None),
+                        ("archetypeID", PyRep::None),
+                        ("deviation", PyRep::Real(0.0)),
+                        (
+                            "position",
+                            PyRep::Tuple(vec![
+                                PyRep::Real(0.0),
+                                PyRep::Real(0.0),
+                                PyRep::Real(0.0),
+                            ]),
+                        ),
+                    ]),
+                )]),
+                PyRep::Dict(vec![(
+                    PyRep::Integer(60_003_760),
+                    PyRep::keyval([
+                        ("siteID", PyRep::Integer(60_003_760)),
+                        ("instanceID", PyRep::Integer(60_003_760)),
+                        ("groupID", PyRep::Integer(15)),
+                        ("typeID", PyRep::Integer(1_531)),
+                        ("dungeonID", PyRep::None),
+                        ("dungeonNameID", PyRep::None),
+                        ("factionID", PyRep::None),
+                        (
+                            "position",
+                            PyRep::Tuple(vec![
+                                PyRep::Real(0.0),
+                                PyRep::Real(0.0),
+                                PyRep::Real(0.0),
+                            ]),
+                        ),
+                    ]),
+                )]),
+                PyRep::Dict(vec![(
+                    PyRep::Integer(1_000_000_000_001),
+                    PyRep::keyval([
+                        ("itemID", PyRep::Integer(1_000_000_000_001)),
+                        ("targetID", PyRep::Integer(1_000_000_000_001)),
+                        ("typeID", PyRep::Integer(35_832)),
+                        ("groupID", PyRep::Integer(1_657)),
+                        ("categoryID", PyRep::Integer(65)),
+                        ("name", PyRep::String("Astrahus".into())),
+                        (
+                            "position",
+                            PyRep::Tuple(vec![
+                                PyRep::Real(0.0),
+                                PyRep::Real(0.0),
+                                PyRep::Real(0.0),
+                            ]),
+                        ),
+                    ]),
+                )]),
             ]),
             PyRep::Bool(true),
         ]],
@@ -1696,7 +2360,16 @@ define_notifications! {
     },
     OnStartClientNodeGraph => "OnStartClientNodeGraph" ("charid") {
         fields: { node_graph_id: i64, node_graph_instance_id: i64, blackboard_parameters: PyRep },
-        samples: || vec![vec![PyRep::Integer(10), PyRep::Integer(1), PyRep::Dict(Vec::new())]],
+        // `services/notify_emitters_operations_nodegraph.rs:66-83` (`blackboard_to_py_dict`).
+        samples: || vec![vec![
+            PyRep::Integer(10),
+            PyRep::Integer(1),
+            PyRep::Dict(vec![
+                (PyRep::String("step".into()), PyRep::Integer(1)),
+                (PyRep::String("active".into()), PyRep::Bool(true)),
+                (PyRep::String("label".into()), PyRep::String("init".into())),
+            ]),
+        ]],
     },
     OnStartConversation => "OnStartConversation" ("charid") {
         fields: { conversation_id: i64, show_continue_button: bool },
@@ -1729,14 +2402,14 @@ define_notifications! {
         samples: || vec![vec![
             PyRep::List(vec![PyRep::Integer(90_000_001)]),
             PyRep::List(vec![PyRep::Integer(90_000_002)]),
-            PyRep::List(Vec::new()),
+            PyRep::List(vec![PyRep::Integer(90_000_003)]),
         ]],
     },
     OnSystemDisapprovalFlagUpdates => "OnSystemDisapprovalFlagUpdates" ("solarsystemid") {
         fields: { new_idles: Vec<i64>, new_naughty_boys_and_girls: Vec<i64> },
         samples: || vec![vec![
             PyRep::List(vec![PyRep::Integer(90_000_001)]),
-            PyRep::List(Vec::new()),
+            PyRep::List(vec![PyRep::Integer(90_000_002)]),
         ]],
     },
     OnSystemDynamicBountyStateChanged => "OnSystemDynamicBountyStateChanged" ("solarsystemid") {
@@ -1745,7 +2418,25 @@ define_notifications! {
     },
     OnSystemESSDataChanged => "OnSystemESSDataChanged" ("solarsystemid") {
         fields: { system_id: i64, data: PyRep },
-        samples: || vec![vec![PyRep::Integer(30_000_142), PyRep::Dict(Vec::new())]],
+        // `encounter_surveillance_system.rs:734` & `pve_ess_reserve_banks.rs:1319` emit ESS KeyVal.
+        samples: || vec![
+            vec![
+                PyRep::Integer(30_000_142),
+                PyRep::keyval([
+                    ("solarSystemID", PyRep::Integer(30_000_142)),
+                    ("mainBank", PyRep::Real(50_000_000.0)),
+                    ("reserveBank", PyRep::Real(100_000_000.0)),
+                ]),
+            ],
+            vec![
+                PyRep::Integer(30_000_142),
+                PyRep::Dict(vec![
+                    (PyRep::String("solarSystemID".into()), PyRep::Integer(30_000_142)),
+                    (PyRep::String("mainBank".into()), PyRep::Real(50_000_000.0)),
+                    (PyRep::String("reserveBank".into()), PyRep::Real(100_000_000.0)),
+                ]),
+            ],
+        ],
     },
     OnSystemEffectStarted => "OnSystemEffectStarted" ("solarsystemid") {
         fields: { type_ids: Vec<i64> },
@@ -1812,14 +2503,26 @@ define_notifications! {
     },
     OnVictoryPointStateUpdated => "OnVictoryPointStateUpdated" ("solarsystemid") {
         fields: { solar_system_id: i64, new_victory_point_state: PyRep },
-        samples: || vec![vec![PyRep::Integer(30_000_142), PyRep::Dict(Vec::new())]],
+        // `services/notify_emitters_fleet_combat.rs:125` & `services/fw_services.rs:361`.
+        samples: || vec![vec![
+            PyRep::Integer(30_000_142),
+            PyRep::keyval([
+                ("solarSystemID", PyRep::Integer(30_000_142)),
+                ("victoryPoints", PyRep::Integer(10)),
+                ("contestedPercentage", PyRep::Real(5.0)),
+                ("threshold", PyRep::Integer(200)),
+            ]),
+        ]],
     },
     OnWeaponsTimerUpdate => "OnWeaponsTimerUpdate" ("charid") {
         fields: { state: i64, expiry_time: Option<SimFileTime> },
         optional: { do_alert: Option<bool> },
+        // `services/notify_emitters_fleet_combat.rs:148` emits `expiry_time = None` on timer expiry.
         samples: || vec![
             vec![PyRep::Integer(101), PyRep::Integer(1_335_000_000_000_000_00)],
+            vec![PyRep::Integer(100), PyRep::None],
             vec![PyRep::Integer(101), PyRep::Integer(1_335_000_000_000_000_00), PyRep::Bool(true)],
+            vec![PyRep::Integer(100), PyRep::None, PyRep::Bool(false)],
         ],
     },
 
@@ -1898,7 +2601,49 @@ define_notifications! {
     },
     OnCorpAggressionSettingsChange => "OnCorpAggressionSettingsChange" ("corpid") {
         fields: { aggression_settings: PyRep },
-        samples: || vec![vec![PyRep::keyval([("friendlyFire", PyRep::Bool(false))])]],
+        // `services/fleet_social_corp_tail_dispatch.rs:789-829` (`build_aggression_settings_object`)
+        // emits 7-field `crimewatch.corp_aggression.settings.AggressionSettings` `PyRep::Object`.
+        samples: || vec![
+            vec![PyRep::keyval([("friendlyFire", PyRep::Bool(false))])],
+            vec![PyRep::Object {
+                type_name: "crimewatch.corp_aggression.settings.AggressionSettings".into(),
+                args: Box::new(PyRep::Dict(vec![
+                    (PyRep::String("_enableAfter".into()), PyRep::None),
+                    (PyRep::String("_disableAfter".into()), PyRep::Integer(0)),
+                    (PyRep::String("corporationID".into()), PyRep::Integer(98_000_001)),
+                    (PyRep::String("isFriendlyFireLegal".into()), PyRep::Bool(true)),
+                    (PyRep::String("friendlyFireLegal".into()), PyRep::Bool(true)),
+                    (PyRep::String("pendingFriendlyFireLegal".into()), PyRep::Bool(false)),
+                    (PyRep::String("pendingFriendlyFireLegal".into()), PyRep::None),
+                    (
+                        PyRep::String("changeAtTime".into()),
+                        PyRep::Integer(1_335_000_000_000_000_00),
+                    ),
+                    (PyRep::String("changeAtTime".into()), PyRep::None),
+                ])),
+            }],
+            vec![PyRep::Object {
+                type_name: "crimewatch.corp_aggression.settings.AggressionSettings".into(),
+                args: Box::new(PyRep::Dict(vec![
+                    (
+                        PyRep::String("_enableAfter".into()),
+                        PyRep::Integer(1_335_000_000_000_000_00),
+                    ),
+                    (PyRep::String("_disableAfter".into()), PyRep::None),
+                    (PyRep::String("_disableAfter".into()), PyRep::Integer(0)),
+                    (PyRep::String("corporationID".into()), PyRep::Integer(98_000_001)),
+                    (PyRep::String("isFriendlyFireLegal".into()), PyRep::Bool(false)),
+                    (PyRep::String("friendlyFireLegal".into()), PyRep::Bool(false)),
+                    (PyRep::String("pendingFriendlyFireLegal".into()), PyRep::Bool(true)),
+                    (PyRep::String("pendingFriendlyFireLegal".into()), PyRep::None),
+                    (
+                        PyRep::String("changeAtTime".into()),
+                        PyRep::Integer(1_335_000_000_000_000_00),
+                    ),
+                    (PyRep::String("changeAtTime".into()), PyRep::None),
+                ])),
+            }],
+        ],
     },
     OnCorpLPChange => "OnCorpLPChange" ("corpid") {
         fields: { reason: String, issuer_corp_id: i64 },
@@ -1919,16 +2664,218 @@ define_notifications! {
     },
     OnCorporationChanged => "OnCorporationChanged" ("corpid") {
         fields: { corp_id: i64, change: PyRep },
+        // `fleet_social_corps.rs:1192-1375`, `fleet_social_corp_gov.rs:774-818,1541,1906`, and
+        // `fleet_social_corp_tail_dispatch.rs:176-215,462` emit `(fieldName, (old, new))` entries.
         samples: || vec![vec![
             PyRep::Integer(98_000_001),
             PyRep::Dict(vec![
+                (
+                    PyRep::String("corporationID".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(98_000_001)]),
+                ),
+                (
+                    PyRep::String("corporationName".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::String("Corp".into())]),
+                ),
+                (
+                    PyRep::String("ticker".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::String("CRP".into())]),
+                ),
+                (
+                    PyRep::String("tickerName".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::String("CRP".into())]),
+                ),
+                (
+                    PyRep::String("ceoID".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(90_000_001)]),
+                ),
+                (
+                    PyRep::String("ceoID".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(90_000_001), PyRep::Integer(90_000_002)]),
+                ),
+                (
+                    PyRep::String("creatorID".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(90_000_001)]),
+                ),
+                (
+                    PyRep::String("memberCount".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1)]),
+                ),
+                (
+                    PyRep::String("memberLimit".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(10)]),
+                ),
+                (
+                    PyRep::String("taxRate".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Real(0.05)]),
+                ),
+                (
+                    PyRep::String("taxRate".into()),
+                    PyRep::Tuple(vec![PyRep::Real(0.1), PyRep::Real(0.05)]),
+                ),
+                (
+                    PyRep::String("iskTaxRate".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Real(0.05)]),
+                ),
+                (
+                    PyRep::String("loyaltyPointTaxRate".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Real(0.05)]),
+                ),
+                (
+                    PyRep::String("allianceID".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::None]),
+                ),
+                (
+                    PyRep::String("allianceID".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(99_000_001)]),
+                ),
+                (
+                    PyRep::String("allianceID".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(99_000_001), PyRep::None]),
+                ),
+                (
+                    PyRep::String("stationID".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::None]),
+                ),
+                (
+                    PyRep::String("stationID".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(60_003_760)]),
+                ),
+                (
+                    PyRep::String("stationID".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(60_003_760), PyRep::None]),
+                ),
+                (
+                    PyRep::String("stationID".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(60_003_760), PyRep::Integer(60_003_761)]),
+                ),
+                (
+                    PyRep::String("description".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::String("desc".into())]),
+                ),
+                (
+                    PyRep::String("description".into()),
+                    PyRep::Tuple(vec![PyRep::String("old".into()), PyRep::String("new".into())]),
+                ),
+                (
+                    PyRep::String("url".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::String("https://eve.example".into())]),
+                ),
+                (
+                    PyRep::String("url".into()),
+                    PyRep::Tuple(vec![PyRep::String("a".into()), PyRep::String("b".into())]),
+                ),
+                (
+                    PyRep::String("shares".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1_000)]),
+                ),
+                (
+                    PyRep::String("shape1".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1)]),
+                ),
+                (
+                    PyRep::String("shape1".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)]),
+                ),
+                (
+                    PyRep::String("shape2".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1)]),
+                ),
+                (
+                    PyRep::String("shape2".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)]),
+                ),
+                (
+                    PyRep::String("shape3".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1)]),
+                ),
+                (
+                    PyRep::String("shape3".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)]),
+                ),
+                (
+                    PyRep::String("color1".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1)]),
+                ),
+                (
+                    PyRep::String("color1".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)]),
+                ),
+                (
+                    PyRep::String("color2".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1)]),
+                ),
+                (
+                    PyRep::String("color2".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)]),
+                ),
+                (
+                    PyRep::String("color3".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1)]),
+                ),
+                (
+                    PyRep::String("color3".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)]),
+                ),
+                (
+                    PyRep::String("applicationsEnabled".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Bool(true)]),
+                ),
+                (
+                    PyRep::String("isRecruiting".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Bool(true)]),
+                ),
                 (
                     PyRep::String("isRecruiting".into()),
                     PyRep::Tuple(vec![PyRep::Bool(false), PyRep::Bool(true)]),
                 ),
                 (
-                    PyRep::String("stationID".into()),
-                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(60_003_760)]),
+                    PyRep::String("allowWar".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Bool(true)]),
+                ),
+                (
+                    PyRep::String("allowWar".into()),
+                    PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Bool(false)]),
+                ),
+                (
+                    PyRep::String("friendlyFire".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Bool(false)]),
+                ),
+                (
+                    PyRep::String("restrictCorpMails".into()),
+                    PyRep::Tuple(vec![PyRep::Bool(false), PyRep::Bool(true)]),
+                ),
+                (
+                    PyRep::String("acceptStructures".into()),
+                    PyRep::Tuple(vec![PyRep::Bool(false), PyRep::Bool(true)]),
+                ),
+                (
+                    PyRep::String("deleted".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(0)]),
+                ),
+                (
+                    PyRep::String("typeface".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::String("default".into())]),
+                ),
+                (
+                    PyRep::String("typeface".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1)]),
+                ),
+                (
+                    PyRep::String("division1".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::String("1st Division".into())]),
+                ),
+                (
+                    PyRep::String("division1".into()),
+                    PyRep::Tuple(vec![PyRep::String("old".into()), PyRep::String("new".into())]),
+                ),
+                (
+                    PyRep::String("walletDivision1".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::String("Master Wallet".into())]),
+                ),
+                (
+                    PyRep::String("walletDivision1".into()),
+                    PyRep::Tuple(vec![PyRep::String("old".into()), PyRep::String("new".into())]),
                 ),
             ]),
         ]],
@@ -1979,13 +2926,19 @@ define_notifications! {
     },
     OnDamageMessage => "OnDamageMessage" ("charid") @ballpark {
         fields: { damage_messages_args: PyRep },
+        // `system_actor/cycles.rs:2660-2705` & `tactical_modules_superweapon_ops.rs:1304`.
         samples: || vec![vec![PyRep::Dict(vec![
             (PyRep::String("attackType".into()), PyRep::String("other".into())),
             (PyRep::String("damage".into()), PyRep::Real(42.5)),
             (PyRep::String("source".into()), PyRep::Integer(100_000_001)),
             (PyRep::String("target".into()), PyRep::Integer(100_000_002)),
+            (PyRep::String("target_ID".into()), PyRep::Integer(100_000_002)),
             (PyRep::String("attackerID".into()), PyRep::Integer(90_000_001)),
             (PyRep::String("typeID".into()), PyRep::Integer(561)),
+            (PyRep::String("weapon".into()), PyRep::Integer(561)),
+            (PyRep::String("hitQuality".into()), PyRep::Integer(5)),
+            (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
+            (PyRep::String("isBanked".into()), PyRep::Bool(false)),
             (
                 PyRep::String("owner".into()),
                 PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(90_000_001)]),
@@ -1999,6 +2952,18 @@ define_notifications! {
             PyRep::Dict(vec![
                 (PyRep::String("attackType".into()), PyRep::String("you".into())),
                 (PyRep::String("damage".into()), PyRep::Real(42.5)),
+                (PyRep::String("source".into()), PyRep::Integer(100_000_001)),
+                (PyRep::String("target".into()), PyRep::Integer(100_000_002)),
+                (PyRep::String("target_ID".into()), PyRep::Integer(100_000_002)),
+                (PyRep::String("attackerID".into()), PyRep::Integer(90_000_001)),
+                (PyRep::String("weapon".into()), PyRep::Integer(561)),
+                (PyRep::String("hitQuality".into()), PyRep::Integer(5)),
+                (PyRep::String("isWrecking".into()), PyRep::Bool(false)),
+                (PyRep::String("isBanked".into()), PyRep::Bool(false)),
+                (
+                    PyRep::String("owner".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(90_000_001)]),
+                ),
             ]),
         ])])]],
     },
@@ -2022,13 +2987,23 @@ define_notifications! {
             squadron_size: i64,
             ability_slot_states: PyRep,
         },
-        samples: || vec![vec![
-            PyRep::Integer(100_000_050),
-            PyRep::Integer(23055),
-            PyRep::Integer(159),
-            PyRep::Integer(9),
-            PyRep::Dict(Vec::new()),
-        ]],
+        // `services/combat_fighters.rs:1271` emits empty `List([])` when no slots active on launch.
+        samples: || vec![
+            vec![
+                PyRep::Integer(100_000_050),
+                PyRep::Integer(23055),
+                PyRep::Integer(159),
+                PyRep::Integer(9),
+                PyRep::Dict(Vec::new()),
+            ],
+            vec![
+                PyRep::Integer(100_000_050),
+                PyRep::Integer(23055),
+                PyRep::Integer(159),
+                PyRep::Integer(9),
+                PyRep::List(Vec::new()),
+            ],
+        ],
     },
     OnFighterRemovedFromController => "OnFighterRemovedFromController" ("charid") {
         fields: { fighter_id: i64, tube_flag_id: i64 },
@@ -2241,11 +3216,19 @@ define_notifications! {
     },
     OnPersonalContactsUpdated => "OnPersonalContactsUpdated" ("charid") {
         fields: { contact_ids: Vec<i64>, standing: f64, in_watchlist: Option<bool> },
-        samples: || vec![vec![
-            PyRep::List(vec![PyRep::Integer(90_000_002)]),
-            PyRep::Real(5.0),
-            PyRep::Bool(true),
-        ]],
+        // `services/character_contacts.rs:796`: `inWatchlist: None` preserves current state.
+        samples: || vec![
+            vec![
+                PyRep::List(vec![PyRep::Integer(90_000_002)]),
+                PyRep::Real(5.0),
+                PyRep::Bool(true),
+            ],
+            vec![
+                PyRep::List(vec![PyRep::Integer(90_000_002)]),
+                PyRep::Real(5.0),
+                PyRep::None,
+            ],
+        ],
     },
     OnPetitionCreated => "OnPetitionCreated" ("charid") {
         optional: { petition_id: Option<i64> },
@@ -2302,7 +3285,10 @@ define_notifications! {
     },
     OnRaffleFinishedServer => "OnRaffleFinishedServer" ("charid") {
         fields: { raffle_id: i64, winning_ticket: Option<PyRep> },
-        samples: || vec![vec![PyRep::Integer(1), PyRep::None]],
+        samples: || vec![
+            vec![PyRep::Integer(1), PyRep::None],
+            vec![PyRep::Integer(1), PyRep::Integer(1)],
+        ],
     },
     OnRaffleUpdatedServer => "OnRaffleUpdatedServer" ("charid") {
         fields: { raffle_id: i64, raffle_data: PyRep },
@@ -2369,14 +3355,23 @@ define_notifications! {
     },
     OnSharedBookmarksFolderUpdated => "OnSharedBookmarksFolderUpdated" ("corpid") {
         fields: { updates: PyRep },
-        samples: || vec![vec![PyRep::List(vec![PyRep::Tuple(vec![
-            PyRep::Tuple(vec![PyRep::Integer(1)]),
-            PyRep::String("FolderChanged".into()),
-            PyRep::Tuple(vec![
-                PyRep::List(vec![PyRep::keyval([("bookmarkID", PyRep::Integer(1))])]),
+        // Accepts V24 tuple payloads plus pre-`client_compat` `List[Integer]` (`client_compat.rs:800`);
+        // scalar `Integer`/`Bool` updates (`FolderChanged`) are allowlisted in `INCOMPLETE_SAMPLE_EVENTS`.
+        samples: || vec![
+            vec![PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Tuple(vec![PyRep::Integer(1)]),
+                PyRep::String("FolderChanged".into()),
+                PyRep::Tuple(vec![
+                    PyRep::List(vec![PyRep::keyval([("bookmarkID", PyRep::Integer(1))])]),
+                    PyRep::List(vec![PyRep::Integer(1)]),
+                ]),
+            ])])],
+            vec![PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Tuple(vec![PyRep::Integer(1)]),
+                PyRep::String("FolderChanged".into()),
                 PyRep::List(vec![PyRep::Integer(1)]),
-            ]),
-        ])])]],
+            ])])],
+        ],
     },
     OnSharedBookmarksFoldersAccessChanged => "OnSharedBookmarksFoldersAccessChanged" ("charid") {
         fields: { access_changed: PyRep },
@@ -2391,26 +3386,93 @@ define_notifications! {
     },
     OnSignalTrackerAnomalyUpdate => "OnSignalTrackerAnomalyUpdate" ("charid") {
         fields: { solar_system_id: i64, added_anomalies: PyRep, removed_anomalies: PyRep },
+        // `services/fleet_social_scanning.rs:1781-1923` (`build_signal_tracker_anomaly_kv`).
         samples: || vec![vec![
             PyRep::Integer(30_000_142),
-            PyRep::Dict(Vec::new()),
-            PyRep::List(Vec::new()),
+            PyRep::Dict(vec![
+                (
+                    PyRep::String("ANOM-1".into()),
+                    PyRep::keyval([
+                        ("instanceID", PyRep::String("ANOM-1".into())),
+                        (
+                            "position",
+                            PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+                        ),
+                        ("targetID", PyRep::String("ANOM-1".into())),
+                        ("difficulty", PyRep::Integer(1)),
+                        ("dungeonID", PyRep::Integer(2_134)),
+                        ("archetypeID", PyRep::Integer(24)),
+                        ("dungeonName", PyRep::String("Anomaly".into())),
+                        ("dungeonNameID", PyRep::None),
+                        ("factionID", PyRep::Integer(500_010)),
+                        ("scanStrengthAttribute", PyRep::Integer(210)),
+                        ("allowedTypes", PyRep::None),
+                    ]),
+                ),
+                (
+                    PyRep::String("ANOM-2".into()),
+                    PyRep::keyval([
+                        ("instanceID", PyRep::String("ANOM-2".into())),
+                        (
+                            "position",
+                            PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+                        ),
+                        ("targetID", PyRep::String("ANOM-2".into())),
+                        ("difficulty", PyRep::Integer(1)),
+                        ("dungeonID", PyRep::Integer(2_134)),
+                        ("archetypeID", PyRep::Integer(24)),
+                        ("dungeonName", PyRep::String("Anomaly 2".into())),
+                        ("dungeonNameID", PyRep::Integer(1_000)),
+                        ("factionID", PyRep::Integer(500_010)),
+                        ("scanStrengthAttribute", PyRep::Integer(210)),
+                        ("allowedTypes", PyRep::None),
+                    ]),
+                ),
+            ]),
+            PyRep::List(vec![PyRep::String("ANOM-OLD".into())]),
         ]],
     },
     OnSignalTrackerSignatureUpdate => "OnSignalTrackerSignatureUpdate" ("charid") {
         fields: { solar_system_id: i64, added_signatures: PyRep, removed_signatures: PyRep },
+        // `services/fleet_social_scanning.rs:1650-1885` (`build_signal_tracker_signature_kv`).
         samples: || vec![vec![
             PyRep::Integer(30_000_142),
-            PyRep::Dict(Vec::new()),
-            PyRep::List(Vec::new()),
+            PyRep::Dict(vec![(
+                PyRep::String("ABC-123".into()),
+                PyRep::keyval([
+                    (
+                        "position",
+                        PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+                    ),
+                    ("targetID", PyRep::String("ABC-123".into())),
+                    ("difficulty", PyRep::Integer(1)),
+                    ("dungeonID", PyRep::None),
+                    ("archetypeID", PyRep::None),
+                    ("deviation", PyRep::Real(0.0)),
+                ]),
+            )]),
+            PyRep::List(vec![PyRep::String("OLD-999".into())]),
         ]],
     },
     OnSignalTrackerStructureUpdate => "OnSignalTrackerStructureUpdate" ("charid") {
         fields: { solar_system_id: i64, added_structures: PyRep, removed_structures: PyRep },
+        // `services/fleet_social_scanning.rs:1806-1960` (`build_signal_tracker_structure_kv`).
         samples: || vec![vec![
             PyRep::Integer(30_000_142),
-            PyRep::Dict(Vec::new()),
-            PyRep::List(Vec::new()),
+            PyRep::Dict(vec![(
+                PyRep::Integer(1_000_000_000_001),
+                PyRep::keyval([
+                    ("typeID", PyRep::Integer(35_832)),
+                    ("groupID", PyRep::Integer(1_657)),
+                    ("categoryID", PyRep::Integer(65)),
+                    (
+                        "position",
+                        PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+                    ),
+                    ("targetID", PyRep::Integer(1_000_000_000_001)),
+                ]),
+            )]),
+            PyRep::List(vec![PyRep::Integer(1_000_000_000_002)]),
         ]],
     },
     OnSkyhookCanBeHacked => "OnSkyhookCanBeHacked" ("solarsystemid") {
@@ -2419,14 +3481,32 @@ define_notifications! {
     },
     OnSlimItemChange => "OnSlimItemChange" ("solarsystemid") @ballpark {
         fields: { old_slim: PyRep, new_slim: SlimItemKeyVal },
-        samples: || vec![vec![
-            PyRep::Integer(1_000_000_000_001),
-            SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
-                item_id: 1_000_000_000_001, type_id: 35832, group_id: 1657, category_id: 65,
-                owner_id: 98_000_001, char_id: None, corp_id: Some(98_000_001),
-                alliance_id: None, name: "Astrahus".into(),
-            }).into_notify_arg(),
-        ]],
+        samples: || vec![
+            vec![
+                PyRep::Integer(1_000_000_000_001),
+                SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
+                    item_id: 1_000_000_000_001, type_id: 35832, group_id: 1657, category_id: 65,
+                    owner_id: 98_000_001, char_id: None, corp_id: Some(98_000_001),
+                    alliance_id: None, name: "Astrahus".into(),
+                }).into_notify_arg(),
+            ],
+            vec![
+                PyRep::Integer(100_000_001),
+                SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
+                    item_id: 100_000_001, type_id: 587, group_id: 25, category_id: 6,
+                    owner_id: 90_000_001, char_id: Some(90_000_001), corp_id: Some(98_000_001),
+                    alliance_id: None, name: "Rifter".into(),
+                }).into_notify_arg(),
+            ],
+            vec![
+                PyRep::Integer(100_000_001),
+                SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
+                    item_id: 100_000_001, type_id: 587, group_id: 25, category_id: 6,
+                    owner_id: 90_000_001, char_id: Some(90_000_001), corp_id: Some(98_000_001),
+                    alliance_id: Some(99_000_001), name: "Rifter".into(),
+                }).into_notify_arg(),
+            ],
+        ],
     },
     OnSolarSystemDevIndexChanged => "OnSolarSystemDevIndexChanged" ("solarsystemid") {
         fields: { solar_system_id: i64 },
@@ -2434,14 +3514,43 @@ define_notifications! {
     },
     OnSolarSystemSovStructuresUpdated => "OnSolarSystemSovStructuresUpdated" ("solarsystemid") {
         fields: { solar_system_id: i64, solar_system_structures_info: PyRep, changes: PyRep },
-        samples: || vec![vec![
-            PyRep::Integer(30_000_142),
-            PyRep::List(Vec::new()),
-            PyRep::Dict(vec![(
-                PyRep::Integer(1_000_000_000_001),
-                PyRep::Integer(1),
-            )]),
-        ]],
+        // `services/sov_services.rs:290-305,492-515`.
+        samples: || vec![
+            vec![
+                PyRep::Integer(30_000_142),
+                PyRep::List(vec![PyRep::keyval([
+                    ("itemID", PyRep::Integer(1_000_000_000_001)),
+                    ("structureID", PyRep::Integer(1_000_000_000_001)),
+                    ("typeID", PyRep::Integer(35832)),
+                    ("corporationID", PyRep::Integer(98_000_001)),
+                    ("allianceID", PyRep::None),
+                    ("solarSystemID", PyRep::Integer(30_000_142)),
+                    ("vulnerableStartTime", PyRep::Integer(0)),
+                    ("vulnerableEndTime", PyRep::Integer(0)),
+                ])]),
+                PyRep::Dict(vec![(
+                    PyRep::Integer(1_000_000_000_001),
+                    PyRep::List(vec![PyRep::Integer(0)]),
+                )]),
+            ],
+            vec![
+                PyRep::Integer(30_000_142),
+                PyRep::List(vec![PyRep::keyval([
+                    ("itemID", PyRep::Integer(1_000_000_000_001)),
+                    ("structureID", PyRep::Integer(1_000_000_000_001)),
+                    ("typeID", PyRep::Integer(35832)),
+                    ("corporationID", PyRep::Integer(98_000_001)),
+                    ("allianceID", PyRep::Integer(99_000_001)),
+                    ("solarSystemID", PyRep::Integer(30_000_142)),
+                    ("vulnerableStartTime", PyRep::Integer(0)),
+                    ("vulnerableEndTime", PyRep::Integer(0)),
+                ])]),
+                PyRep::Dict(vec![(
+                    PyRep::Integer(1_000_000_000_001),
+                    PyRep::List(vec![PyRep::Integer(0)]),
+                )]),
+            ],
+        ],
     },
     OnSovHubHacked => "OnSovHubHacked" ("solarsystemid") {
         fields: { sov_hub_id: i64, upgrades: Vec<PyRep> },
@@ -2513,11 +3622,28 @@ define_notifications! {
     },
     OnSystemScanStarted => "OnSystemScanStarted" ("charid") {
         fields: { start_time: SimFileTime, duration_ms: i64, probes: PyRep },
-        samples: || vec![vec![
-            PyRep::Integer(1_335_000_000_000_000_00),
-            PyRep::Integer(5000),
-            PyRep::List(vec![PyRep::Integer(100_000_001)]),
-        ]],
+        // `space_probe_scanning_math.rs:126-143` (`probe_scan_started_probes_dict`).
+        samples: || vec![
+            vec![
+                PyRep::Integer(1_335_000_000_000_000_00),
+                PyRep::Integer(5000),
+                PyRep::List(vec![PyRep::Integer(100_000_001)]),
+            ],
+            vec![
+                PyRep::Integer(1_335_000_000_000_000_00),
+                PyRep::Integer(5000),
+                PyRep::Dict(vec![(
+                    PyRep::Integer(100_000_001),
+                    PyRep::keyval([
+                        (
+                            "pos",
+                            PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+                        ),
+                        ("state", PyRep::Integer(4)),
+                    ]),
+                )]),
+            ],
+        ],
     },
     OnSystemScanStopped => "OnSystemScanStopped" ("charid") {
         fields: { probes: Vec<PyRep>, results: Vec<PyRep>, absent_targets: Vec<PyRep> },
@@ -2530,9 +3656,13 @@ define_notifications! {
     OnTarget => "OnTarget" ("charid") @ballpark {
         fields: { arg0: PyRep, arg1: PyRep },
         optional: { reason: Option<PyRep> },
+        // V24 `(what, tid[, reason])` plus pre-`client_compat` `(tid, what[, reason])`
+        // emitted by `system_actor/cycles.rs:2281` & `fitting_dogma_*` (`client_compat.rs:913`).
         samples: || vec![
             vec![PyRep::String("add".into()), PyRep::Integer(100_000_001)],
             vec![PyRep::String("add".into()), PyRep::Integer(100_000_001), PyRep::None],
+            vec![PyRep::Integer(100_000_001), PyRep::String("locking".into())],
+            vec![PyRep::Integer(100_000_001), PyRep::String("locking".into()), PyRep::None],
         ],
     },
     OnTargetOBO => "OnTargetOBO" ("charid") @ballpark {
@@ -2550,10 +3680,24 @@ define_notifications! {
     },
     OnTitleChanged => "OnTitleChanged" ("corpid") {
         fields: { corp_id: i64, title_id: i64, change: PyRep },
+        // `services/fleet_social_corp_gov.rs:1406,1478`.
         samples: || vec![vec![
             PyRep::Integer(98_000_001),
             PyRep::Integer(1),
-            PyRep::Dict(Vec::new()),
+            PyRep::Dict(vec![
+                (
+                    PyRep::String("titleName".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::String("Director".into())]),
+                ),
+                (
+                    PyRep::String("titleName".into()),
+                    PyRep::Tuple(vec![PyRep::String("Old".into()), PyRep::String("Director".into())]),
+                ),
+                (
+                    PyRep::String("roles".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(1)]),
+                ),
+            ]),
         ]],
     },
     OnUnblockContact => "OnUnblockContact" ("charid") {
@@ -2566,11 +3710,120 @@ define_notifications! {
     },
     OnWarChanged => "OnWarChanged" ("corpid") {
         fields: { war: PyRep, owner_ids: PyRep, change: PyRep },
-        samples: || vec![vec![
-            PyRep::keyval([("warID", PyRep::Integer(1)), ("warHQ", PyRep::None)]),
-            PyRep::List(vec![PyRep::Integer(98_000_001), PyRep::Integer(98_000_002)]),
-            PyRep::Dict(Vec::new()),
-        ]],
+        // `services/social_wars_helpers.rs:185,232` & `services/social_wars.rs:322-415,534,946,989,1009,1042,1254`.
+        samples: || vec![
+            vec![
+                PyRep::keyval([("warID", PyRep::Integer(1)), ("warHQ", PyRep::None)]),
+                PyRep::List(vec![PyRep::Integer(98_000_001), PyRep::Integer(98_000_002)]),
+                PyRep::Dict(vec![
+                    (
+                        PyRep::String("warID".into()),
+                        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1)]),
+                    ),
+                    (
+                        PyRep::String("declaredByID".into()),
+                        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(98_000_001)]),
+                    ),
+                    (
+                        PyRep::String("againstID".into()),
+                        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(98_000_002)]),
+                    ),
+                    (
+                        PyRep::String("allyID".into()),
+                        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(98_000_003)]),
+                    ),
+                    (
+                        PyRep::String("allyID".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(98_000_003), PyRep::Integer(98_000_003)]),
+                    ),
+                    (
+                        PyRep::String("allyID".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(98_000_003), PyRep::None]),
+                    ),
+                    (
+                        PyRep::String("allyID".into()),
+                        PyRep::Tuple(vec![PyRep::None, PyRep::None]),
+                    ),
+                    (
+                        PyRep::String("active".into()),
+                        PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Bool(false)]),
+                    ),
+                    (
+                        PyRep::String("mutual".into()),
+                        PyRep::Tuple(vec![PyRep::Bool(false), PyRep::Bool(true)]),
+                    ),
+                    (
+                        PyRep::String("mutual".into()),
+                        PyRep::Tuple(vec![PyRep::None, PyRep::Bool(true)]),
+                    ),
+                    (
+                        PyRep::String("openForAllies".into()),
+                        PyRep::Tuple(vec![PyRep::Bool(false), PyRep::Bool(true)]),
+                    ),
+                    (
+                        PyRep::String("timeDeclared".into()),
+                        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1_335_000_000_000_000_00)]),
+                    ),
+                    (
+                        PyRep::String("timeDeclared".into()),
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(1_335_000_000_000_000_00),
+                            PyRep::Integer(1_335_000_001_000_000_00),
+                        ]),
+                    ),
+                    (
+                        PyRep::String("timeStarted".into()),
+                        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1_335_000_000_000_000_00)]),
+                    ),
+                    (
+                        PyRep::String("timeStarted".into()),
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(1_335_000_000_000_000_00),
+                            PyRep::Integer(1_335_000_001_000_000_00),
+                        ]),
+                    ),
+                    (
+                        PyRep::String("timeFinished".into()),
+                        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1_335_000_000_000_000_00)]),
+                    ),
+                    (
+                        PyRep::String("timeFinished".into()),
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(1_335_000_000_000_000_00),
+                            PyRep::Integer(1_335_000_001_000_000_00),
+                        ]),
+                    ),
+                    (
+                        PyRep::String("timeFinished".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(1_335_000_000_000_000_00), PyRep::None]),
+                    ),
+                    (
+                        PyRep::String("timeFinished".into()),
+                        PyRep::Tuple(vec![PyRep::None, PyRep::None]),
+                    ),
+                    (
+                        PyRep::String("retracted".into()),
+                        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1_335_000_000_000_000_00)]),
+                    ),
+                    (
+                        PyRep::String("warHQ".into()),
+                        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(1_000_000_000_001)]),
+                    ),
+                    (
+                        PyRep::String("warHQ".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(1_000_000_000_001), PyRep::None]),
+                    ),
+                ]),
+            ],
+            vec![
+                PyRep::keyval([("warID", PyRep::Integer(1)), ("warHQ", PyRep::Integer(1_000_000_000_001))]),
+                PyRep::List(vec![PyRep::Integer(98_000_001), PyRep::Integer(98_000_002)]),
+                PyRep::Dict(vec![(
+                    PyRep::String("active".into()),
+                    PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Bool(false)]),
+                )]),
+            ],
+        ],
     },
     ProcessSovStatusChanged => "ProcessSovStatusChanged" ("solarsystemid") {
         fields: { solar_system_id: i64, sov_info: PyRep },
@@ -2586,20 +3839,36 @@ define_notifications! {
     DoDestinyUpdate => "DoDestinyUpdate" ("clientID") {
         fields: { state: PyRep, wait_for_bubble: PyRep },
         optional: { dogma_messages: Option<PyRep>, extra: Option<PyRep> },
-        samples: || vec![vec![
-            PyRep::List(vec![PyRep::Tuple(vec![
-                PyRep::Integer(1),
-                PyRep::Tuple(vec![
-                    PyRep::String("SetMaxSpeed".into()),
-                    PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Real(1.0)]),
-                ]),
-            ])]),
-            PyRep::Bool(false),
-            PyRep::List(vec![PyRep::Tuple(vec![
-                PyRep::String("OnEffectMessage".into()),
-                PyRep::Tuple(Vec::new()),
-            ])]),
-        ]],
+        samples: || vec![
+            vec![
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Tuple(vec![
+                        PyRep::String("SetMaxSpeed".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Real(1.0)]),
+                    ]),
+                ])]),
+                PyRep::Bool(false),
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::String("OnEffectMessage".into()),
+                    PyRep::Tuple(Vec::new()),
+                ])]),
+            ],
+            vec![
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Tuple(vec![
+                        PyRep::String("RemoveBalls".into()),
+                        PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(100_000_001)])]),
+                    ]),
+                ])]),
+                PyRep::Bool(false),
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::String("OnEffectMessage".into()),
+                    PyRep::Tuple(Vec::new()),
+                ])]),
+            ],
+        ],
     },
     OnAbyssalContentFinished => "OnAbyssalContentFinished" ("charid") {
         optional: { content_id: Option<i64>, timer_type: Option<i64> },
@@ -2631,20 +3900,55 @@ define_notifications! {
         samples: || vec![vec![PyRep::Integer(90_000_001)]],
     },
     OnClientNodeGraphMessage => "OnClientNodeGraphMessage" ("charid") {
-        fields: { node_graph_instance_id: i64, arg1: PyRep, arg2: PyRep },
-        optional: { arg3: Option<PyRep> },
-        samples: || vec![vec![
-            PyRep::Integer(1),
-            PyRep::String("msg".into()),
-            PyRep::Integer(1),
-        ]],
+        fields: { node_graph_instance_id: i64, key: String, value: PyRep },
+        // `nodegraph/client/service.pyj:NodeGraphService.OnClientNodeGraphMessage` expects 3 args:
+        // `(node_graph_instance_id, key, value)` (`air_npe_nodegraph_runner.rs:446`).
+        samples: || vec![
+            vec![
+                PyRep::Integer(1),
+                PyRep::String("pocket_entered".into()),
+                PyRep::keyval([
+                    ("dungeonID", PyRep::Integer(1)),
+                    ("instanceID", PyRep::Integer(1)),
+                    ("solarSystemID", PyRep::Integer(30_000_142)),
+                    ("checkpointID", PyRep::Integer(14)),
+                ]),
+            ],
+            vec![
+                PyRep::Integer(1),
+                PyRep::String("checkpoint_completed".into()),
+                PyRep::keyval([
+                    ("completedCheckpointID", PyRep::Integer(14)),
+                    ("nextCheckpointID", PyRep::Integer(15)),
+                    ("act", PyRep::Integer(1)),
+                    ("scene", PyRep::String("s1".into())),
+                    ("objective", PyRep::String("obj".into())),
+                ]),
+            ],
+            vec![
+                PyRep::Integer(1),
+                PyRep::String("msg".into()),
+                PyRep::Integer(1),
+            ],
+            vec![
+                PyRep::Integer(1),
+                PyRep::String("msg".into()),
+                PyRep::None,
+            ],
+        ],
     },
     OnClientNodeGraphUpdate => "OnClientNodeGraphUpdate" ("charid") {
-        fields: { node_graph_instance_id: i64, arg1: PyRep },
-        optional: { arg2: Option<PyRep> },
+        fields: { node_graph_instance_id: i64, blackboard_parameters: PyRep },
+        // `nodegraph/client/service.pyj:NodeGraphService.OnClientNodeGraphUpdate` expects 2 args:
+        // `(node_graph_instance_id, blackboard_parameters)` where `bb_to_py_dict`
+        // (`services/air_npe_nodegraph_runner.rs:352`) produces `String -> Integer|Bool|String`.
         samples: || vec![vec![
             PyRep::Integer(1),
-            PyRep::Dict(vec![(PyRep::String("progress".into()), PyRep::Integer(1))]),
+            PyRep::Dict(vec![
+                (PyRep::String("progress".into()), PyRep::Integer(1)),
+                (PyRep::String("moved_into_pocket".into()), PyRep::Bool(false)),
+                (PyRep::String("act_label".into()), PyRep::String("act1".into())),
+            ]),
         ]],
     },
     OnCorpAllowedEnlistmentFactionsSet => "OnCorpAllowedEnlistmentFactionsSet" ("corpid") {
@@ -2684,11 +3988,17 @@ define_notifications! {
     },
     OnEnlistmentStateUpdated => "OnEnlistmentStateUpdated" ("charid") {
         fields: { faction_id: PyRep, direct_faction_id: PyRep, corp_faction_id: PyRep },
-        samples: || vec![vec![
-            PyRep::Integer(500_001),
-            PyRep::Integer(500_001),
-            PyRep::None,
-        ]],
+        // `services/fw_enlistment.rs:332`: all three faction IDs are `Option<i64>`.
+        samples: || vec![
+            vec![PyRep::Integer(500_001), PyRep::Integer(500_001), PyRep::Integer(500_001)],
+            vec![PyRep::Integer(500_001), PyRep::Integer(500_001), PyRep::None],
+            vec![PyRep::Integer(500_001), PyRep::None, PyRep::Integer(500_001)],
+            vec![PyRep::Integer(500_001), PyRep::None, PyRep::None],
+            vec![PyRep::None, PyRep::Integer(500_001), PyRep::Integer(500_001)],
+            vec![PyRep::None, PyRep::Integer(500_001), PyRep::None],
+            vec![PyRep::None, PyRep::None, PyRep::Integer(500_001)],
+            vec![PyRep::None, PyRep::None, PyRep::None],
+        ],
     },
     OnEscalatingPathChange => "OnEscalatingPathChange" ("charid") {
         samples: || vec![vec![]],
@@ -2809,8 +4119,13 @@ define_notifications! {
     },
     OnHackingVirusChanged => "OnHackingVirusChanged" ("charid") {
         fields: { object_data: PyRep, event_id: i64 },
+        // `fitting_scanners_superweapons.rs:709` & `sov_gameplay.rs:1560`.
         samples: || vec![vec![
-            PyRep::keyval([("hp", PyRep::Integer(50))]),
+            PyRep::keyval([
+                ("containerID", PyRep::Integer(100_000_050)),
+                ("coherence", PyRep::Real(60.0)),
+                ("strength", PyRep::Real(20.0)),
+            ]),
             PyRep::Integer(1),
         ]],
     },
@@ -2845,11 +4160,22 @@ define_notifications! {
     },
     OnItemsChanged => "OnItemsChanged" ("charid") {
         fields: { items: PyRep, change: PyRep, location: PyRep },
-        samples: || vec![vec![
-            PyRep::List(vec![sample_dbrow_item()]),
-            PyRep::Dict(Vec::new()),
-            PyRep::None,
-        ]],
+        // `change` may be empty `{}` or keyed by inventory change column IDs (`character_skill_ops.rs:713`).
+        samples: || vec![
+            vec![
+                PyRep::List(vec![sample_dbrow_item()]),
+                PyRep::Dict(Vec::new()),
+                PyRep::None,
+            ],
+            vec![
+                PyRep::List(vec![sample_dbrow_item()]),
+                PyRep::Dict(vec![
+                    (PyRep::Integer(3), PyRep::Integer(60_003_760)),
+                    (PyRep::Integer(4), PyRep::Integer(4)),
+                ]),
+                PyRep::None,
+            ],
+        ],
     },
     OnJumpCloneCacheInvalidated => "OnJumpCloneCacheInvalidated" ("charid") {
         samples: || vec![vec![]],
@@ -2859,7 +4185,8 @@ define_notifications! {
     },
     OnMailCountersUpdate => "OnMailCountersUpdate" ("charid") {
         optional: { char_id: Option<i64> },
-        samples: || vec![vec![]],
+        // `MailForm.OnMailCountersUpdate(*args)`; callers (`fleet_social_mail.rs:732`) pass `char_id`.
+        samples: || vec![vec![], vec![PyRep::Integer(90_000_001)]],
     },
     OnMailRestored => "OnMailRestored" ("charid") {
         fields: { message_ids: Vec<i64> },
@@ -2945,13 +4272,44 @@ define_notifications! {
             created: WallFileTime,
             data: PyRep,
         },
-        samples: || vec![vec![
-            PyRep::Integer(1),
-            PyRep::Integer(1),
-            PyRep::Integer(90_000_001),
-            PyRep::Integer(1_335_000_000_000_000_00),
-            PyRep::String("{}".into()),
-        ]],
+        // `services/auth_cache.rs:148-157`: `sender_id` and `data` may be `None`, string, dict, or KeyVal.
+        samples: || vec![
+            vec![
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(1_335_000_000_000_000_00),
+                PyRep::String("{}".into()),
+            ],
+            vec![
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(1_335_000_000_000_000_00),
+                PyRep::None,
+            ],
+            vec![
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::None,
+                PyRep::Integer(1_335_000_000_000_000_00),
+                PyRep::String("{}".into()),
+            ],
+            vec![
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::None,
+                PyRep::Integer(1_335_000_000_000_000_00),
+                PyRep::None,
+            ],
+            vec![
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(1_335_000_000_000_000_00),
+                PyRep::Dict(vec![(PyRep::String("key".into()), PyRep::Integer(1))]),
+            ],
+        ],
     },
     OnOwnOrdersChanged => "OnOwnOrdersChanged" ("charid") {
         fields: { orders: PyRep, reason: PyRep, is_corp: PyRep },
@@ -2983,24 +4341,35 @@ define_notifications! {
     },
     OnServerSkillsChanged => "OnServerSkillsChanged" ("charid") {
         fields: { skill_infos: PyRep, event: PyRep, timestamp: WallFileTime },
-        samples: || vec![vec![
-            PyRep::Dict(vec![(
-                PyRep::Integer(3402),
-                PyRep::keyval([
-                    ("skillPoints", PyRep::Integer(250)),
-                    ("skillLevel", PyRep::Integer(1)),
-                ]),
-            )]),
-            PyRep::String("OnSkillTrained".into()),
-            PyRep::Integer(133_500_000_000_000_000),
-        ]],
+        // `skillPoints` is float (`PyRep::Real`, `skillsvc.pyj` / `delta_projection.rs:1277` /
+        // `jump_clone_names.rs:244`); `event` is `String` or `None` (`SkillsSvc.OnServerSkillsChanged`).
+        samples: || vec![
+            vec![
+                PyRep::Dict(vec![(PyRep::Integer(3402), sample_skill_info_kv(1, 250.0))]),
+                PyRep::String("OnSkillTrained".into()),
+                PyRep::Integer(133_500_000_000_000_000),
+            ],
+            vec![
+                PyRep::Dict(vec![(PyRep::Integer(3402), sample_skill_info_kv(1, 250.0))]),
+                PyRep::None,
+                PyRep::Integer(133_500_000_000_000_000),
+            ],
+        ],
     },
     OnServerSkillsRemoved => "OnServerSkillsRemoved" ("charid") {
         fields: { skill_infos: PyRep, timestamp: WallFileTime },
-        samples: || vec![vec![
-            PyRep::Dict(vec![(PyRep::Integer(3402), PyRep::None)]),
-            PyRep::Integer(133_500_000_000_000_000),
-        ]],
+        // Removed entries carry `KeyVal` with `trainedSkillPoints = -1.0` (`jump_clone_names.rs:287`,
+        // `delta_projection.rs:1372`) or `None`.
+        samples: || vec![
+            vec![
+                PyRep::Dict(vec![(PyRep::Integer(3402), PyRep::None)]),
+                PyRep::Integer(133_500_000_000_000_000),
+            ],
+            vec![
+                PyRep::Dict(vec![(PyRep::Integer(3402), sample_skill_info_kv(0, -1.0))]),
+                PyRep::Integer(133_500_000_000_000_000),
+            ],
+        ],
     },
     OnShipJumpCloneCacheInvalidated => "OnShipJumpCloneCacheInvalidated" ("charid") {
         fields: { location_id: i64, char_id: i64 },
@@ -3068,10 +4437,26 @@ define_notifications! {
     },
     OnTradeComplete => "OnTradeComplete" ("charid") {
         fields: { container_id: i64, items: PyRep },
-        samples: || vec![vec![
-            PyRep::Integer(1),
-            PyRep::List(vec![sample_keyval_item()]),
-        ]],
+        // `services/wallet_services_ext.rs:924-958` (`trade_item_to_keyval`) emits integer `singleton`.
+        samples: || vec![
+            vec![
+                PyRep::Integer(1),
+                PyRep::List(vec![PyRep::keyval([
+                    ("itemID", PyRep::Integer(100_000_001)),
+                    ("typeID", PyRep::Integer(34)),
+                    ("ownerID", PyRep::Integer(90_000_001)),
+                    ("locationID", PyRep::Integer(60_003_760)),
+                    ("flagID", PyRep::Integer(4)),
+                    ("quantity", PyRep::Integer(10)),
+                    ("stacksize", PyRep::Integer(10)),
+                    ("singleton", PyRep::Integer(0)),
+                    ("groupID", PyRep::Integer(18)),
+                    ("categoryID", PyRep::Integer(4)),
+                    ("customInfo", PyRep::String(String::new())),
+                ])]),
+            ],
+            vec![PyRep::Integer(1), PyRep::List(vec![sample_keyval_item()])],
+        ],
     },
     OnTradeInitiate => "OnTradeInitiate" ("charid") {
         fields: { char_id: i64, trade_session: PyRep, trade_items: PyRep },
@@ -3118,11 +4503,19 @@ define_notifications! {
     },
     OnWarzoneOccupationStateUpdated => "OnWarzoneOccupationStateUpdated" ("solarsystemid") {
         fields: { solar_system_id: i64, new_occupation_state: PyRep },
+        // `services/fw_services.rs:268-288,340-359` emits `adjacencyState: String` (`"frontline"` etc.).
         samples: || vec![vec![
             PyRep::Integer(30_000_142),
             PyRep::keyval([
-                ("adjacencyState", PyRep::Integer(1)),
+                ("solarSystemID", PyRep::Integer(30_000_142)),
+                ("ownerID", PyRep::Integer(500_001)),
+                ("ownerFactionID", PyRep::Integer(500_001)),
                 ("occupierID", PyRep::Integer(500_001)),
+                ("occupierFactionID", PyRep::Integer(500_001)),
+                ("adjacencyState", PyRep::String("frontline".into())),
+                ("frontlineStatus", PyRep::Integer(2)),
+                ("isFrontline", PyRep::Bool(true)),
+                ("contestedPercentage", PyRep::Real(10.0)),
             ]),
         ]],
     },
@@ -3145,16 +4538,69 @@ define_notifications! {
     // Batch 4 (#932) registrations
     DoDestinyUpdates => "DoDestinyUpdates" ("charid") {
         fields: { updates: Vec<PyRep> },
-        samples: || vec![vec![PyRep::List(vec![PyRep::Tuple(vec![
-            PyRep::List(vec![PyRep::Tuple(vec![
-                PyRep::Integer(1),
-                PyRep::Tuple(vec![
-                    PyRep::String("SetMaxSpeed".into()),
-                    PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Real(1.0)]),
+        // Accepts V24 `(updates_list, wait_for_bubble)` pairs plus pre-`client_compat`
+        // `(stamp, (action, args))` tuples (`space_nav_travel.rs:974`, `client_compat.rs:989`).
+        samples: || vec![
+            vec![PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::List(vec![
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(1),
+                        PyRep::Tuple(vec![
+                            PyRep::String("SetMaxSpeed".into()),
+                            PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Real(1.0)]),
+                        ]),
+                    ]),
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(1),
+                        PyRep::Tuple(vec![
+                            PyRep::String("Stop".into()),
+                            PyRep::Tuple(vec![PyRep::Integer(100_000_001)]),
+                        ]),
+                    ]),
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(1),
+                        PyRep::Tuple(vec![
+                            PyRep::String("SetBallVelocity".into()),
+                            PyRep::Tuple(vec![
+                                PyRep::Integer(100_000_001),
+                                PyRep::Real(0.0),
+                                PyRep::Real(0.0),
+                                PyRep::Real(0.0),
+                            ]),
+                        ]),
+                    ]),
                 ]),
-            ])]),
-            PyRep::Bool(false),
-        ])])]],
+                PyRep::Bool(false),
+            ])])],
+            vec![PyRep::List(vec![
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Tuple(vec![
+                        PyRep::String("SetMaxSpeed".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Real(1.0)]),
+                    ]),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Tuple(vec![
+                        PyRep::String("Stop".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(100_000_001)]),
+                    ]),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Tuple(vec![
+                        PyRep::String("SetBallVelocity".into()),
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(100_000_001),
+                            PyRep::Real(0.0),
+                            PyRep::Real(0.0),
+                            PyRep::Real(0.0),
+                        ]),
+                    ]),
+                ]),
+            ])],
+        ],
     },
     OnAbyssalLocationEntered => "OnAbyssalLocationEntered" ("charid") {
         fields: { client_data: PyRep },
@@ -3285,11 +4731,19 @@ define_notifications! {
     },
     OnDroneActivityChange => "OnDroneActivityChange" ("charid") {
         fields: { drone_id: i64, activity_id: i64, activity: Option<String> },
-        samples: || vec![vec![
-            PyRep::Integer(100_000_020),
-            PyRep::Integer(1),
-            PyRep::String("attack".into()),
-        ]],
+        // `services/notify_emitters_space_dungeons.rs:516` passes `None` when idle.
+        samples: || vec![
+            vec![
+                PyRep::Integer(100_000_020),
+                PyRep::Integer(1),
+                PyRep::String("attack".into()),
+            ],
+            vec![
+                PyRep::Integer(100_000_020),
+                PyRep::Integer(0),
+                PyRep::None,
+            ],
+        ],
     },
     OnDroneControlLost => "OnDroneControlLost" ("charid") {
         fields: { drone_id: i64 },
@@ -3305,15 +4759,27 @@ define_notifications! {
             controller_owner_id: i64,
             target_id: Option<i64>,
         },
-        samples: || vec![vec![
-            PyRep::Integer(100_000_020),
-            PyRep::Integer(90_000_001),
-            PyRep::Integer(100_000_010),
-            PyRep::Integer(0),
-            PyRep::Integer(2454),
-            PyRep::Integer(90_000_001),
-            PyRep::None,
-        ]],
+        // `sp6_lifecycle/drone_return.rs:172` sets `target_id: Some(...)` while engaged.
+        samples: || vec![
+            vec![
+                PyRep::Integer(100_000_020),
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(100_000_010),
+                PyRep::Integer(0),
+                PyRep::Integer(2454),
+                PyRep::Integer(90_000_001),
+                PyRep::None,
+            ],
+            vec![
+                PyRep::Integer(100_000_020),
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(100_000_010),
+                PyRep::Integer(1),
+                PyRep::Integer(2454),
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(100_000_030),
+            ],
+        ],
     },
     OnDungeonEdit => "OnDungeonEdit" ("charid") {
         fields: { dungeon_id: i64, room_id: i64, room_pos: PyRep },
@@ -3325,9 +4791,14 @@ define_notifications! {
     },
     OnDungeonValues => "OnDungeonValues" ("charid") {
         fields: { dungeon_id: i64, values: PyRep },
+        // `services/notify_emitters_space_dungeons.rs:365-378`.
         samples: || vec![vec![
             PyRep::Integer(1),
-            PyRep::Dict(vec![(PyRep::String("currentWave".into()), PyRep::Integer(1))]),
+            PyRep::Dict(vec![
+                (PyRep::String("currentWave".into()), PyRep::Integer(1)),
+                (PyRep::String("totalWaves".into()), PyRep::Integer(3)),
+                (PyRep::String("completed".into()), PyRep::Bool(false)),
+            ]),
         ]],
     },
     OnEditCalendarEvent => "OnEditCalendarEvent" ("charid") {
@@ -3360,12 +4831,17 @@ define_notifications! {
             instance_id: i64,
             dungeon_values: PyRep,
         },
+        // `services/notify_emitters_space_dungeons.rs:365-378`.
         samples: || vec![vec![
             PyRep::Integer(1),
             PyRep::Integer(2),
             PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
             PyRep::Integer(100),
-            PyRep::Dict(vec![(PyRep::String("currentWave".into()), PyRep::Integer(1))]),
+            PyRep::Dict(vec![
+                (PyRep::String("currentWave".into()), PyRep::Integer(1)),
+                (PyRep::String("totalWaves".into()), PyRep::Integer(3)),
+                (PyRep::String("completed".into()), PyRep::Bool(false)),
+            ]),
         ]],
     },
     OnEscalatingPathDungeonEntered => "OnEscalatingPathDungeonEntered" ("charid") {
@@ -3425,11 +4901,26 @@ define_notifications! {
             expert_system_added: bool,
             expert_system_type_id: i64,
         },
-        samples: || vec![vec![
-            PyRep::Dict(Vec::new()),
-            PyRep::Bool(true),
-            PyRep::Integer(57_800),
-        ]],
+        // `services/character_expert_systems.rs:138-151` (`expert_systems_to_py_dict`).
+        samples: || vec![
+            vec![
+                PyRep::Dict(vec![(
+                    PyRep::Integer(57_800),
+                    PyRep::keyval([
+                        ("typeID", PyRep::Integer(57_800)),
+                        ("insertedAt", PyRep::Integer(1_335_000_000_000_000_00)),
+                        ("expiresAt", PyRep::Integer(1_335_000_001_000_000_00)),
+                    ]),
+                )]),
+                PyRep::Bool(true),
+                PyRep::Integer(57_800),
+            ],
+            vec![
+                PyRep::Dict(Vec::new()),
+                PyRep::Bool(false),
+                PyRep::Integer(57_800),
+            ],
+        ],
     },
     OnFighterAbilitySlotActivated => "OnFighterAbilitySlotActivated" ("charid") {
         fields: {
@@ -3440,14 +4931,42 @@ define_notifications! {
             duration_ms: f64,
             cooldown: Option<f64>,
         },
-        samples: || vec![vec![
-            PyRep::Integer(100_000_020),
-            PyRep::Integer(0),
-            PyRep::Integer(5),
-            PyRep::Integer(1_335_000_000_000_000_00),
-            PyRep::Real(10_000.0),
-            PyRep::Real(5.0),
-        ]],
+        // `services/combat_fighters_abilities.rs:1278` sets `remaining_charge_count` & `cooldown`
+        // to `None` when unlimited / zero cooldown (`compareisnull` in client).
+        samples: || vec![
+            vec![
+                PyRep::Integer(100_000_020),
+                PyRep::Integer(0),
+                PyRep::Integer(5),
+                PyRep::Integer(1_335_000_000_000_000_00),
+                PyRep::Real(10_000.0),
+                PyRep::Real(5.0),
+            ],
+            vec![
+                PyRep::Integer(100_000_020),
+                PyRep::Integer(0),
+                PyRep::None,
+                PyRep::Integer(1_335_000_000_000_000_00),
+                PyRep::Real(10_000.0),
+                PyRep::Real(5.0),
+            ],
+            vec![
+                PyRep::Integer(100_000_020),
+                PyRep::Integer(0),
+                PyRep::Integer(5),
+                PyRep::Integer(1_335_000_000_000_000_00),
+                PyRep::Real(10_000.0),
+                PyRep::None,
+            ],
+            vec![
+                PyRep::Integer(100_000_020),
+                PyRep::Integer(0),
+                PyRep::None,
+                PyRep::Integer(1_335_000_000_000_000_00),
+                PyRep::Real(10_000.0),
+                PyRep::None,
+            ],
+        ],
     },
     OnFighterAbilitySlotDeactivated => "OnFighterAbilitySlotDeactivated" ("charid") {
         fields: {
@@ -3522,10 +5041,25 @@ define_notifications! {
             active_effects: PyRep,
             time: SimFileTime,
         },
+        // `services/notify_emitters_space_dungeons.rs:566-578` emits 10-element effect state lists.
         samples: || vec![vec![
             PyRep::Integer(100_000_020),
             PyRep::Integer(440),
-            PyRep::Dict(Vec::new()),
+            PyRep::Dict(vec![(
+                PyRep::Integer(10),
+                PyRep::List(vec![
+                    PyRep::Integer(100_000_020),
+                    PyRep::Integer(90_000_001),
+                    PyRep::Integer(100_000_010),
+                    PyRep::None,
+                    PyRep::None,
+                    PyRep::List(Vec::new()),
+                    PyRep::Integer(10),
+                    PyRep::Integer(1_335_000_000_000_000_00),
+                    PyRep::Integer(1000),
+                    PyRep::Real(1000.0),
+                ]),
+            )]),
             PyRep::Integer(1_335_000_000_000_000_00),
         ]],
     },
@@ -3538,20 +5072,78 @@ define_notifications! {
     },
     OnGodmaPrimeItem => "OnGodmaPrimeItem" ("charid") {
         fields: { location_id: i64, row: PyRep },
-        samples: || vec![vec![
-            PyRep::Integer(100_000_010),
-            PyRep::keyval([
-                ("itemID", PyRep::Integer(100_000_020)),
-                ("invItem", sample_keyval_item()),
-                (
-                    "attributes",
-                    PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Real(1.0))]),
-                ),
-                ("activeEffects", PyRep::Dict(Vec::new())),
-                ("time", PyRep::Integer(1_335_000_000_000_000_00)),
-                ("wallclockTime", PyRep::Integer(1_335_000_000_000_000_00)),
-            ]),
-        ]],
+        // `services/fitting_module_cycles_helpers.rs:734,1164,1208` emits `invItem` as `DBRow`
+        // (and `None` for `(ship_id, flag_id, type_id)` charge sublocations).
+        samples: || {
+            let active_fx = PyRep::List(vec![
+                PyRep::Integer(100_000_020),
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(100_000_010),
+                PyRep::None,
+                PyRep::None,
+                PyRep::List(Vec::new()),
+                PyRep::Integer(10),
+                PyRep::Integer(1_335_000_000_000_000_00),
+                PyRep::Real(1000.0),
+                PyRep::Integer(0),
+            ]);
+            vec![
+                vec![
+                    PyRep::Integer(100_000_010),
+                    PyRep::keyval([
+                        ("itemID", PyRep::Integer(100_000_020)),
+                        ("invItem", sample_keyval_item()),
+                        (
+                            "attributes",
+                            PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Real(1.0))]),
+                        ),
+                        ("activeEffects", PyRep::Dict(Vec::new())),
+                        ("time", PyRep::Integer(1_335_000_000_000_000_00)),
+                        ("wallclockTime", PyRep::Integer(1_335_000_000_000_000_00)),
+                    ]),
+                ],
+                vec![
+                    PyRep::Integer(100_000_010),
+                    PyRep::keyval([
+                        ("itemID", PyRep::Integer(100_000_020)),
+                        ("invItem", sample_dbrow_item()),
+                        (
+                            "attributes",
+                            PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Real(1.0))]),
+                        ),
+                        (
+                            "activeEffects",
+                            PyRep::Dict(vec![(PyRep::Integer(10), active_fx)]),
+                        ),
+                        ("time", PyRep::Integer(1_335_000_000_000_000_00)),
+                        ("wallclockTime", PyRep::Integer(1_335_000_000_000_000_00)),
+                        ("description", PyRep::String(String::new())),
+                    ]),
+                ],
+                vec![
+                    PyRep::Integer(100_000_010),
+                    PyRep::keyval([
+                        (
+                            "itemID",
+                            PyRep::Tuple(vec![
+                                PyRep::Integer(100_000_010),
+                                PyRep::Integer(27),
+                                PyRep::Integer(185),
+                            ]),
+                        ),
+                        ("invItem", PyRep::None),
+                        (
+                            "attributes",
+                            PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Real(1.0))]),
+                        ),
+                        ("activeEffects", PyRep::Dict(Vec::new())),
+                        ("time", PyRep::Integer(1_335_000_000_000_000_00)),
+                        ("wallclockTime", PyRep::Integer(1_335_000_000_000_000_00)),
+                        ("description", PyRep::String(String::new())),
+                    ]),
+                ],
+            ]
+        },
     },
     OnGodmaShipEffect => "OnGodmaShipEffect" ("charid") {
         fields: { item_id: i64, effect: PyRep, start_or_time: GodmaEffectStartOrTime },
@@ -3565,11 +5157,7 @@ define_notifications! {
             error: Option<PyRep>,
             actual_stop_time: Option<Option<SimFileTime>>,
         },
-        samples: || vec![vec![
-            PyRep::Integer(200_018_015),
-            PyRep::String("online".into()),
-            PyRep::Bool(false),
-        ]],
+        samples: sample_godma_ship_effect_variants,
     },
     OnGroupJumpAnchorActivated => "OnGroupJumpAnchorActivated" ("charid") {
         fields: { to_solar_system_id: i64, num_passengers: i64 },
@@ -3699,7 +5287,9 @@ define_notifications! {
     },
     OnSkillQueuePausedServer => "OnSkillQueuePausedServer" ("charid") {
         optional: { paused: Option<bool> },
-        samples: || vec![vec![PyRep::Bool(false)]],
+        // `SkillQueueService.OnSkillQueuePausedServer(*args)` (`arity_min = 0`): emitted with 0 args
+        // (`delta_projection.rs:593`, `binding.rs:1632`) or `Some(bool)` (`character_skills_helpers.rs:760`).
+        samples: || vec![vec![], vec![PyRep::Bool(false)]],
     },
     OnSkinLicenseActivated => "OnSkinLicenseActivated" ("charid") {
         fields: { skin_id: i64, licensee_id: i64 },
@@ -3795,9 +5385,13 @@ define_notifications! {
     },
     OnWeaponBanksChanged => "OnWeaponBanksChanged" ("charid") {
         fields: { ship_id: i64, info: PyRep },
+        // `services/combat_weapons_spool.rs:1298`: `{master_id: [slave_ids]}`.
         samples: || vec![vec![
             PyRep::Integer(100_000_010),
-            PyRep::Dict(Vec::new()),
+            PyRep::Dict(vec![(
+                PyRep::Integer(100_000_020),
+                PyRep::List(vec![PyRep::Integer(100_000_021)]),
+            )]),
         ]],
     },
     OnWeaponGroupDestroyed => "OnWeaponGroupDestroyed" ("charid") {
@@ -3870,10 +5464,22 @@ define_notifications! {
     },
     OnHackingTurnComplete => "OnHackingTurnComplete" ("charid") {
         fields: { events: Vec<PyRep> },
-        samples: || vec![vec![PyRep::List(vec![PyRep::keyval([(
-            "eventID",
-            PyRep::Integer(1),
-        )])])]],
+        // `HackingSvc.OnHackingTurnComplete` subscripts `event["eventID"]`
+        // (`services/pve_hacking_sites.rs:781,1070`).
+        samples: || vec![vec![PyRep::List(vec![PyRep::Dict(vec![
+            (PyRep::String("eventID".into()), PyRep::Integer(1)),
+            (
+                PyRep::String("eventData".into()),
+                PyRep::keyval([
+                    ("containerID", PyRep::Integer(100_000_050)),
+                    ("tileIndex", PyRep::Integer(0)),
+                    ("status", PyRep::String("InProgress".into())),
+                    ("virusCoherence", PyRep::Integer(60)),
+                    ("virusStrength", PyRep::Integer(20)),
+                    ("distanceIndicator", PyRep::Integer(1)),
+                ]),
+            ),
+        ])])]],
     },
     OnIndustryJob => "OnIndustryJob" ("character") {
         fields: {
@@ -3924,11 +5530,40 @@ define_notifications! {
     OnRemoteMessage => "OnRemoteMessage" ("charid") {
         fields: { msg_id: String },
         optional: { dict: Option<PyRep>, kw: Option<PyRep> },
-        samples: || vec![vec![
-            PyRep::String("ParamCustomsNotification".into()),
-            PyRep::Dict(Vec::new()),
-            PyRep::None,
-        ]],
+        // `combat_wrecks_killmails.rs:716`, `combat_npc_police.rs:515`, `character_gm_helpers.rs:146`,
+        // `fitting_module_cycles_pending_actions.rs:850`, and `system_actor/cycles.rs:2933`
+        // emit 2-arg `[msgID, dict]` when `kw: None`.
+        samples: || {
+            let sample_dict = PyRep::Dict(vec![
+                (PyRep::String("notify".into()), PyRep::String("Notice".into())),
+                (PyRep::String("typeID".into()), PyRep::Integer(34)),
+                (PyRep::String("quantity".into()), PyRep::Integer(10)),
+                (PyRep::String("fineISK".into()), PyRep::Real(1000.0)),
+                (PyRep::String("factionID".into()), PyRep::Integer(500_001)),
+                (
+                    PyRep::String("type".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(561)]),
+                ),
+                (
+                    PyRep::String("what".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(587)]),
+                ),
+                (PyRep::String("what".into()), PyRep::String("ship".into())),
+                (PyRep::String("when".into()), PyRep::Integer(120)),
+                (PyRep::String("charID".into()), PyRep::Integer(90_000_001)),
+                (PyRep::String("shipTypeID".into()), PyRep::Integer(587)),
+                (PyRep::String("timeRemaining".into()), PyRep::Integer(1_200_000_000)),
+                (PyRep::String("timeLeft".into()), PyRep::Integer(1_200_000_000)),
+            ]);
+            vec![
+                vec![PyRep::String("ParamCustomsNotification".into()), sample_dict.clone()],
+                vec![
+                    PyRep::String("ParamCustomsNotification".into()),
+                    sample_dict,
+                    PyRep::None,
+                ],
+            ]
+        },
     },
     OnSafeLogoffAborted => "OnSafeLogoffAborted" ("charid") {
         fields: { reason_code: String },
@@ -3949,20 +5584,98 @@ define_notifications! {
     },
     ProcessGodmaPrimeLocation => "ProcessGodmaPrimeLocation" ("charid") {
         fields: { location_id: i64, data: PyRep },
-        samples: || vec![vec![
-            PyRep::Integer(100_000_010),
-            PyRep::Dict(vec![(
+        // `services/fitting_module_cycles_helpers.rs:1080-1300` emits `invItem` as `DBRow`
+        // (and `None` for `(ship_id, flag_id, type_id)` charge sublocations).
+        samples: || {
+            let inv_row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(vec![
                 PyRep::Integer(100_000_010),
-                PyRep::keyval([
-                    ("itemID", PyRep::Integer(100_000_010)),
-                    ("invItem", sample_keyval_item()),
-                    (
-                        "attributes",
-                        PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Real(1.0))]),
-                    ),
-                ]),
-            )]),
-        ]],
+                PyRep::Integer(587),
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(60_003_760),
+                PyRep::Integer(4),
+                PyRep::Integer(-1),
+                PyRep::Integer(25),
+                PyRep::Integer(6),
+                PyRep::String(String::new()),
+            ]);
+            let active_fx_entry = PyRep::List(vec![
+                PyRep::Integer(100_000_020),
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(100_000_010),
+                PyRep::None,
+                PyRep::None,
+                PyRep::List(Vec::new()),
+                PyRep::Integer(10),
+                PyRep::Integer(1_335_000_000_000_000_00),
+                PyRep::Real(1000.0),
+                PyRep::Integer(0),
+            ]);
+            vec![
+                vec![
+                    PyRep::Integer(100_000_010),
+                    PyRep::Dict(vec![(
+                        PyRep::Integer(100_000_010),
+                        PyRep::keyval([
+                            ("itemID", PyRep::Integer(100_000_010)),
+                            ("invItem", sample_keyval_item()),
+                            (
+                                "attributes",
+                                PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Real(1.0))]),
+                            ),
+                        ]),
+                    )]),
+                ],
+                vec![
+                    PyRep::Integer(100_000_010),
+                    PyRep::Dict(vec![
+                        (
+                            PyRep::Integer(100_000_010),
+                            PyRep::keyval([
+                                ("itemID", PyRep::Integer(100_000_010)),
+                                ("invItem", inv_row),
+                                (
+                                    "attributes",
+                                    PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Real(1.0))]),
+                                ),
+                                (
+                                    "activeEffects",
+                                    PyRep::Dict(vec![(PyRep::Integer(10), active_fx_entry)]),
+                                ),
+                                ("time", PyRep::Integer(1_335_000_000_000_000_00)),
+                                ("wallclockTime", PyRep::Integer(1_335_000_000_000_000_00)),
+                                ("description", PyRep::String(String::new())),
+                            ]),
+                        ),
+                        (
+                            PyRep::Tuple(vec![
+                                PyRep::Integer(100_000_010),
+                                PyRep::Integer(27),
+                                PyRep::Integer(185),
+                            ]),
+                            PyRep::keyval([
+                                (
+                                    "itemID",
+                                    PyRep::Tuple(vec![
+                                        PyRep::Integer(100_000_010),
+                                        PyRep::Integer(27),
+                                        PyRep::Integer(185),
+                                    ]),
+                                ),
+                                ("invItem", PyRep::None),
+                                (
+                                    "attributes",
+                                    PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Real(1.0))]),
+                                ),
+                                ("activeEffects", PyRep::Dict(Vec::new())),
+                                ("time", PyRep::Integer(1_335_000_000_000_000_00)),
+                                ("wallclockTime", PyRep::Integer(1_335_000_000_000_000_00)),
+                                ("description", PyRep::String(String::new())),
+                            ]),
+                        ),
+                    ]),
+                ],
+            ]
+        },
     },
     // === Fitting & Dogma Batch Events (#932) ===
     OnAsteroidRevealed => "OnAsteroidRevealed" ("character") {
@@ -3994,12 +5707,21 @@ define_notifications! {
     },
     OnNewMoonProbe => "OnNewMoonProbe" ("charid") {
         fields: { probe: PyRep },
-        samples: || vec![vec![PyRep::keyval([
-            ("probeID", PyRep::Integer(1)),
-            ("typeID", PyRep::Integer(45_511)),
-            ("moonID", PyRep::Integer(40_000_001)),
-            ("expiry", PyRep::Integer(1_700_000_060)),
-        ])]],
+        // `services/fitting_module_cycles.rs:874`: `moonID` is `None` when no moon is targeted.
+        samples: || vec![
+            vec![PyRep::keyval([
+                ("probeID", PyRep::Integer(1)),
+                ("typeID", PyRep::Integer(45_511)),
+                ("moonID", PyRep::Integer(40_000_001)),
+                ("expiry", PyRep::Integer(1_700_000_060)),
+            ])],
+            vec![PyRep::keyval([
+                ("probeID", PyRep::Integer(1)),
+                ("typeID", PyRep::Integer(45_511)),
+                ("moonID", PyRep::None),
+                ("expiry", PyRep::Integer(1_700_000_060)),
+            ])],
+        ],
     },
     OnRepairDone => "OnRepairDone" ("charid") {
         fields: { item_ids: Vec<i64> },
@@ -4025,22 +5747,45 @@ define_notifications! {
             time_from_start: f64,
             graphic_info: Option<PyRep>,
         },
-        samples: || vec![vec![
-            PyRep::Integer(100_000_010),
-            PyRep::Integer(100_000_020),
-            PyRep::Integer(483),
-            PyRep::None,
-            PyRep::None,
-            PyRep::String("effects.Laser".into()),
-            PyRep::Bool(false),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Real(0.0),
-            PyRep::Integer(0),
-            PyRep::Integer(1_335_000_000_000_000_00),
-            PyRep::Real(0.0),
-            PyRep::None,
-        ]],
+        samples: || {
+            let fx = |module_id: PyRep,
+                      module_type_id: PyRep,
+                      target_id: PyRep,
+                      other_type_id: PyRep,
+                      graphic_info: PyRep| {
+                vec![
+                    PyRep::Integer(100_000_010),
+                    module_id,
+                    module_type_id,
+                    target_id,
+                    other_type_id,
+                    PyRep::String("effects.Laser".into()),
+                    PyRep::Bool(false),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                    PyRep::Real(0.0),
+                    PyRep::Integer(0),
+                    PyRep::Integer(1_335_000_000_000_000_00),
+                    PyRep::Real(0.0),
+                    graphic_info,
+                ]
+            };
+            // `outbound_scene_scope.rs` & `space_warp_jump.rs:2243` vary nullable module/target/graphic_info.
+            vec![
+                fx(PyRep::Integer(100_000_020), PyRep::Integer(483), PyRep::None, PyRep::None, PyRep::None),
+                fx(PyRep::Integer(100_000_020), PyRep::Integer(483), PyRep::Integer(100_000_030), PyRep::Integer(587), PyRep::None),
+                fx(PyRep::Integer(100_000_020), PyRep::Integer(483), PyRep::Integer(100_000_030), PyRep::None, PyRep::None),
+                fx(PyRep::Integer(100_000_020), PyRep::None, PyRep::None, PyRep::None, PyRep::None),
+                fx(PyRep::None, PyRep::None, PyRep::None, PyRep::None, PyRep::None),
+                fx(
+                    PyRep::None,
+                    PyRep::None,
+                    PyRep::Integer(100_000_030),
+                    PyRep::None,
+                    PyRep::List(vec![PyRep::Integer(30_000_144)]),
+                ),
+            ]
+        },
     },
     OnStanceActive => "OnStanceActive" ("charid") {
         fields: { ship_id: i64, stance_id: i64 },
@@ -4163,7 +5908,10 @@ define_notification_item!(OnCynoJammerChanged => "OnCynoJammerChanged" ("solarsy
 });
 define_notification_item!(OnCynoJammerChangedOpt => "OnCynoJammerChanged" ("solarsystemid") {
     fields: { solar_system_id: i64, status: Option<i64> },
-    samples: || vec![vec![PyRep::Integer(30_000_142), PyRep::None]],
+    samples: || vec![
+        vec![PyRep::Integer(30_000_142), PyRep::None],
+        vec![PyRep::Integer(30_000_142), PyRep::Integer(1)],
+    ],
 });
 define_notification_item!(OnDbuffUpdated => "OnDbuffUpdated" ("charid") {
     fields: { ship_id: i64 },

@@ -1088,22 +1088,21 @@ pub fn emit_dungeon_camera_interest(
     );
 }
 
-/// Emits `OnDungeonTriggerAmbientSound(dungeonID, soundID, entityItemID, emitterID)`.
+/// Emits `OnDungeonTriggerAmbientSound(dungeonID, soundID, entityItemID)` (`3` args).
 pub fn emit_dungeon_trigger_ambient_sound(
     ctx: &ServerContext,
     char_id: i64,
     dungeon_id: i64,
     sound_id: &str,
     entity_item_id: i64,
-    emitter_id: i64,
+    _emitter_id: i64,
 ) {
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        OnDungeonTriggerAmbientSoundStr {
+        OnDungeonTriggerAmbientSound3Str {
             dungeon_id,
             sound_id: sound_id.to_string(),
             entity_item_id,
-            emitter_id,
         },
     );
 }

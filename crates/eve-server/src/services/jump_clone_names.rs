@@ -813,7 +813,7 @@ pub(crate) fn emit_ship_clone_offered(
     );
 }
 
-/// Emits `OnShipJumpCloneInstallationCanceled()` to the cancelling party and offerer.
+/// Emits `OnShipJumpCloneInstallationCanceled(())` to the cancelling party and offerer.
 pub(crate) fn emit_ship_clone_canceled(
     ctx: &ServerContext,
     char_id: i64,
@@ -821,12 +821,16 @@ pub(crate) fn emit_ship_clone_canceled(
 ) {
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
-        crate::router::notify_registry::OnShipJumpCloneInstallationCanceled { args: None },
+        crate::router::notify_registry::OnShipJumpCloneInstallationCanceled {
+            args: Some(PyRep::Tuple(Vec::new())),
+        },
     );
     if let Some(offerer_id) = offerer_opt.filter(|&id| id != char_id) {
         ctx.emit_typed(
             NotificationTarget::Character(offerer_id),
-            crate::router::notify_registry::OnShipJumpCloneInstallationCanceled { args: None },
+            crate::router::notify_registry::OnShipJumpCloneInstallationCanceled {
+                args: Some(PyRep::Tuple(Vec::new())),
+            },
         );
     }
 }
