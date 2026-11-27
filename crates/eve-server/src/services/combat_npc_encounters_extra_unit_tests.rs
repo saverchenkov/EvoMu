@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use crate::combat::crimewatch_tail_test_helpers::sec_status_txs;
 use crate::combat::npc_ai::npc_test_helpers::seed_npc_entity;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
@@ -92,10 +93,8 @@ async fn test_handle_npc_destroyed_bounty_sec_status_drifter_and_wave_fallback()
                 >= 100_000.0
         );
     });
-    let wave2_trigger = with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.sec_status_transactions.get(&char_id).unwrap().is_empty());
-        rt.encounter_waves[&502].trigger_ball_id
-    });
+    assert!(!sec_status_txs(&ctx, char_id).is_empty());
+    let wave2_trigger = with_combat_runtime(&ctx, |rt| rt.encounter_waves[&502].trigger_ball_id);
     assert!(wave2_trigger > 0);
 
     // Kill wave 2 trigger -> advances to wave 3 using fallback vec![npc_type_id, npc_type_id] (931_001 with non-zero dmg)

@@ -9,10 +9,11 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::PyRep;
 use eve_server::combat::crimewatch::tick_concord_responses;
+use eve_server::combat::crimewatch_tail_test_helpers::has_disapproval_flag;
 use eve_server::combat::npc_ai::npc_test_helpers::{get_npc_entity, list_npc_entities_in_system};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
-    dispatch_combat_rpc, spawn_specialized_npc_entity, step_extended_npc_ai, with_combat_runtime,
+    dispatch_combat_rpc, spawn_specialized_npc_entity, step_extended_npc_ai,
 };
 use eve_server::services::security_mgr::insurgency_pvp_loot_drop_threshold;
 use eve_server::world_seeder::seed_full_market_catalog;
@@ -565,7 +566,7 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
     assert!(gate_gun_id > 0 && patrol_id > 0);
 
     assert!(
-        !with_combat_runtime(&ctx, |rt| rt.disapproval_flags.contains_key(&offender.char_id)),
+        !has_disapproval_flag(&ctx, offender.char_id),
         "Pilot must start without a Zarzakh retribution/disapproval timer"
     );
 
@@ -593,7 +594,7 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
     sys_handle.step_manual(1.0).await.unwrap();
 
     assert!(
-        with_combat_runtime(&ctx, |rt| rt.disapproval_flags.contains_key(&offender.char_id)),
+        has_disapproval_flag(&ctx, offender.char_id),
         "Illegal PvP aggression in Zarzakh must automatically record a disapproval/retribution timer"
     );
 
@@ -717,7 +718,7 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
     .await;
     sys_handle.step_manual(1.0).await.expect("step pirate attack");
     assert!(
-        with_combat_runtime(&ctx, |rt| rt.disapproval_flags.contains_key(&pirate.char_id)),
+        has_disapproval_flag(&ctx, pirate.char_id),
         "Pirate-aligned pilot attacking in Zarzakh must receive retribution/disapproval timer"
     );
     // Move the non-pirate victim back to park_pos so the Deathless patrol isolates the flagged pirate.

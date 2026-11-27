@@ -165,9 +165,7 @@ fn docking_allowed_fulcrum_and_pirate_fob_edge_cases() {
     });
 
     // 203 has an active disapproval flag timer in combat_runtime
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.insert(203, now + 300);
-    });
+    crate::combat::crimewatch_tail_test_helpers::set_disapproval_flag(&ctx, 203, now + 300);
 
     assert_eq!(
         check_docking_allowed(&ctx, 201, sys_id, fulcrum_id, false).unwrap_err().code,

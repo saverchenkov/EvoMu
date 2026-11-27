@@ -545,7 +545,8 @@ async fn crimewatch_step_concord_guards_despawns_tick_and_kill_right_reuse() {
     use super::crimewatch::{
         tick_concord_responses, AggressionEvaluation, CharacterCrimeWatchState, CrimeWatchDirector,
     };
-    use crate::services::combat_crimewatch::{with_mut_combat_runtime, SecStatusTransaction};
+    use super::crimewatch_tail_test_helpers::set_sec_status_txs;
+    use crate::services::combat_crimewatch::SecStatusTransaction;
 
     let ctx = test_ctx();
     ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
@@ -679,22 +680,21 @@ async fn crimewatch_step_concord_guards_despawns_tick_and_kill_right_reuse() {
     let self_char = 90_085_020i64;
     spawn_test_ship(&ctx, sys_id, live_ship, live_crim, 587, DVec3::new(2_000.0, 0.0, 0.0));
     spawn_test_ship(&ctx, sys_id, self_ship, self_char, 587, DVec3::new(4_000.0, 0.0, 0.0));
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.sec_status_transactions.insert(
-            live_crim,
-            vec![SecStatusTransaction {
-                timestamp_unix: now,
-                old_sec: 2.0,
-                new_sec: 1.8,
-                delta: -0.2,
-                reason: "Illegal Aggression".into(),
-                solar_system_id: sys_id,
-                event_type_id: 1,
-                other_owner_id: Some(90_000_002),
-                other_type_id: None,
-            }],
-        );
-    });
+    set_sec_status_txs(
+        &ctx,
+        live_crim,
+        vec![SecStatusTransaction {
+            timestamp_unix: now,
+            old_sec: 2.0,
+            new_sec: 1.8,
+            delta: -0.2,
+            reason: "Illegal Aggression".into(),
+            solar_system_id: sys_id,
+            event_type_id: 1,
+            other_owner_id: Some(90_000_002),
+            other_type_id: None,
+        }],
+    );
     ctx.db.with_mut_snapshot(|snap| {
         let mut sc = snap.characters[&live_crim].clone();
         if let Some(ch) = snap.characters.get_mut(&live_crim) {

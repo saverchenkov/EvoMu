@@ -2,8 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+use crate::combat::crimewatch_tail_test_helpers::authorize_shipping_storage;
 use crate::router::{BoundObjectEntry, ServerContext};
-use crate::services::combat_crimewatch::with_mut_combat_runtime;
 use crate::services::inventory_bound::{
     get_effective_corp_roles, get_effective_corp_roles_at_location, handle, handle_i2_get_item,
     handle_i2_is_primed, is_inventory_location_colocated, item_to_packed_cells,
@@ -331,9 +331,7 @@ async fn invbroker_turret_slots_shipping_storage_open_can_and_corp_office_branch
     .unwrap()
     .is_ok());
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.authorized_shipping_storage.insert((auth_storage_id, char_id));
-    });
+    authorize_shipping_storage(&ctx, auth_storage_id, char_id);
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     for (id, x) in [(ship_id, 0.0), (auth_storage_id, 4_000.0)] {
         let _ = sys_h

@@ -1708,10 +1708,11 @@ async fn dispatch_rpc_invbroker_bound_handles_subobjects_end_to_end() {
         )
         .unwrap();
     });
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.authorized_shipping_storage
-            .insert((storage_unit_id, guest_char));
-    });
+    crate::combat::crimewatch_tail_test_helpers::authorize_shipping_storage(
+        &ctx,
+        storage_unit_id,
+        guest_char,
+    );
     {
         use eve_destiny::{Ball, DVec3, MovementMode};
         let sys_handle = ctx.systems.get_or_spawn(sys_id);

@@ -413,9 +413,11 @@ fn structure_queries_upwell_dock_targets_and_station_standing_gates() {
             ch.war_faction_id = None;
         }
     });
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.insert(ceo_id, ctx.now_unix() + 300);
-    });
+    crate::combat::crimewatch_tail_test_helpers::set_disapproval_flag(
+        &ctx,
+        ceo_id,
+        ctx.now_unix() + 300,
+    );
     let err = validate_npc_station_docking_gate(&ctx, ceo_id, 60_015_187)
         .expect_err("retribution timer active");
     assert!(err.message.contains("FulcrumRefusesTimerActive") || err.code == "UserError");

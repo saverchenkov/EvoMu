@@ -114,9 +114,10 @@ async fn test_npc_navy_zarzakh_sleepers_haulers_live() {
 
     // Assert no disapproval flags are set for Zarzakh (the remediation goal)
     // The combat runtime shouldn't have disapproval flags inserted.
-    let has_disapproval = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.contains_key(&attacker_char_id)
-    });
+    let has_disapproval = eve_server::combat::crimewatch_tail_test_helpers::has_disapproval_flag(
+        &ctx,
+        attacker_char_id,
+    );
     assert!(!has_disapproval, "Zarzakh should not use disapproval flags");
 
     // 4. feat:npc.navy-npc

@@ -975,16 +975,12 @@ async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
     ctx.crimewatch.write().unwrap().states.entry(OWNER).or_default().weapon_timer_until_unix = 0;
 
     // Retribution timer refuses docking on both entrypoints
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.insert(OWNER, t_now + 300);
-    });
+    eve_server::combat::crimewatch_tail_test_helpers::set_disapproval_flag(&ctx, OWNER, t_now + 300);
     let retrib_dock_beyonce = rpc(&ctx, &mut sess, "beyonce", "CmdDock", &[PyRep::Integer(FULCRUM_STATION_ID)]).await;
     assert_eq!(retrib_dock_beyonce.expect_err("Fulcrum must refuse retribution timer via beyonce").code, "FulcrumRefusesTimerActive");
     let retrib_dock_station = rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(FULCRUM_STATION_ID), PyRep::Integer(ship)]).await;
     assert_eq!(retrib_dock_station.expect_err("Fulcrum must refuse retribution timer via stationSvc").code, "FulcrumRefusesTimerActive");
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.remove(&OWNER);
-    });
+    eve_server::combat::crimewatch_tail_test_helpers::clear_disapproval_flag(&ctx, OWNER);
 
     // Active 15-minute capsuleer PvP logoff timer (`pvp_timer_until_unix`) with expired weapons timer MUST allow docking
     {
