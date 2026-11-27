@@ -1032,26 +1032,7 @@ fn structure_directory_v24_fields_and_wire_state_normalization() {
         Some(&PyRep::Integer(12_500))
     );
 
-    // Macho wire normalization maps string `state` to V24 integer `structures.const.STATE_*`
-    let wire_dir = crate::router::client_compat::normalize_macho_rpc_reply(
-        "structureDirectory",
-        "GetMyCorporationStructures",
-        Ok(dir_raw),
-    )
-    .expect("wire normalize");
-    let PyRep::Dict(wire_entries) = wire_dir else {
-        panic!("expected Dict after normalize");
-    };
-    let wire_full = wire_entries
-        .iter()
-        .find(|(k, _)| k.as_i64() == Some(st_full))
-        .map(|(_, v)| v)
-        .expect("wire full entry");
-    assert_eq!(wire_full.dict_get("state"), Some(&PyRep::Integer(111)));
-    let wire_low = wire_entries
-        .iter()
-        .find(|(k, _)| k.as_i64() == Some(st_low))
-        .map(|(_, v)| v)
-        .expect("wire low entry");
-    assert_eq!(wire_low.dict_get("state"), Some(&PyRep::Integer(110)));
+    // Handler natively emits V24 integer `structures.const.STATE_*` for `state`
+    assert_eq!(full_kv.dict_get("state"), Some(&PyRep::Integer(111)));
+    assert_eq!(find_entry(st_low).dict_get("state"), Some(&PyRep::Integer(110)));
 }

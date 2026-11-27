@@ -6,48 +6,6 @@ use crate::router::client_compat::normalize_macho_rpc_reply;
 use eve_proto::PyRep;
 
 #[test]
-fn normalize_macho_rpc_reply_exhaustive_fallback_and_non_empty_branches() {
-    // structureDirectory.GetJumpBridgesWithMyAccess with missing keys -> defaults to Integer(0)
-    let jb = normalize_macho_rpc_reply(
-        "structureDirectory",
-        "GetJumpBridgesWithMyAccess",
-        Ok(PyRep::List(vec![PyRep::Dict(Vec::new())])),
-    )
-    .unwrap();
-    let PyRep::Tuple(jb_parts) = jb else {
-        panic!("expected tuple");
-    };
-    let PyRep::List(pairs) = &jb_parts[0] else {
-        panic!("expected pairs list");
-    };
-    let PyRep::Tuple(pair0) = &pairs[0] else {
-        panic!("expected pair tuple");
-    };
-    assert_eq!(pair0[0].dict_get("structureID"), Some(&PyRep::Integer(0)));
-    assert_eq!(pair0[1].dict_get("solarSystemID"), Some(&PyRep::Integer(0)));
-
-    // structureDirectory non-list passthrough
-    assert_eq!(
-        normalize_macho_rpc_reply(
-            "structureDirectory",
-            "GetJumpBridgesWithMyAccess",
-            Ok(PyRep::None)
-        )
-        .unwrap(),
-        PyRep::None
-    );
-
-    // XmppChatMgr without "channels" key passthrough
-    let xmpp_no_ch = normalize_macho_rpc_reply(
-        "XmppChatMgr",
-        "ResyncSystemChannelAccess",
-        Ok(PyRep::keyval([("other", PyRep::Integer(1))])),
-    )
-    .unwrap();
-    assert_eq!(xmpp_no_ch.dict_get("other"), Some(&PyRep::Integer(1)));
-}
-
-#[test]
 fn normalize_macho_rpc_reply_covers_raffle_skill_station_and_store_variants() {
     // home_station.get_home_station_candidates empty list & non-Integer passthrough
     let hs_empty = normalize_macho_rpc_reply(

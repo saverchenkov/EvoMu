@@ -24,50 +24,6 @@ fn normalize_helpers_cover_keyval_recursive() {
 }
 
 #[test]
-fn normalize_structure_jump_xmpp_beyonce_blueprint_and_char_branches() {
-    // 1. structureDirectory.GetJumpBridgesWithMyAccess
-    let jb = normalize_macho_rpc_reply(
-        "structureDirectory",
-        "GetJumpBridgesWithMyAccess",
-        Ok(PyRep::List(vec![PyRep::keyval([
-            ("structureID", PyRep::Integer(1_000_000_000_101)),
-            ("solarSystemID", PyRep::Integer(30_000_142)),
-            ("targetStructureID", PyRep::Integer(1_000_000_000_102)),
-            ("targetSolarSystemID", PyRep::Integer(30_000_144)),
-        ])])),
-    )
-    .expect("jump bridges");
-    let PyRep::Tuple(jb_parts) = jb else {
-        panic!("expected 3-tuple");
-    };
-    assert_eq!(jb_parts.len(), 3);
-
-    // 3. XmppChatMgr.ResyncSystemChannelAccess & beyonce.GetCapacityOfSiphon
-    let xmpp = normalize_macho_rpc_reply(
-        "XmppChatMgr",
-        "ResyncSystemChannelAccess",
-        Ok(PyRep::keyval([(
-            "channels",
-            PyRep::List(vec![PyRep::String("local_30000142".into())]),
-        )])),
-    )
-    .expect("xmpp");
-    assert_eq!(xmpp, PyRep::List(vec![PyRep::String("local_30000142".into())]));
-
-    let xmpp_create = normalize_macho_rpc_reply(
-        "XmppChatMgr",
-        "CreatePlayerOwnedChannel",
-        Ok(PyRep::keyval([
-            ("channelID", PyRep::String("channel:playtest".into())),
-            ("name", PyRep::String("playtest".into())),
-            ("ownerID", PyRep::Integer(90_000_001)),
-        ])),
-    )
-    .expect("xmpp create player channel");
-    assert_eq!(xmpp_create, PyRep::String("player_playtest".into()));
-}
-
-#[test]
 fn normalize_contract_corp_devindex_dogma_fw_homestation_inv_and_clones() {
     // dogmaIM.OverloadRack passes through flat integer list, home_station, invbroker, jumpCloneSvc
     let ov = normalize_macho_rpc_reply(
@@ -1304,4 +1260,170 @@ async fn arch_933_t5_direct_equals_wire_and_bound_dispatch() {
         .expect("wire trademgr.InitiateTrade must return SubStruct bound ref");
     assert!(ctx_wire.verify_bound_object(&sess_wire, w_trade_bid).is_ok());
     assert_eq!(wire_trade, ctx_wire.bound_object_rep(w_trade_bid, Some("machoNet:26000")));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_933_t6_migrated_rpc_families_emit_native_v24_without_compat() {
+    use eve_db::{UpwellStructureRecord, VirtualServerClock, WorldRepository};
+    use eve_machonet::{service_roles, SessionState};
+    use std::sync::{Arc, OnceLock};
+
+    static SDE: OnceLock<Arc<eve_sde::SdeRegistry>> = OnceLock::new();
+    let shared_sde = || -> Arc<eve_sde::SdeRegistry> {
+        if let Some(sde) = SDE.get() {
+            Arc::clone(sde)
+        } else {
+            let ctx = crate::router::ServerContext::new();
+            let _ = SDE.set(Arc::clone(&ctx.sde));
+            ctx.sde
+        }
+    };
+
+    let now_unix = 1_800_000_000_u64;
+    let char_id = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let struct_id = 1_000_000_000_999_i64;
+
+    let setup_world = || -> (crate::router::ServerContext, SessionState) {
+        let ctx = crate::router::ServerContext::with_sde_and_repository(
+            shared_sde(),
+            Arc::new(WorldRepository::with_demo_seed()),
+        )
+        .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+        ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix)));
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.corporation_id = corp_id;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.solar_system_id = sys_id;
+                ch.active_ship_id = ship_id;
+            }
+            snap.structures.insert(
+                struct_id,
+                UpwellStructureRecord {
+                    structure_id: struct_id,
+                    type_id: 35_832,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys_id,
+                    name: "T6 Native Citadel".into(),
+                    position: [1.0, 2.0, 3.0],
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 100,
+                    shield_hp: 100.0,
+                    armor_hp: 100.0,
+                    hull_hp: 100.0,
+                    reinforced_until_unix: 0,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                    self_destruct_at_unix: None,
+                },
+            );
+        });
+        ctx.db
+            .acquire_online_lock(1, 87_611, Some(char_id), true, now_unix)
+            .expect("online lock");
+        let mut sess = SessionState::new(87_611);
+        sess.user_id = Some(1);
+        sess.character_id = Some(char_id);
+        sess.corporation_id = Some(corp_id);
+        sess.corp_role = u64::MAX;
+        sess.solar_system_id = Some(sys_id);
+        sess.ship_id = Some(ship_id);
+        sess.role = service_roles::ROLE_PLAYER_DEFAULT;
+        (ctx, sess)
+    };
+
+    let (ctx_direct, mut sess_direct) = setup_world();
+    let (ctx_wire, mut sess_wire) = setup_world();
+    let kw = HashMap::new();
+
+    // 1. XmppChatMgr.ResyncSystemChannelAccess & CreatePlayerOwnedChannel
+    let resync_d = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "XmppChatMgr", None, "ResyncSystemChannelAccess", &[], &kw, None)
+        .await
+        .expect("direct ResyncSystemChannelAccess");
+    let resync_w = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "XmppChatMgr", None, "ResyncSystemChannelAccess", &[], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire ResyncSystemChannelAccess");
+    assert_eq!(resync_d, resync_w);
+    assert!(matches!(
+        resync_d,
+        PyRep::List(ref items)
+            if items.contains(&PyRep::String(format!("local_{sys_id}")))
+                && items.contains(&PyRep::String(format!("corp_{corp_id}")))
+                && items.iter().all(|r| matches!(r, PyRep::String(s) if !s.contains(':')))
+    ));
+
+    let poc_args = [PyRep::String("T6 Native Room".into())];
+    let poc_d = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "XmppChatMgr", None, "CreatePlayerOwnedChannel", &poc_args, &kw, None)
+        .await
+        .expect("direct CreatePlayerOwnedChannel");
+    let poc_w = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "XmppChatMgr", None, "CreatePlayerOwnedChannel", &poc_args, &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire CreatePlayerOwnedChannel");
+    assert_eq!(poc_d, PyRep::String("player_t6_native_room".into()));
+    assert_eq!(poc_d, poc_w);
+
+    // 2. structureDirectory: GetJumpBridgesWithMyAccess + numeric wire state codes on all 5 directory/info RPCs
+    let jb_d = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "structureDirectory", None, "GetJumpBridgesWithMyAccess", &[], &kw, None)
+        .await
+        .expect("direct GetJumpBridgesWithMyAccess");
+    let jb_w = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "structureDirectory", None, "GetJumpBridgesWithMyAccess", &[], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire GetJumpBridgesWithMyAccess");
+    assert_eq!(jb_d, jb_w);
+    assert!(matches!(
+        jb_d,
+        PyRep::Tuple(ref parts)
+            if parts.len() == 3
+                && matches!(parts[0], PyRep::List(_))
+                && matches!(parts[1], PyRep::List(_))
+                && matches!(parts[2], PyRep::Dict(_))
+    ));
+
+    let expected_state = crate::services::station_structure::structure_lifecycle::structure_state_wire_code("ShieldVulnerable");
+    for method in [
+        "GetStructures",
+        "GetCorporationStructures",
+        "GetMyCharacterStructures",
+        "GetMyCorporationStructures",
+    ] {
+        let d = ctx_direct
+            .dispatch_rpc(&mut sess_direct, "structureDirectory", None, method, &[], &kw, None)
+            .await
+            .unwrap_or_else(|e| panic!("direct {method}: {e:?}"));
+        let w = ctx_wire
+            .dispatch_rpc(&mut sess_wire, "structureDirectory", None, method, &[], &kw, Some("machoNet:26000"))
+            .await
+            .unwrap_or_else(|e| panic!("wire {method}: {e:?}"));
+        assert_eq!(d, w, "{method} direct must equal wire");
+        let PyRep::Dict(entries) = d else {
+            panic!("{method} expected Dict");
+        };
+        let (_, entry) = entries
+            .into_iter()
+            .find(|(k, _)| *k == PyRep::Integer(struct_id))
+            .unwrap_or_else(|| panic!("{method} must include seeded structure"));
+        assert_eq!(entry.dict_get("state"), Some(&PyRep::Integer(expected_state)));
+    }
+
+    let info_d = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "structureDirectory", None, "GetStructureInfo", &[PyRep::Integer(struct_id)], &kw, None)
+        .await
+        .expect("direct GetStructureInfo");
+    let info_w = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "structureDirectory", None, "GetStructureInfo", &[PyRep::Integer(struct_id)], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire GetStructureInfo");
+    assert_eq!(info_d, info_w);
+    assert_eq!(info_d.dict_get("state"), Some(&PyRep::Integer(expected_state)));
 }

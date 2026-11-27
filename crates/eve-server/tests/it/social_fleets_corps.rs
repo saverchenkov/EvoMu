@@ -1116,9 +1116,8 @@ async fn test_so7_chat_channels_local_corp_fleet_player_and_private() {
         .dispatch_rpc(&mut sess1, "XmppChatMgr", None, "ResyncSystemChannelAccess", &[], &kw, None)
         .await
         .expect("ResyncSystemChannelAccess Jita");
-    let PyRep::KeyVal(rj_kv) = &resync_jita else { panic!() };
-    assert_eq!(rj_kv["channelID"], PyRep::String("solarsystemid2:30000142".into()));
-    assert_eq!(rj_kv["isDelayedLocal"], PyRep::Bool(false));
+    let PyRep::List(rj_list) = &resync_jita else { panic!() };
+    assert!(rj_list.contains(&PyRep::String("local_30000142".into())));
     ctx.db.with_snapshot(|snap| {
         assert!(snap.chat_channels["solarsystemid2:30000142"].members.contains(&90_000_001));
     });
@@ -1132,9 +1131,8 @@ async fn test_so7_chat_channels_local_corp_fleet_player_and_private() {
         .dispatch_rpc(&mut sess1, "XmppChatMgr", None, "ResyncSystemChannelAccess", &[], &kw, None)
         .await
         .expect("ResyncSystemChannelAccess Wormhole");
-    let PyRep::KeyVal(rw_kv) = &resync_wh else { panic!() };
-    assert_eq!(rw_kv["channelID"], PyRep::String("solarsystemid2:31000005".into()));
-    assert_eq!(rw_kv["isDelayedLocal"], PyRep::Bool(true));
+    let PyRep::List(rw_list) = &resync_wh else { panic!() };
+    assert!(rw_list.contains(&PyRep::String("local_31000005".into())));
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.chat_channels["solarsystemid2:30000142"].members.contains(&90_000_001), "Old system local membership must be removed");
         assert!(snap.chat_channels["solarsystemid2:31000005"].is_delayed_local);
@@ -1166,8 +1164,8 @@ async fn test_so7_chat_channels_local_corp_fleet_player_and_private() {
         .dispatch_rpc(&mut sess1, "XmppChatMgr", None, "ResyncSystemChannelAccess", &[], &kw, None)
         .await
         .expect("ResyncSystemChannelAccess Pochven");
-    let PyRep::KeyVal(rp_kv) = &resync_poch else { panic!() };
-    assert_eq!(rp_kv["isDelayedLocal"], PyRep::Bool(true));
+    let PyRep::List(rp_list) = &resync_poch else { panic!() };
+    assert!(rp_list.contains(&PyRep::String("local_30002086".into())));
     sess1.solar_system_id = Some(30_000_142);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 30_000_142;
@@ -1233,8 +1231,11 @@ async fn test_so7_chat_channels_local_corp_fleet_player_and_private() {
         )
         .await
         .expect("CreatePlayerOwnedChannel");
-    let PyRep::KeyVal(ch_kv) = &create_chan else { panic!() };
-    let custom_chan_id = ch_kv["channelID"].as_str().unwrap().to_string();
+    let custom_chan_id = create_chan
+        .as_str()
+        .expect("CreatePlayerOwnedChannel wire string")
+        .to_string();
+    assert_eq!(custom_chan_id, "player_wormholehunters");
 
     // Wrong password rejected; right password accepted
     let bad_pw = ctx
@@ -1267,7 +1268,7 @@ async fn test_so7_chat_channels_local_corp_fleet_player_and_private() {
         .await
         .expect("GrantChannelOwnership");
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.chat_channels[&custom_chan_id].owner_id, Some(90_000_002), "Channel ownership must transfer to Pilot 2");
+        assert_eq!(snap.chat_channels["channel:wormholehunters"].owner_id, Some(90_000_002), "Channel ownership must transfer to Pilot 2");
     });
 
     // 4. Private 1-on-1 Conversation (`feat:social.chat-private`): block list & CSPA fee enforcement

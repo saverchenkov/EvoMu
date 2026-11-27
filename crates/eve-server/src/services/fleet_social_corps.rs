@@ -1793,7 +1793,10 @@ pub(crate) fn handle_corps(
                             "clientID",
                             crate::router::notify_registry::OnSessionChanged {
                                 is_remote: false,
-                                session: PyRep::Integer(applicant_id),
+                                session: crate::router::build_character_session_state_keyval(
+                                    ctx,
+                                    applicant_id,
+                                ),
                                 change: sess_changes,
                             },
                         );

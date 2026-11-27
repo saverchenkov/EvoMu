@@ -131,7 +131,8 @@ async fn test_journey_local_chat() {
     )
     .await
     .expect("CreatePlayerOwnedChannel");
-    let ch_id = ch_rep.dict_get("channelID").and_then(|v| v.as_str()).unwrap().to_string();
+    let ch_id = ch_rep.as_str().unwrap().to_string();
+    assert_eq!(ch_id, "player_opschannel");
     call_rpc(&ctx, &mut sess1, "XmppChatMgr", "AddCharacterToChannel", &[PyRep::String(ch_id.clone()), PyRep::Integer(90_000_002)])
         .await
         .expect("AddCharacterToChannel");
@@ -147,7 +148,7 @@ async fn test_journey_local_chat() {
         .await
         .expect("ResyncSystemChannelAccess with fleet");
     let sync_str = format!("{sync_rep:?}");
-    assert!(sync_str.contains(&format!("fleetid:{fleet_id}")) && sync_str.contains("corpid:"));
+    assert!(sync_str.contains(&format!("fleet_{fleet_id}")) && sync_str.contains("corp_"));
 
     // 4. Jump stargate to Perimeter (30_000_144) and verify Local channel membership transitions
     call_rpc(&ctx, &mut sess1, "ship", "Undock", &[]).await.expect("Undock 1");
@@ -162,7 +163,8 @@ async fn test_journey_local_chat() {
     let moved_sync = call_rpc(&ctx, &mut sess1, "XmppChatMgr", "ResyncSystemChannelAccess", &[])
         .await
         .expect("ResyncSystemChannelAccess in Perimeter");
-    assert_eq!(moved_sync.dict_get("channelID").and_then(|v| v.as_str()), Some("solarsystemid2:30000144"));
+    let PyRep::List(moved_chans) = &moved_sync else { panic!("expected list") };
+    assert!(moved_chans.contains(&PyRep::String("local_30000144".into())));
 }
 
 #[tokio::test]

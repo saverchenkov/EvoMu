@@ -2,48 +2,7 @@
 //! notification normalization, Quasar protobuf payload coercion, and HTTP/2 gRPC transport.
 
 use crate::router::client_compat::normalize_macho_rpc_reply;
-use eve_proto::{BridgeRpcError, PyRep};
-
-#[test]
-fn normalize_macho_rpc_reply_covers_structure_jump_chat_siphon_and_blueprints() {
-    // Error passthrough
-    let err_res = normalize_macho_rpc_reply(
-        "structureDirectory",
-        "GetJumpBridgesWithMyAccess",
-        Err(BridgeRpcError::user_error("Denied")),
-    );
-    assert!(err_res.is_err());
-
-    // structureDirectory.GetJumpBridgesWithMyAccess with linkedSolarSystemID fallback
-    let jb = normalize_macho_rpc_reply(
-        "structureDirectory",
-        "GetJumpBridgesWithMyAccess",
-        Ok(PyRep::List(vec![PyRep::keyval([
-            ("structureID", PyRep::Integer(101)),
-            ("solarSystemID", PyRep::Integer(30_000_142)),
-            ("linkedStructureID", PyRep::Integer(102)),
-            ("linkedSolarSystemID", PyRep::Integer(30_000_144)),
-        ])])),
-    )
-    .unwrap();
-    let PyRep::Tuple(jb_parts) = jb else {
-        panic!("expected tuple");
-    };
-    assert_eq!(jb_parts.len(), 3);
-    assert_eq!(jb_parts[1], PyRep::List(vec![PyRep::Integer(101)]));
-
-    // XmppChatMgr.ResyncSystemChannelAccess
-    let chat = normalize_macho_rpc_reply(
-        "XmppChatMgr",
-        "ResyncSystemChannelAccess",
-        Ok(PyRep::keyval([(
-            "channels",
-            PyRep::List(vec![PyRep::String("local".into())]),
-        )])),
-    )
-    .unwrap();
-    assert_eq!(chat, PyRep::List(vec![PyRep::String("local".into())]));
-}
+use eve_proto::PyRep;
 
 #[test]
 fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store() {

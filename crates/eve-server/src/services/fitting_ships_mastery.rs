@@ -416,7 +416,7 @@ async fn handle_dogma_create_newbie_ship(
             "clientID",
             crate::router::notify_registry::OnSessionChanged {
                 is_remote: false,
-                session: PyRep::Integer(session.session_id as i64),
+                session: crate::router::build_session_state_keyval(session, char_id),
                 change: PyRep::Dict(vec![(
                     PyRep::String("shipid".to_string()),
                     PyRep::Tuple(vec![
@@ -833,7 +833,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 "clientID",
                 crate::router::notify_registry::OnSessionChanged {
                     is_remote: false,
-                    session: PyRep::Integer(session.session_id as i64),
+                    session: crate::router::build_session_state_keyval(session, char_id),
                     change: PyRep::Dict(changes),
                 },
             );
@@ -1368,7 +1368,9 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             "clientID",
                             crate::router::notify_registry::OnSessionChanged {
                                 is_remote: false,
-                                session: PyRep::Integer(session.session_id as i64),
+                                session: crate::router::build_session_state_keyval(
+                                    session, char_id,
+                                ),
                                 change: PyRep::Dict(changes),
                             },
                         );

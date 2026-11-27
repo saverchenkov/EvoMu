@@ -257,7 +257,7 @@ async fn xmpp_lsc_chat_acl_delayed_local_and_structure_owner_groups_auto_defense
 
     // 1. XmppChatMgr & LSC Channel Password, Mute Expiry (3600s boundary), ACL Modes (-2, -1, 1, 2, 3), Delayed Local
     let created = social_call(&ctx, &mut s1, "XmppChatMgr", "CreatePlayerOwnedChannel", &[PyRep::String("Fleet Comms".into()), PyRep::String("opsec".into()), PyRep::String("MOTD1".into())]).await.unwrap();
-    let chan_id = created.dict_get("channelID").and_then(|v| v.as_str()).unwrap().to_string();
+    let chan_id = created.as_str().unwrap().to_string();
 
     assert_eq!(social_call(&ctx, &mut s2, "XmppChatMgr", "AddCharacterToChannel", &[PyRep::String(chan_id.clone()), PyRep::String("wrong".into())]).await.unwrap_err().code, "InvalidChannelPassword");
     social_call(&ctx, &mut s2, "XmppChatMgr", "AddCharacterToChannel", &[PyRep::String(chan_id.clone()), PyRep::String("opsec".into())]).await.unwrap();

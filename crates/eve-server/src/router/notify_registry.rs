@@ -1612,7 +1612,34 @@ define_notifications! {
     },
     OnSessionChanged => "OnSessionChanged" ("charid") {
         fields: { is_remote: bool, session: PyRep, change: PyRep },
-        samples: || vec![vec![PyRep::Bool(false), PyRep::None, PyRep::Dict(Vec::new())]],
+        samples: || {
+            let sample_change = PyRep::Dict(vec![
+                (
+                    PyRep::String("solarsystemid2".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(30_000_142), PyRep::Integer(30_000_144)]),
+                ),
+                (
+                    PyRep::String("stationid".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(60_003_760)]),
+                ),
+                (
+                    PyRep::String("charname".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::String("Pilot".into())]),
+                ),
+                (
+                    PyRep::String("flag".into()),
+                    PyRep::Tuple(vec![PyRep::Bool(false), PyRep::Bool(true)]),
+                ),
+            ]);
+            vec![
+                vec![PyRep::Bool(false), PyRep::None, sample_change.clone()],
+                vec![
+                    PyRep::Bool(false),
+                    PyRep::keyval([("charid", PyRep::Integer(90_000_001))]),
+                    sample_change,
+                ],
+            ]
+        },
     },
     OnSetAllianceStanding => "OnSetAllianceStanding" ("allianceid") {
         fields: { contact_id: i64, standing: f64 },

@@ -214,9 +214,12 @@ async fn test_xmpp_chat_mgr_and_macho_net() {
     let resync_rep = rpc(&ctx, &mut sess2, "XmppChatMgr", "ResyncSystemChannelAccess", &[])
         .await
         .expect("ResyncSystemChannelAccess");
-    let local_chan = field(&resync_rep, "channelID").as_str().expect("channelID str");
-    assert!(local_chan.starts_with("solarsystemid2:"));
-    assert_eq!(field(&resync_rep, "exists"), &PyRep::Bool(true));
+    let PyRep::List(resync_chans) = &resync_rep else {
+        panic!("expected ResyncSystemChannelAccess list, got {resync_rep:?}");
+    };
+    assert!(resync_chans
+        .iter()
+        .any(|c| c.as_str().is_some_and(|s| s.starts_with("local_"))));
 
     // 7. machoNet.NoBlock: non-blocking latency/keep-alive probe returns true
     let noblock_rep = rpc(&ctx, &mut sess1, "machoNet", "NoBlock", &[])

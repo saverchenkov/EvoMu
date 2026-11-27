@@ -203,14 +203,15 @@ async fn test_fleet_login_consistency_kick_session_invite_offline_and_restart() 
             &[PyRep::String("OpsRoom".into()), PyRep::String(String::new()), PyRep::String("MOTD".into())],
         )
         .await;
-        let custom_cid = chan_rep.dict_get("channelID").and_then(|v| v.as_str()).unwrap_or("custom:1").to_string();
+        let custom_cid = chan_rep.as_str().expect("CreatePlayerOwnedChannel string").to_string();
+        assert_eq!(custom_cid, "player_opsroom");
         call(&ctx, &mut s2, "LSC", "JoinChannel", &[PyRep::String(custom_cid.clone())]).await;
         ctx.drain_notifications_for_char(P1);
 
         call(&ctx, &mut s2, "authentication", "Logout", &[]).await;
         ctx.db.with_snapshot(|snap| {
             assert!(!snap.chat_channels["solarsystemid2:30000142"].members.contains(&P2));
-            if let Some(c) = snap.chat_channels.get(&custom_cid) {
+            if let Some(c) = snap.chat_channels.get("channel:opsroom") {
                 assert!(!c.members.contains(&P2));
             }
         });

@@ -261,10 +261,14 @@ async fn xmpp_add_character_blocks_passwords_operators_and_abyssal_resync() {
     .await
     .unwrap()
     .unwrap();
-    let PyRep::List(chans) = resync_abyss.dict_get("channels").unwrap() else {
+    let PyRep::List(chans) = resync_abyss else {
         panic!("expected channels list");
     };
-    assert!(!chans
+    assert!(!chans.iter().any(|c| {
+        c.as_str()
+            .is_some_and(|s| s.starts_with("local_") || s.starts_with("solarsystemid2:"))
+    }));
+    assert!(chans
         .iter()
-        .any(|c| c.as_str().unwrap_or("").starts_with("solarsystemid2:")));
+        .any(|c| c.as_str().is_some_and(|s| s.starts_with("corp_"))));
 }

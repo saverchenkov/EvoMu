@@ -5465,19 +5465,19 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
     prepare_siege(&ctx, fort_id, 20_000.0);
     fire_weapon(&ctx, &mut sess, fort_id).await.expect("strip fort shield");
     let info_ar = rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.expect("info ar");
-    assert_eq!(kv_str(&info_ar, "state"), life::STATE_ARMOR_REINFORCED);
+    assert_eq!(kv_i64(&info_ar, "state"), life::structure_state_wire_code(life::STATE_ARMOR_REINFORCED));
     let ar_exit = observe(&ctx, &mut sess, fort_id).await.unwrap().reinforced_until_unix;
     let exp_ar_base = t0 + 42 * 3_600;
     assert!((ar_exit as i64 - exp_ar_base as i64).abs() <= 10_800, "Fortizar armor exit within ±3h of Day 1 18:00");
 
     // Advance into ArmorVulnerable, pause armor repair timer with qualifying damage, then strip armor -> HullReinforced.
     ctx.advance_virtual_clock((ar_exit + 5).saturating_sub(ctx.now_unix()));
-    assert_eq!(kv_str(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::STATE_ARMOR_VULNERABLE);
+    assert_eq!(kv_i64(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::structure_state_wire_code(life::STATE_ARMOR_VULNERABLE));
     fire_weapon(&ctx, &mut sess, fort_id).await.expect("pause armor repair timer");
     ctx.advance_virtual_clock(15);
     ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&fort_id).unwrap().armor_hp = 10.0);
     fire_weapon(&ctx, &mut sess, fort_id).await.expect("strip fort armor");
-    assert_eq!(kv_str(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::STATE_HULL_REINFORCED);
+    assert_eq!(kv_i64(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::structure_state_wire_code(life::STATE_HULL_REINFORCED));
     let hu_exit = observe(&ctx, &mut sess, fort_id).await.unwrap().reinforced_until_unix;
     let exp_hu_base = life::next_reinforce_exit(t0 + (24 + 108) * 3_600, 18);
     assert_eq!(exp_hu_base, t0 + 138 * 3_600);
@@ -5485,11 +5485,11 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
 
     // Advance into HullVulnerable and verify exact 30-minute (1800s) repair window via GetStructureInfo.
     ctx.advance_virtual_clock(hu_exit.saturating_sub(ctx.now_unix()));
-    assert_eq!(kv_str(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::STATE_HULL_VULNERABLE);
+    assert_eq!(kv_i64(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::structure_state_wire_code(life::STATE_HULL_VULNERABLE));
     ctx.advance_virtual_clock(1_799);
-    assert_eq!(kv_str(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::STATE_HULL_VULNERABLE, "at 1799s structure must still be in HullVulnerable");
+    assert_eq!(kv_i64(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::structure_state_wire_code(life::STATE_HULL_VULNERABLE), "at 1799s structure must still be in HullVulnerable");
     ctx.advance_virtual_clock(1);
-    assert_eq!(kv_str(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::STATE_SHIELD_VULNERABLE, "at 1800s HullVulnerable 30m repair completes to ShieldVulnerable");
+    assert_eq!(kv_i64(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::structure_state_wire_code(life::STATE_SHIELD_VULNERABLE), "at 1800s HullVulnerable 30m repair completes to ShieldVulnerable");
     let healed_fort = observe(&ctx, &mut sess, fort_id).await.unwrap();
     assert!(healed_fort.shield_hp >= fort_prof.shield_hp && (healed_fort.armor_hp - fort_prof.armor_hp).abs() < 1.0 && (healed_fort.hull_hp - fort_prof.hull_hp).abs() < 1.0);
 

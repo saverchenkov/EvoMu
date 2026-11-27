@@ -734,6 +734,52 @@ async fn test_xmpp_chat_acl_moderation_mute_rate_limit_cspa_and_prefs() {
         rpc(
             &ctx,
             &mut s1,
+            "XmppChatMgr",
+            "AddCharacterToChannel",
+            &[PyRep::String(format!("local_{ABYSSAL_SYS}"))],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "LocalChannelDisabledInAbyssalSpace"
+    );
+    let mut abyss_sess = s1.clone();
+    abyss_sess.solar_system_id = Some(ABYSSAL_SYS);
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut abyss_sess,
+            "XmppChatMgr",
+            "AddCharacterToChannel",
+            &[PyRep::String(format!("local_{ABYSSAL_SYS}"))],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "LocalChannelDisabledInAbyssalSpace"
+    );
+    assert!(
+        !ctx.db
+            .with_snapshot(|snap| snap.chat_channels.contains_key(&format!("solarsystemid2:{ABYSSAL_SYS}"))),
+        "Abyssal Deadspace local chat channel must never be created via XmppChatMgr.AddCharacterToChannel"
+    );
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut s1,
+            "XmppChatMgr",
+            "ResyncSystemChannelAccess",
+            &[PyRep::String(format!("local_{AMARR}"))],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ChannelAccessDenied"
+    );
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut s1,
             "LSC",
             "JoinChannel",
             &[PyRep::String("corpid:99999999".into())],
@@ -758,8 +804,23 @@ async fn test_xmpp_chat_acl_moderation_mute_rate_limit_cspa_and_prefs() {
     )
     .await
     .expect("ResyncSystemChannelAccess wormhole");
-    assert_eq!(field(&wh_sync, "channelID"), &PyRep::String(wh_local.clone()));
-    assert_eq!(field(&wh_sync, "isDelayedLocal"), &PyRep::Bool(true));
+    let PyRep::List(wh_chans) = &wh_sync else {
+        panic!("expected ResyncSystemChannelAccess list, got {wh_sync:?}");
+    };
+    assert!(wh_chans.contains(&PyRep::String(format!("local_{WORMHOLE_SYS}"))));
+    let wh_native_sync = rpc(
+        &ctx,
+        &mut gm,
+        "XmppChatMgr",
+        "ResyncSystemChannelAccess",
+        &[PyRep::String(format!("local_{WORMHOLE_SYS}"))],
+    )
+    .await
+    .expect("ResyncSystemChannelAccess wormhole native local_<sys>");
+    let PyRep::List(wh_native_chans) = &wh_native_sync else {
+        panic!("expected native ResyncSystemChannelAccess list, got {wh_native_sync:?}");
+    };
+    assert!(wh_native_chans.contains(&PyRep::String(format!("local_{WORMHOLE_SYS}"))));
     rpc(&ctx, &mut gm, "LSC", "JoinChannel", &[PyRep::String(wh_local.clone())])
         .await
         .expect("Join delayed WH local");

@@ -606,7 +606,7 @@ async fn test_d6_chat_channels_motd_operators_password_and_bans_mutes_persist_ac
             &[PyRep::String("Intel_North".into()), PyRep::String("northpass".into()), PyRep::String("Report hostiles +1".into())],
         )
         .await;
-        let chan_id = created.dict_get("channelID").and_then(|v| v.as_str()).unwrap_or("channel:intel_north").to_string();
+        let chan_id = created.as_str().expect("CreatePlayerOwnedChannel wire string").to_string();
 
         call(&ctx1, &mut sess1, "LSC", "AccessControl", &[PyRep::String(chan_id.clone()), PyRep::Integer(90_000_002), PyRep::Integer(2)]).await;
         call(&ctx1, &mut sess1, "LSC", "AccessControl", &[PyRep::String(chan_id.clone()), PyRep::Integer(90_000_005), PyRep::Integer(1)]).await;

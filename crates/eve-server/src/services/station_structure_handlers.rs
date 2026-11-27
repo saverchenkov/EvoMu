@@ -960,7 +960,7 @@ fn build_structure_dir_entry(
         ("ownerID", PyRep::Integer(st.owner_corp_id)),
         ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
         ("itemName", PyRep::String(st.name.clone())),
-        ("state", PyRep::String(st.state.clone())),
+        ("state", PyRep::Integer(life::structure_state_wire_code(&st.state))),
         ("upkeepState", PyRep::Integer(upkeep_state)),
         ("powerState", PyRep::String(power.as_str().into())),
         ("profileID", if is_corp_manager { ext.structure_profile_id.get(&st.structure_id).copied().map(PyRep::Integer).unwrap_or(PyRep::None) } else { PyRep::None }),

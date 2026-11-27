@@ -210,10 +210,13 @@ pub fn is_abyssal_system(sys_id: u32) -> bool {
 
 /// Returns `true` if `chan_id` targets a disabled Abyssal Deadspace local chat channel.
 pub fn is_abyssal_local_channel_disabled(chan_id: &str, session_sys: Option<u32>) -> bool {
-    let rest_opt = chan_id
+    let localpart = chan_id.split('@').next().unwrap_or(chan_id);
+    let lower = localpart.to_ascii_lowercase();
+    let rest_opt = lower
         .strip_prefix("solarsystemid2:")
-        .or_else(|| chan_id.strip_prefix("solarsystemid2_"))
-        .or_else(|| chan_id.strip_prefix("solarsystemid_"));
+        .or_else(|| lower.strip_prefix("solarsystemid2_"))
+        .or_else(|| lower.strip_prefix("solarsystemid_"))
+        .or_else(|| lower.strip_prefix("local_"));
     if let Some(rest) = rest_opt {
         if let Ok(sid) = rest.trim().parse::<u32>() {
             if is_abyssal_system(sid) {
@@ -222,10 +225,11 @@ pub fn is_abyssal_local_channel_disabled(chan_id: &str, session_sys: Option<u32>
         }
     }
     session_sys.is_some_and(is_abyssal_system)
-        && (chan_id.eq_ignore_ascii_case("local")
-            || chan_id.starts_with("solarsystemid2:")
-            || chan_id.starts_with("solarsystemid2_")
-            || chan_id.starts_with("solarsystemid_"))
+        && (lower == "local"
+            || lower.starts_with("solarsystemid2:")
+            || lower.starts_with("solarsystemid2_")
+            || lower.starts_with("solarsystemid_")
+            || lower.starts_with("local_"))
 }
 
 /// Blocks restricted RPCs (star map, D-scan, Local chat) while a pilot is inside Abyssal Deadspace.

@@ -1322,3 +1322,97 @@ fn notify_registry_timestamps_exhaustive_guard() {
         violations.join("\n")
     );
 }
+
+fn count_notify_registry_pyrep_fields(src: &str) -> (usize, usize) {
+    let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+    let body_start = prod
+        .find("define_notifications! {")
+        .expect("define_notifications! macro block must exist");
+    let body = &prod[body_start..];
+
+    let mut pyrep_fields = 0usize;
+    let mut opt_pyrep_fields = 0usize;
+    let mut idx = 0usize;
+
+    let mut count_field_block = |block: &str| {
+        for decl in block.split(',') {
+            let Some((_, raw_ty)) = decl.split_once(':') else {
+                continue;
+            };
+            let norm_ty: String = raw_ty.chars().filter(|c| !c.is_whitespace()).collect();
+            if norm_ty == "PyRep" {
+                pyrep_fields += 1;
+            } else if norm_ty == "Option<PyRep>" {
+                opt_pyrep_fields += 1;
+            }
+        }
+    };
+
+    while idx < body.len() {
+        let rest = &body[idx..];
+        let next_fields = rest.find("fields:");
+        let next_optional = rest.find("optional:");
+        let rel = match (next_fields, next_optional) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => break,
+        };
+        let after_kw = idx + rel;
+        let Some(open_rel) = body[after_kw..].find('{') else {
+            break;
+        };
+        let open_pos = after_kw + open_rel;
+        let between = body[after_kw..open_pos].trim();
+        let is_header = matches!(between, "fields:" | "optional:");
+        let Some(close_rel) = body[open_pos + 1..].find('}') else {
+            break;
+        };
+        let close_pos = open_pos + 1 + close_rel;
+        if is_header {
+            count_field_block(&body[open_pos + 1..close_pos]);
+        }
+        idx = close_pos + 1;
+    }
+
+    (pyrep_fields, opt_pyrep_fields)
+}
+
+#[test]
+fn notify_registry_pyrep_field_count_respects_monotonic_ratchet() {
+    // Track 6a baseline: 179 PyRep + 25 Option<PyRep> = 204 (must remain <= 237).
+    const PYREP_FIELD_BASELINE: usize = 204;
+    const _: () = assert!(PYREP_FIELD_BASELINE <= 237);
+
+    let src = include_str!("notify_registry.rs");
+    let (pyrep_count, opt_pyrep_count) = count_notify_registry_pyrep_fields(src);
+    let total = pyrep_count + opt_pyrep_count;
+    assert_eq!(
+        total, PYREP_FIELD_BASELINE,
+        "update PYREP_FIELD_BASELINE monotonically downward if you eliminated PyRep fields (observed PyRep={pyrep_count}, Option<PyRep>={opt_pyrep_count}, total={total})"
+    );
+    assert!(
+        total <= PYREP_FIELD_BASELINE,
+        "PyRep/Option<PyRep> field count regressed: {total} > {PYREP_FIELD_BASELINE}"
+    );
+
+    let synthetic_regressed = concat!(
+        r#"define_notifications! { Foo => "Foo" ("charid") { fields: { x: PyRep }, optional: { y: Option<PyRep> }, samples: || vec![], }, }"#,
+        "\n",
+        r#"define_notification_item!(Bar => "Bar" ("charid") { fields: { z: PyRep }, samples: || vec![], });"#,
+    );
+    let (syn_raw, syn_opt) = count_notify_registry_pyrep_fields(synthetic_regressed);
+    assert_eq!((syn_raw, syn_opt), (2, 1));
+    assert!(syn_raw + syn_opt > 2);
+}
+
+#[test]
+fn on_session_changed_sample_payloads_include_keyval() {
+    let entry = all_registered_notifications()
+        .iter()
+        .find(|e| e.event == "OnSessionChanged")
+        .expect("OnSessionChanged must be registered");
+    let samples = (entry.sample_payloads)();
+    assert!(samples.iter().any(|s| matches!(s.get(1), Some(PyRep::None))));
+    assert!(samples.iter().any(|s| matches!(s.get(1), Some(PyRep::KeyVal(_)))));
+}

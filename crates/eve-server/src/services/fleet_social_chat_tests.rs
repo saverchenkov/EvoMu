@@ -153,9 +153,8 @@ fn chat_auth_help_rookie_prefs_resync_and_delayed_pruning() {
     )
     .unwrap()
     .unwrap();
-    let PyRep::KeyVal(rs_kv) = rs else { panic!() };
-    assert_eq!(rs_kv.get("channelID").unwrap().as_str().unwrap(), "solarsystemid2:31000005");
-    assert_eq!(rs_kv.get("isDelayedLocal").unwrap(), &PyRep::Bool(true));
+    let PyRep::List(rs_list) = rs else { panic!() };
+    assert!(rs_list.contains(&PyRep::String("local_31000005".into())));
 
     // Seed delayed speaker witness and jump to Jita (30_000_142) -> Resync prunes old delayed local
     ctx.social_extras
@@ -174,9 +173,9 @@ fn chat_auth_help_rookie_prefs_resync_and_delayed_pruning() {
     )
     .unwrap()
     .unwrap();
-    let PyRep::KeyVal(rs2_kv) = rs2 else { panic!() };
-    assert_eq!(rs2_kv.get("channelID").unwrap().as_str().unwrap(), "solarsystemid2:30000142");
-    assert_eq!(rs2_kv.get("isDelayedLocal").unwrap(), &PyRep::Bool(false));
+    let PyRep::List(rs2_list) = rs2 else { panic!() };
+    assert!(rs2_list.contains(&PyRep::String("local_30000142".into())));
+    assert!(!rs2_list.contains(&PyRep::String("local_31000005".into())));
     assert!(
         ctx.social_extras
             .lock()
@@ -391,13 +390,10 @@ fn xmpp_iq_reply_with_ctx_discovers_player_channels_by_name_forme_and_joins_by_x
     )
     .unwrap()
     .unwrap();
-    let PyRep::KeyVal(info_kv) = created else {
-        panic!("expected CreatePlayerOwnedChannel KeyVal");
+    let PyRep::String(created_chan_id) = created else {
+        panic!("expected CreatePlayerOwnedChannel String");
     };
-    assert_eq!(
-        info_kv.get("channelID").and_then(|v| v.as_str()),
-        Some("channel:playtest_alpha")
-    );
+    assert_eq!(created_chan_id, "player_playtest_alpha");
 
     // Seed a private channel and a password-protected channel owned by 90_000_001.
     ctx.db.with_mut_snapshot(|snap| {
