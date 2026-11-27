@@ -189,13 +189,23 @@ async fn cmd_return_bay_error_guards_filter_variants_exact_2500m_and_capacity_ch
         solar_system_id: Some(sys_id),
         ..Default::default()
     };
+    let docked_station_err = handle_cmd_return_bay(&ctx, &mut docked_station, &[], &HashMap::new())
+        .await
+        .unwrap_err();
+    assert_eq!(docked_station_err.code, "ShipNotInSpace");
     assert_eq!(
-        handle_cmd_return_bay(&ctx, &mut docked_station, &[], &HashMap::new())
-            .await
-            .unwrap_err()
-            .code,
-        "ShipNotInSpace"
+        docked_station_err.rejection_facts(),
+        Some(&eve_proto::RejectionFacts::ShipNotInSpace {
+            ship_id,
+            char_id: Some(char_id),
+            solar_system_id: Some(sys_id),
+            action: "CmdReturnBay".into(),
+        })
     );
+    assert!(matches!(
+        docked_station_err.to_client_error("entity", "CmdReturnBay"),
+        eve_proto::ClientError::Rejected { key: eve_proto::UserErrorKey::CantShipNotPresent, .. }
+    ));
     let mut docked_struct = SessionState {
         user_id: Some(1),
         character_id: Some(char_id),
@@ -204,13 +214,23 @@ async fn cmd_return_bay_error_guards_filter_variants_exact_2500m_and_capacity_ch
         solar_system_id: Some(sys_id),
         ..Default::default()
     };
+    let docked_struct_err = handle_cmd_return_bay(&ctx, &mut docked_struct, &[], &HashMap::new())
+        .await
+        .unwrap_err();
+    assert_eq!(docked_struct_err.code, "ShipNotInSpace");
     assert_eq!(
-        handle_cmd_return_bay(&ctx, &mut docked_struct, &[], &HashMap::new())
-            .await
-            .unwrap_err()
-            .code,
-        "ShipNotInSpace"
+        docked_struct_err.rejection_facts(),
+        Some(&eve_proto::RejectionFacts::ShipNotInSpace {
+            ship_id,
+            char_id: Some(char_id),
+            solar_system_id: Some(sys_id),
+            action: "CmdReturnBay".into(),
+        })
     );
+    assert!(matches!(
+        docked_struct_err.to_client_error("entity", "CmdReturnBay"),
+        eve_proto::ClientError::Rejected { key: eve_proto::UserErrorKey::CantShipNotPresent, .. }
+    ));
 
     // 4. Missing solar_system_id -> NoSolarSystem
     let mut no_sys = SessionState {
@@ -771,13 +791,23 @@ async fn returning_drones_abandon_on_ship_death_dock_cross_system_and_scoop_reje
             make_drone_state(d4, d4, 2454, char4, ship4, sys_id, false, 4),
         ],
     );
+    let destroyed_err = handle_cmd_return_bay(&ctx, &mut sess_destroyed, &[PyRep::Integer(d1)], &HashMap::new())
+        .await
+        .unwrap_err();
+    assert_eq!(destroyed_err.code, "ShipNotInSpace");
     assert_eq!(
-        handle_cmd_return_bay(&ctx, &mut sess_destroyed, &[PyRep::Integer(d1)], &HashMap::new())
-            .await
-            .unwrap_err()
-            .code,
-        "ShipNotInSpace"
+        destroyed_err.rejection_facts(),
+        Some(&eve_proto::RejectionFacts::ShipNotInSpace {
+            ship_id: ship1,
+            char_id: Some(char1),
+            solar_system_id: Some(sys_id),
+            action: "CmdReturnBay".into(),
+        })
     );
+    assert!(matches!(
+        destroyed_err.to_client_error("entity", "CmdReturnBay"),
+        eve_proto::ClientError::Rejected { key: eve_proto::UserErrorKey::CantShipNotPresent, .. }
+    ));
 
     // Try atomic scoop on out-of-range returning drone d4 -> keeps d4 controlled & returning
     let d4_state = drone_test_helpers::active_drone(&ctx, d4).unwrap();

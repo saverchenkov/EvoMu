@@ -14,7 +14,6 @@ use std::collections::HashMap;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum DroneReturnErrorCode {
     NoActiveShip,
-    ShipNotInSpace,
     NoSolarSystem,
     SentryDroneOutOfScoopRange,
 }
@@ -23,7 +22,6 @@ impl DroneReturnErrorCode {
     const fn as_str(self) -> &'static str {
         match self {
             Self::NoActiveShip => "NoActiveShip",
-            Self::ShipNotInSpace => "ShipNotInSpace",
             Self::NoSolarSystem => "NoSolarSystem",
             Self::SentryDroneOutOfScoopRange => "SentryDroneOutOfScoopRange",
         }
@@ -60,7 +58,13 @@ pub async fn handle_cmd_return_bay(
         return Err(drone_return_rpc_error(DroneReturnErrorCode::NoActiveShip, "Session has no active ship"));
     };
     if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(drone_return_rpc_error(DroneReturnErrorCode::ShipNotInSpace, "Cannot recall drones while docked in station or structure"));
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            session.solar_system_id,
+            "CmdReturnBay",
+            "Cannot recall drones while docked in station or structure",
+        ));
     }
     let Some(sys_id) = session.solar_system_id else {
         return Err(drone_return_rpc_error(DroneReturnErrorCode::NoSolarSystem, "Session has no active solar system"));
@@ -71,8 +75,11 @@ pub async fn handle_cmd_return_bay(
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
-        return Err(drone_return_rpc_error(
-            DroneReturnErrorCode::ShipNotInSpace,
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "CmdReturnBay",
             format!("Active ship {ship_id} is not in space"),
         ));
     };

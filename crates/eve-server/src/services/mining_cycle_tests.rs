@@ -222,10 +222,7 @@ fn test_mining_stop_reasons_and_kind_and_can_harvest() {
         MiningStopReason::Cloaked.code(),
         "CannotActivateWhileCloaked"
     );
-    assert_eq!(
-        MiningStopReason::CapacitorEmpty.code(),
-        "NotEnoughCapacitor"
-    );
+    assert_eq!(MiningStopReason::CapacitorEmpty.code(), "CapacitorEmpty");
     assert_eq!(MiningStopReason::ModuleOffline.code(), "ModuleOffline");
     assert_eq!(MiningStopReason::Deactivated.code(), "Deactivated");
 

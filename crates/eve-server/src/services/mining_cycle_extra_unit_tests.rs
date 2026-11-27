@@ -382,7 +382,26 @@ async fn activate_and_check_requirements_error_branches_and_capacitor_auto_init(
 
     ctx.db.with_mut_snapshot(|snap| snap.asteroids.get_mut(&ast_id).unwrap().position = (10_150.0, 0.0, 0.0));
     let _ = sys.set_capacitor(ship_id, 5.0).await;
-    assert_eq!(activate(&ctx, char_id, ship_id, sys_id, mod_id, ast_id).await.unwrap_err().code, "NotEnoughCapacitor");
+    let cap_err = activate(&ctx, char_id, ship_id, sys_id, mod_id, ast_id).await.unwrap_err();
+    assert_eq!(cap_err.code, "NotEnoughCapacitor");
+    assert_eq!(
+        cap_err.rejection_facts(),
+        Some(&eve_proto::RejectionFacts::NotEnoughCapacitor {
+            entity_id: Some(ship_id),
+            effect_name: "Miner I".into(),
+            required_gj: 20.0,
+            available_gj: 5.0,
+        })
+    );
+    assert!(matches!(
+        cap_err.to_client_error("dogmaIM", "Activate"),
+        eve_proto::ClientError::Rejected {
+            key: eve_proto::UserErrorKey::NotEnoughEnergy,
+            ref args,
+            ..
+        } if args.iter().any(|(k, v)| k == "need" && v == &eve_proto::PyRep::Real(20.0))
+            && args.iter().any(|(k, v)| k == "got" && v == &eve_proto::PyRep::Real(5.0))
+    ));
 
     let _ = sys.set_capacitor(ship_id, 30.0).await;
     activate(&ctx, char_id, ship_id, sys_id, mod_id, ast_id).await.expect("exact maxRange boundary ok");

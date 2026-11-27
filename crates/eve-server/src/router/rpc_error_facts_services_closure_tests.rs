@@ -17,13 +17,13 @@ use crate::services;
 use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
 use eve_db::{
     AsteroidRecord, CosmicAnomalyRecord, FleetMemberRecord, FleetRecord, FleetRole, InventoryFlag,
-    InventoryItemRecord,
+    InventoryItemRecord, TrainedSkillRecord,
 };
-use eve_destiny::{Ball, CombatState, MovementMode, WarpPhase};
+use eve_destiny::{Ball, CombatState, MovementMode, TargetLock, WarpPhase};
 use eve_dogma::{FittedModule, ModuleState};
 use eve_machonet::service_roles;
 use eve_proto::{PyRep, RejectionFacts, UserErrorKey};
-use eve_sde::{DungeonAsteroidEntry, DungeonTemplate};
+use eve_sde::{DogmaEffectType, DungeonAsteroidEntry, DungeonTemplate};
 use glam::DVec3;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1571,5 +1571,400 @@ async fn mining_combat_gm_fit_and_remaining_space_handlers_emit_typed_facts() {
             required_gj: 150.0,
             available_gj: 12.0,
         }
+    );
+}
+
+#[test]
+fn crate_wide_guard_catches_enum_to_string_and_const_indirection_while_allowing_safe_sites() {
+    let mining_shape = r#"
+pub enum MiningStopReason {
+    HoldFull,
+    CapacitorEmpty,
+}
+impl MiningStopReason {
+    fn code(self) -> &'static str {
+        match self {
+            Self::HoldFull => "MiningHoldFull",
+            Self::CapacitorEmpty => "NotEnoughCapacitor",
+        }
+    }
+}
+fn err(reason: MiningStopReason, message: String) -> BridgeRpcError {
+    BridgeRpcError { code: reason.code().into(), message, client_error: None }
+}
+"#;
+    let mining_hits = collect_raw_amended_sites_with_helpers(
+        "services/mining_cycle.rs",
+        mining_shape,
+        EXTRA_LOCAL_ERROR_HELPERS,
+    );
+    assert!(
+        mining_hits.iter().any(|h| h.contains("NotEnoughCapacitor")),
+        "guard must catch enum-to-string NotEnoughCapacitor shape, got {mining_hits:?}"
+    );
+
+    let drone_shape = r#"
+enum DroneReturnErrorCode {
+    NoActiveShip,
+    ShipNotInSpace,
+}
+impl DroneReturnErrorCode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoActiveShip => "NoActiveShip",
+            Self::ShipNotInSpace => "ShipNotInSpace",
+        }
+    }
+}
+fn drone_return_rpc_error(code: DroneReturnErrorCode, message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.as_str().into(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+"#;
+    let drone_hits = collect_raw_amended_sites_with_helpers(
+        "sp6_lifecycle/drone_return.rs",
+        drone_shape,
+        EXTRA_LOCAL_ERROR_HELPERS,
+    );
+    assert!(
+        drone_hits.iter().any(|h| h.contains("ShipNotInSpace")),
+        "guard must catch enum-to-string ShipNotInSpace shape, got {drone_hits:?}"
+    );
+
+    let const_shape = r#"
+const ERR_NO_CAP: &str = "NotEnoughCapacitor";
+fn make_err() -> BridgeRpcError {
+    BridgeRpcError { code: ERR_NO_CAP.into(), message: String::new(), client_error: None }
+}
+fn make_other() -> BridgeRpcError {
+    unlisted_local_err("ShipNotInSpace")
+}
+"#;
+    let const_hits = collect_raw_amended_sites_with_helpers(
+        "services/example_const.rs",
+        const_shape,
+        EXTRA_LOCAL_ERROR_HELPERS,
+    );
+    assert!(
+        const_hits.iter().any(|h| h.contains("NotEnoughCapacitor")),
+        "guard must catch constant indirection NotEnoughCapacitor, got {const_hits:?}"
+    );
+    assert!(
+        const_hits.iter().any(|h| h.contains("ShipNotInSpace")),
+        "guard must catch unlisted local helper ShipNotInSpace, got {const_hits:?}"
+    );
+
+    let safe_shape = r#"
+fn safe_examples(
+    ctx: &ServerContext,
+    session: &SessionState,
+    snap: &WorldStateSnapshot,
+    err_code: &str,
+    docked_code: &str,
+    e: &str,
+) -> Result<(), BridgeRpcError> {
+    if e.contains("CantActivateInWarp") || e.starts_with("ShipAlreadyInWarp") {
+        return Err(BridgeRpcError::ship_already_in_warp(None, "WarpTo", None, e));
+    }
+    if err_code == "StructureServiceAccessDenied" || docked_code == "ShipNotInSpace" {
+        return Err(BridgeRpcError::ship_not_in_space(1, Some(2), Some(3), "act", "msg"));
+    }
+    if matches!(err_code, "UnimplementedRPC" | "InsufficientRole") {
+        return Ok(());
+    }
+    match err_code {
+        "ShipNotInSpace" | "ShipInWarp" => return Ok(()),
+        _ => {}
+    }
+    let _ = ctx.require_undocked_space_system(session, "ShipNotInSpace", "docked", true, false)?;
+    let _ = check_service_domain_acl_and_tax(snap, 1, 2, &[1], false, None, "StructureServiceAccessDenied", "market")?;
+    let _ = BridgeRpcError::with_rejection(
+        "InvalidTarget",
+        "bad",
+        UserErrorKey::ItemNotFound,
+        [],
+        RejectionFacts::InvalidTarget { target_id: None, module_id: None, reason: "bad".into() },
+    );
+    let _ = BridgeRpcError::insufficient_role_with_code("GMRoleRequired", 1, 0, "op", "msg");
+    let _ = BridgeRpcError::with_client_error(
+        "ShipNotInSpace",
+        "in warp",
+        eve_proto::ClientError::rejected(
+            eve_proto::UserErrorKey::ShipInWarp,
+            eve_proto::RejectionFacts::ShipInWarp { ship_id: Some(1), action: "warp".into(), warp_phase: None },
+        ),
+    );
+    Ok(())
+}
+"#;
+    let safe_hits = collect_raw_amended_sites_with_helpers(
+        "services/safe_examples.rs",
+        safe_shape,
+        EXTRA_LOCAL_ERROR_HELPERS,
+    );
+    assert!(
+        safe_hits.is_empty(),
+        "safe comparisons, match patterns, typed helpers, and typed constructors must remain allowed, got {safe_hits:?}"
+    );
+}
+
+#[tokio::test]
+async fn mining_activation_cap_and_drone_return_emit_typed_facts() {
+    let mut ctx = test_ctx();
+    let uid = 93_501_u64;
+    let char_id = 93_501_001_i64;
+    let corp_id = 98_305_001_i64;
+    let sys_id = 30_000_142_u32;
+    let station_id = 60_003_760_i64;
+    let structure_id = 1_093_500_400_i64;
+    let ship_id = 1_935_000_100_i64;
+    let mining_mod_id = 1_935_000_201_i64;
+    let ast_id = 1_935_000_301_i64;
+    let miner_tid = 993_501_u32;
+    let ast_tid = 993_502_u32;
+    let kw = HashMap::new();
+
+    let mining_laser_eid = ctx
+        .sde
+        .effects
+        .iter()
+        .find(|(_, e)| e.name == "miningLaser")
+        .map(|(&id, _)| id)
+        .unwrap_or(67);
+    {
+        let sde_mut = std::sync::Arc::make_mut(&mut ctx.sde);
+        sde_mut
+            .effects
+            .entry(mining_laser_eid)
+            .or_insert_with(|| DogmaEffectType {
+                effect_id: mining_laser_eid,
+                name: "miningLaser".into(),
+                effect_category: 2,
+                is_offensive: false,
+                is_assistance: false,
+                ..Default::default()
+            });
+    }
+    if !ctx.sde.types.contains_key(&3386) {
+        upsert_test_type(&mut ctx.sde, 34, 3386, 255, 16, &[]);
+    }
+    upsert_test_type(
+        &mut ctx.sde,
+        34,
+        miner_tid,
+        54,
+        7,
+        &[
+            (6, 60.0),
+            (54, 10_000.0),
+            (73, 60_000.0),
+            (77, 40.0),
+            (182, 3386.0),
+        ],
+    );
+    {
+        let sde_mut = std::sync::Arc::make_mut(&mut ctx.sde);
+        let miner = sde_mut
+            .types
+            .get_mut(&miner_tid)
+            .expect("synthetic mining laser type");
+        miner.name = "Test Miner I".into();
+        miner.default_effect_id = Some(mining_laser_eid);
+        miner.effect_ids = vec![mining_laser_eid, 12, 16];
+    }
+    upsert_test_type(&mut ctx.sde, 34, ast_tid, 462, 25, &[(182, 3386.0)]);
+
+    seed_char_in_ctx(&ctx, uid, char_id, corp_id, sys_id, None, ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            3386,
+            TrainedSkillRecord {
+                type_id: 3386,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mining_mod_id,
+            InventoryItemRecord {
+                item_id: mining_mod_id,
+                type_id: miner_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mining_mod_id, true);
+        snap.asteroids.insert(
+            ast_id,
+            AsteroidRecord {
+                asteroid_id: ast_id,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: ast_tid,
+                quantity: 500,
+                initial_quantity: 500,
+                position: (1_000.0, 0.0, 0.0),
+                radius: 100.0,
+            },
+        );
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_h.try_spawn_ball_with_combat(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            capacitor: 12.5,
+            max_capacitor: 250.0,
+            ..Default::default()
+        },
+    );
+    let _ = sys_h
+        .add_target_lock(
+            ship_id,
+            TargetLock {
+                target_id: ast_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(50_000.0),
+            },
+        )
+        .await;
+
+    let mut sess = auth_session(uid, char_id, corp_id, sys_id);
+    sess.role = service_roles::ROLE_PLAYER_DEFAULT;
+    sess.ship_id = Some(ship_id);
+    ctx.sync_session(&mut sess);
+
+    // 1. dogmaIM.Activate mining module with capacitor (12.5 GJ) below need (60.0 GJ)
+    let mine_cap_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(mining_mod_id),
+                PyRep::String("miningLaser".into()),
+                PyRep::Integer(ast_id),
+                PyRep::Integer(1000),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("mining activation below capacitor need must fail");
+    let (facts, args) = assert_rejected_wire_facts(
+        "dogmaIM",
+        "Activate",
+        Some(char_id),
+        &mine_cap_err,
+        CODE_NOT_ENOUGH_CAPACITOR,
+        UserErrorKey::NotEnoughEnergy,
+    );
+    assert!(args
+        .iter()
+        .any(|(k, v)| k == "effectname" && v == &PyRep::String("Test Miner I".into())));
+    assert!(args
+        .iter()
+        .any(|(k, v)| k == "need" && v == &PyRep::Real(60.0)));
+    assert!(args
+        .iter()
+        .any(|(k, v)| k == "got" && v == &PyRep::Real(12.5)));
+    assert_eq!(
+        facts,
+        &RejectionFacts::NotEnoughCapacitor {
+            entity_id: Some(ship_id),
+            effect_name: "Test Miner I".into(),
+            required_gj: 60.0,
+            available_gj: 12.5,
+        }
+    );
+    assert!(
+        services::mining_cycle::active_cycles_for_ship(&ctx, ship_id).is_empty(),
+        "failed mining activation must roll back cycle"
+    );
+
+    // 2. CmdReturnBay while docked in a station
+    let mut station_sess = auth_session(uid, char_id, corp_id, sys_id);
+    station_sess.ship_id = Some(ship_id);
+    station_sess.station_id = Some(station_id);
+    let station_err = crate::sp6_lifecycle::handle_cmd_return_bay(&ctx, &mut station_sess, &[], &kw)
+        .await
+        .expect_err("CmdReturnBay while docked in station must fail with ShipNotInSpace");
+    assert_ship_not_in_space(
+        "entity",
+        "CmdReturnBay",
+        Some(char_id),
+        &station_err,
+        ship_id,
+        Some(char_id),
+        Some(sys_id),
+        "CmdReturnBay",
+    );
+
+    // 3. CmdReturnBay while docked in a structure
+    let mut struct_sess = auth_session(uid, char_id, corp_id, sys_id);
+    struct_sess.ship_id = Some(ship_id);
+    struct_sess.structure_id = Some(structure_id);
+    let struct_err = crate::sp6_lifecycle::handle_cmd_return_bay(&ctx, &mut struct_sess, &[], &kw)
+        .await
+        .expect_err("CmdReturnBay while docked in structure must fail with ShipNotInSpace");
+    assert_ship_not_in_space(
+        "entity",
+        "CmdReturnBay",
+        Some(char_id),
+        &struct_err,
+        ship_id,
+        Some(char_id),
+        Some(sys_id),
+        "CmdReturnBay",
+    );
+
+    // 4. CmdReturnBay in space with no ship ball
+    let _ = sys_h.remove_ball(ship_id).await;
+    let no_ball_err = crate::sp6_lifecycle::handle_cmd_return_bay(&ctx, &mut sess, &[], &kw)
+        .await
+        .expect_err("CmdReturnBay without ship ball must fail with ShipNotInSpace");
+    assert_ship_not_in_space(
+        "entity",
+        "CmdReturnBay",
+        Some(char_id),
+        &no_ball_err,
+        ship_id,
+        Some(char_id),
+        Some(sys_id),
+        "CmdReturnBay",
     );
 }

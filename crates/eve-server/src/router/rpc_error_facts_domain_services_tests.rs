@@ -404,6 +404,323 @@ fn extract_delimited_span(bytes: &[u8], open_idx: usize, open_ch: u8, close_ch: 
     i
 }
 
+const TYPED_BRIDGE_ERROR_CTORS: &[&str] = &[
+    "BridgeRpcError::with_rejection",
+    "BridgeRpcError::insufficient_role_with_code",
+    "BridgeRpcError::insufficient_role",
+    "BridgeRpcError::quantum_core_required_fitting",
+    "BridgeRpcError::quantum_core_required_repair",
+    "BridgeRpcError::quantum_core_required_service",
+    "BridgeRpcError::ship_already_in_warp_for_phase",
+    "BridgeRpcError::ship_already_in_warp",
+    "BridgeRpcError::ship_in_warp_for_restricted_phase",
+    "BridgeRpcError::ship_in_warp_for_phase",
+    "BridgeRpcError::ship_in_warp",
+    "BridgeRpcError::cant_activate_in_warp_for_phase",
+    "BridgeRpcError::cant_activate_in_warp",
+    "BridgeRpcError::no_ammo_loaded",
+    "BridgeRpcError::not_enough_capacitor",
+    "BridgeRpcError::jump_not_enough_capacitor",
+    "BridgeRpcError::ship_not_in_space",
+    "BridgeRpcError::fitting_validation_failed",
+    "BridgeRpcError::cannot_fit_stacked_module",
+    "BridgeRpcError::invalid_navigation_target",
+    "BridgeRpcError::invalid_target_group",
+    "BridgeRpcError::invalid_target_self",
+    "BridgeRpcError::invalid_target",
+    "BridgeRpcError::targeting_too_far",
+    "BridgeRpcError::targeting_failed",
+    "BridgeRpcError::inventory_not_accessible",
+    "BridgeRpcError::must_be_docked_at_start_station",
+    "BridgeRpcError::structure_not_dockable",
+    "BridgeRpcError::structure_service_access_denied",
+    "BridgeRpcError::weapons_timer_active",
+    "BridgeRpcError::cannot_jump_with_weapons_timer",
+    "BridgeRpcError::invalid_contract_state",
+    "BridgeRpcError::contract_ownership_violation",
+    "BridgeRpcError::module_not_found",
+    "BridgeRpcError::ownership_or_location_violation",
+];
+
+fn collect_call_paren_spans(prod: &str, pat: &str) -> Vec<(usize, usize)> {
+    let bytes = prod.as_bytes();
+    let n = bytes.len();
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rel) = prod[cursor..].find(pat) {
+        let start = cursor + rel;
+        let after = start + pat.len();
+        cursor = after;
+        if start > 0 && is_ident_byte(bytes[start - 1]) {
+            continue;
+        }
+        let mut open_idx = after;
+        while open_idx < n && bytes[open_idx].is_ascii_whitespace() {
+            open_idx += 1;
+        }
+        if open_idx >= n || bytes[open_idx] != b'(' {
+            continue;
+        }
+        let end_idx = extract_delimited_span(bytes, open_idx, b'(', b')');
+        spans.push((start, end_idx));
+    }
+    spans
+}
+
+fn collect_matches_pattern_spans(prod: &str) -> Vec<(usize, usize)> {
+    let bytes = prod.as_bytes();
+    let mut spans = Vec::new();
+    for (start, end_idx) in collect_call_paren_spans(prod, "matches!") {
+        let mut open_idx = start + "matches!".len();
+        while open_idx < end_idx && bytes[open_idx].is_ascii_whitespace() {
+            open_idx += 1;
+        }
+        let mut depth = 1usize;
+        let mut i = open_idx + 1;
+        while i < end_idx && depth > 0 {
+            if let Some(end) = skip_raw_string_literal(bytes, i) {
+                i = end;
+                continue;
+            }
+            if let Some(end) = skip_char_literal(bytes, i) {
+                i = end;
+                continue;
+            }
+            if bytes[i] == b'"' {
+                i = skip_quoted_literal(bytes, i).unwrap_or(end_idx);
+                continue;
+            }
+            match bytes[i] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                b',' if depth == 1 => {
+                    spans.push((i + 1, end_idx));
+                    break;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    spans
+}
+
+struct MatchArmFrame {
+    brace_depth: usize,
+    arm_paren_depth: usize,
+    arm_bracket_depth: usize,
+    in_pattern: bool,
+    in_guard: bool,
+    arm_body_has_brace: bool,
+    body_brace_depth: Option<usize>,
+}
+
+fn collect_guarded_code_literals(prod: &str) -> Vec<(usize, usize, &'static str, bool)> {
+    let bytes = prod.as_bytes();
+    let n = bytes.len();
+    let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut pending_match: Option<(usize, usize, bool)> = None;
+    let mut match_stack: Vec<MatchArmFrame> = Vec::new();
+    let mut lits = Vec::new();
+    let mut i = 0usize;
+
+    while i < n {
+        if let Some(end) = skip_raw_string_literal(bytes, i) {
+            if let Some((pd, bd, saw_tok)) = &mut pending_match {
+                if paren_depth == *pd && bracket_depth == *bd {
+                    *saw_tok = true;
+                }
+            }
+            i = end;
+            continue;
+        }
+        if let Some(end) = skip_char_literal(bytes, i) {
+            if let Some((pd, bd, saw_tok)) = &mut pending_match {
+                if paren_depth == *pd && bracket_depth == *bd {
+                    *saw_tok = true;
+                }
+            }
+            i = end;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            let end = skip_quoted_literal(bytes, i).unwrap_or(n);
+            if let Some((pd, bd, saw_tok)) = &mut pending_match {
+                if paren_depth == *pd && bracket_depth == *bd {
+                    *saw_tok = true;
+                }
+            }
+            if end >= i + 2 && bytes[end - 1] == b'"' {
+                let inner = &prod[i + 1..end - 1];
+                if let Some(&code) = AMENDED_LIVE_CLIENT_ERROR_CODES
+                    .iter()
+                    .find(|&&c| c == inner)
+                {
+                    let in_pat = match_stack.last().is_some_and(|top| {
+                        top.brace_depth == brace_depth && top.in_pattern && !top.in_guard
+                    });
+                    lits.push((i, end, code, in_pat));
+                }
+            }
+            i = end;
+            continue;
+        }
+        if is_ident_byte(bytes[i]) {
+            let mut j = i;
+            while j < n && is_ident_byte(bytes[j]) {
+                j += 1;
+            }
+            let ident = &prod[i..j];
+            if ident == "match" && (i == 0 || !matches!(bytes[i - 1], b'.' | b'#')) {
+                pending_match = Some((paren_depth, bracket_depth, false));
+            } else {
+                if let Some((pd, bd, saw_tok)) = &mut pending_match {
+                    if paren_depth == *pd && bracket_depth == *bd {
+                        *saw_tok = true;
+                    }
+                }
+                if ident == "if" {
+                    if let Some(top) = match_stack.last_mut() {
+                        if top.brace_depth == brace_depth
+                            && top.arm_paren_depth == paren_depth
+                            && top.arm_bracket_depth == bracket_depth
+                            && top.in_pattern
+                        {
+                            top.in_guard = true;
+                        }
+                    }
+                }
+            }
+            i = j;
+            continue;
+        }
+        let ch = bytes[i];
+        if !ch.is_ascii_whitespace() && ch != b'{' {
+            if let Some((pd, bd, saw_tok)) = &mut pending_match {
+                if paren_depth == *pd && bracket_depth == *bd {
+                    if ch == b';' {
+                        pending_match = None;
+                    } else {
+                        *saw_tok = true;
+                    }
+                }
+            }
+        }
+        match ch {
+            b'(' => paren_depth += 1,
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'[' => bracket_depth += 1,
+            b']' => bracket_depth = bracket_depth.saturating_sub(1),
+            b'{' => {
+                brace_depth += 1;
+                if let Some((pd, bd, saw_tok)) = pending_match {
+                    if pd == paren_depth && bd == bracket_depth {
+                        if saw_tok {
+                            match_stack.push(MatchArmFrame {
+                                brace_depth,
+                                arm_paren_depth: paren_depth,
+                                arm_bracket_depth: bracket_depth,
+                                in_pattern: true,
+                                in_guard: false,
+                                arm_body_has_brace: false,
+                                body_brace_depth: None,
+                            });
+                        }
+                        pending_match = None;
+                    }
+                } else if let Some(top) = match_stack.last_mut() {
+                    if !top.in_pattern
+                        && !top.arm_body_has_brace
+                        && top.body_brace_depth.is_none()
+                        && top.brace_depth + 1 == brace_depth
+                        && prod[..i].trim_end().ends_with("=>")
+                    {
+                        top.arm_body_has_brace = true;
+                        top.body_brace_depth = Some(brace_depth);
+                    }
+                }
+            }
+            b'}' => {
+                if let Some(top) = match_stack.last_mut() {
+                    if top.arm_body_has_brace && top.body_brace_depth == Some(brace_depth) {
+                        top.in_pattern = true;
+                        top.in_guard = false;
+                        top.arm_body_has_brace = false;
+                        top.body_brace_depth = None;
+                    } else if top.brace_depth == brace_depth {
+                        match_stack.pop();
+                    }
+                }
+                brace_depth = brace_depth.saturating_sub(1);
+            }
+            b'=' if i + 1 < n && bytes[i + 1] == b'>' => {
+                if let Some(top) = match_stack.last_mut() {
+                    if top.brace_depth == brace_depth
+                        && top.arm_paren_depth == paren_depth
+                        && top.arm_bracket_depth == bracket_depth
+                        && top.in_pattern
+                    {
+                        top.in_pattern = false;
+                        top.in_guard = false;
+                    }
+                }
+                i += 2;
+                continue;
+            }
+            b',' => {
+                if let Some(top) = match_stack.last_mut() {
+                    if top.brace_depth == brace_depth
+                        && top.arm_paren_depth == paren_depth
+                        && top.arm_bracket_depth == bracket_depth
+                        && !top.in_pattern
+                        && !top.arm_body_has_brace
+                    {
+                        top.in_pattern = true;
+                        top.in_guard = false;
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    lits
+}
+
+fn is_comparison_literal_site(prod: &str, ls: usize, le: usize) -> bool {
+    let before = prod[..ls].trim_end();
+    let after = prod[le..].trim_start();
+    if before.ends_with("==")
+        || before.ends_with("!=")
+        || after.starts_with("==")
+        || after.starts_with("!=")
+    {
+        return true;
+    }
+    if let Some(before_paren) = before.strip_suffix('(') {
+        let recv = before_paren.trim_end();
+        if [
+            ".contains",
+            ".starts_with",
+            ".ends_with",
+            ".eq_ignore_ascii_case",
+            ".strip_prefix",
+            ".find",
+            ".rfind",
+            ".matches",
+        ]
+        .iter()
+        .any(|m| recv.ends_with(m))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub(super) fn collect_raw_amended_sites_with_helpers(
     rel_file: &str,
     src: &str,
@@ -414,6 +731,7 @@ pub(super) fn collect_raw_amended_sites_with_helpers(
     let bytes = prod.as_bytes();
     let n = bytes.len();
     let mut hits = Vec::new();
+    let mut seen_code_lines: HashSet<(usize, &'static str)> = HashSet::new();
 
     let mut patterns: Vec<(&str, u8, u8, bool)> = vec![
         ("BridgeRpcError", b'{', b'}', false),
@@ -464,12 +782,14 @@ pub(super) fn collect_raw_amended_sites_with_helpers(
             }
             let has_typed_rejection = pat == "BridgeRpcError::with_client_error"
                 && (snippet.contains("ClientError::rejected(")
+                    || snippet.contains("ClientError::rejected_with_args(")
                     || snippet.contains("ClientError::Rejected"));
             let line_no = prod[..start].bytes().filter(|&b| b == b'\n').count() + 1;
             if !has_typed_rejection {
-                for code in AMENDED_LIVE_CLIENT_ERROR_CODES {
+                for &code in AMENDED_LIVE_CLIENT_ERROR_CODES {
                     let quoted = format!("\"{code}\"");
                     if snippet.contains(&quoted) {
+                        seen_code_lines.insert((line_no, code));
                         hits.push(format!("{rel_file}:{line_no} raw {pat} uses {quoted}"));
                     }
                 }
@@ -496,6 +816,49 @@ pub(super) fn collect_raw_amended_sites_with_helpers(
                     }
                 }
             }
+        }
+    }
+
+    // Second pass: catch guarded code literals produced outside typed constructors
+    // (including enum-to-string functions, constants, and unallowlisted helpers) while
+    // allowing non-error-constructing comparisons, match patterns, and typed helpers.
+    let mut safe_spans: Vec<(usize, usize, Option<&'static str>)> = Vec::new();
+    for pat in TYPED_BRIDGE_ERROR_CTORS {
+        for (s, e) in collect_call_paren_spans(&prod, pat) {
+            safe_spans.push((s, e, None));
+        }
+    }
+    for (s, e) in collect_call_paren_spans(&prod, "BridgeRpcError::with_client_error") {
+        let snip = &prod[s..e];
+        if snip.contains("ClientError::rejected(")
+            || snip.contains("ClientError::rejected_with_args(")
+            || snip.contains("ClientError::Rejected")
+        {
+            safe_spans.push((s, e, None));
+        }
+    }
+    for (s, e) in collect_call_paren_spans(&prod, "require_undocked_space_system") {
+        safe_spans.push((s, e, Some("ShipNotInSpace")));
+    }
+    for (s, e) in collect_call_paren_spans(&prod, "check_service_domain_acl_and_tax") {
+        safe_spans.push((s, e, Some("StructureServiceAccessDenied")));
+    }
+    for (s, e) in collect_matches_pattern_spans(&prod) {
+        safe_spans.push((s, e, None));
+    }
+
+    for (ls, le, code, in_match_pattern) in collect_guarded_code_literals(&prod) {
+        let in_safe_span = safe_spans
+            .iter()
+            .any(|&(s, e, req)| s <= ls && le <= e && req.map_or(true, |r| r == code));
+        if in_safe_span || in_match_pattern || is_comparison_literal_site(&prod, ls, le) {
+            continue;
+        }
+        let line_no = prod[..ls].bytes().filter(|&b| b == b'\n').count() + 1;
+        if !seen_code_lines.contains(&(line_no, code)) {
+            hits.push(format!(
+                "{rel_file}:{line_no} produces \"{code}\" outside typed BridgeRpcError constructor"
+            ));
         }
     }
 

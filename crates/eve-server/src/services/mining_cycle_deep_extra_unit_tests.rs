@@ -1108,10 +1108,26 @@ async fn test_wave2_activate_guards_rollback_not_enough_energy_and_deactivate_au
         .set_ball_position(220_001, DVec3::ZERO)
         .await;
     let _ = ctx.systems.get_or_spawn(30_000_142).set_capacitor(220_001, 5.0).await;
+    let cap_err = activate(&ctx, 92_001, 220_001, 30_000_142, 320_001, 420_001).await.unwrap_err();
+    assert_eq!(cap_err.code, "NotEnoughCapacitor");
     assert_eq!(
-        activate(&ctx, 92_001, 220_001, 30_000_142, 320_001, 420_001).await.unwrap_err().code,
-        "NotEnoughCapacitor"
+        cap_err.rejection_facts(),
+        Some(&eve_proto::RejectionFacts::NotEnoughCapacitor {
+            entity_id: Some(220_001),
+            effect_name: "Strip Miner I".into(),
+            required_gj: 40.0,
+            available_gj: 5.0,
+        })
     );
+    assert!(matches!(
+        cap_err.to_client_error("dogmaIM", "Activate"),
+        eve_proto::ClientError::Rejected {
+            key: eve_proto::UserErrorKey::NotEnoughEnergy,
+            ref args,
+            ..
+        } if args.iter().any(|(k, v)| k == "need" && v == &eve_proto::PyRep::Real(40.0))
+            && args.iter().any(|(k, v)| k == "got" && v == &eve_proto::PyRep::Real(5.0))
+    ));
     assert!(active_cycles_for_ship(&ctx, 220_001).is_empty(), "capacitor failure must roll back cycle");
     let cap_notes = ctx.drain_notifications_for_char(92_001);
     assert!(
