@@ -238,9 +238,7 @@ async fn test_fulcrum_docking_and_alignment_services() {
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().war_faction_id = None);
 
     let now = ctx.now_unix();
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.insert(char_id, now + 300); // 5 min retribution timer
-    });
+    eve_server::combat::crimewatch_tail_test_helpers::set_disapproval_flag(&ctx, char_id, now + 300); // 5 min retribution timer
     let timer_dock_err = ctx
         .dispatch_rpc(&mut sess, "beyonce", Some(fulcrum_beyonce), "CmdDock", &[PyRep::Integer(fulcrum_station_id), PyRep::Integer(ship_id)], &kw, None)
         .await
@@ -248,9 +246,7 @@ async fn test_fulcrum_docking_and_alignment_services() {
     assert_eq!(timer_dock_err.code, "FulcrumRefusesTimerActive");
 
     // Clear retribution timer -> neutral character docks successfully
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.remove(&char_id);
-    });
+    eve_server::combat::crimewatch_tail_test_helpers::clear_disapproval_flag(&ctx, char_id);
     let dock_rep = ctx
         .dispatch_rpc(&mut sess, "beyonce", Some(fulcrum_beyonce), "CmdDock", &[PyRep::Integer(fulcrum_station_id), PyRep::Integer(ship_id)], &kw, None)
         .await

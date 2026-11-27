@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 
 pub mod crimewatch;
+#[cfg(any(test, feature = "testkit"))]
+pub mod crimewatch_tail_test_helpers;
 pub mod death_pipeline;
 pub mod drones_salvage_tractor;
 pub mod npc_ai;

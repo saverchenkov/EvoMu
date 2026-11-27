@@ -4,11 +4,12 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::combat::crimewatch_tail_test_helpers::set_disapproval_flag;
 use crate::combat::npc_ai::npc_test_helpers::{
     any_npc_entity_in_system, find_npc_entity_in_system, has_npc_entity, npc_entity_ids,
 };
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_ephemeral, with_mut_combat_runtime};
+use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_ephemeral};
 use eve_db::clock::{ServerClock, VirtualServerClock};
 use eve_db::durable_domain_types::{
     PersistedCrimeWatchState, PersistedIceHeistRecord, PersistedInsurgencyCampaign,
@@ -162,9 +163,7 @@ fn docking_fulcrum_timers_custom_fob_group_and_contribution_guards() {
     ctx.crimewatch.write().unwrap().states.get_mut(&101).unwrap().weapon_timer_until_unix = 50_000;
     assert!(check_docking_allowed(&ctx, 101, sys_id, 60_015_187, false).is_ok());
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.insert(101, 50_001);
-    });
+    set_disapproval_flag(&ctx, 101, 50_001);
     assert_eq!(
         check_docking_allowed(&ctx, 101, sys_id, 60_015_187, false).unwrap_err().code,
         "FulcrumRefusesTimerActive"

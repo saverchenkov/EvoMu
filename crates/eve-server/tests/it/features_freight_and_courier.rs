@@ -1039,11 +1039,10 @@ use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::TargetLock;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::combat::crimewatch_tail_test_helpers::sec_status_txs;
 use eve_server::combat::npc_ai::npc_test_helpers::{any_npc_entity, find_npc_entity_in_system};
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{
-    spawn_specialized_npc_entity, with_combat_runtime,
-};
+use eve_server::services::combat_crimewatch::spawn_specialized_npc_entity;
 use eve_server::services::insurgency_services::{
     ACTIVE_DURATION_SECS, FORECASTING_DURATION_SECS, WINDDOWN_DURATION_SECS,
 };
@@ -1671,12 +1670,10 @@ async fn test_specialized_npc_destroy_grants_sec_status_with_suppression_multipl
     assert!(bounty1 > 0);
     let delta_base = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0));
     assert!(delta_base > 0.0, "Specialized NPC kill must grant positive security status (got {delta_base})");
-    let tx_count = with_combat_runtime(&ctx, |rt| {
-        rt.sec_status_transactions
-            .get(&char_id)
-            .map(|v| v.iter().filter(|t| t.reason == "NPC Pirate Bounty").count())
-            .unwrap_or(0)
-    });
+    let tx_count = sec_status_txs(&ctx, char_id)
+        .into_iter()
+        .filter(|t| t.reason == "NPC Pirate Bounty")
+        .count();
     assert_eq!(tx_count, 1, "Must record 'NPC Pirate Bounty' SecStatusTransaction");
 
     // 2. Suppression Stage 5 (1.25x sec-status multiplier)

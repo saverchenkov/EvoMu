@@ -710,21 +710,21 @@ async fn tick_concord_responses_and_step_concord_edge_guards() {
     // 2. victim_char_id == 0 -> kill_right_id == 0, plus pre-logged sec_status_transaction skips duplicate sec penalty
     let ship_id_2 = 100_210_002;
     spawn_ship(&ctx, sys_id, ship_id_2, crim, 587, DVec3::new(1200.0, 0.0, 0.0));
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.sec_status_transactions.entry(crim).or_default().push(
-            crate::services::combat_crimewatch::SecStatusTransaction {
-                timestamp_unix: ctx.now_unix(),
-                old_sec: -0.5,
-                new_sec: -1.0,
-                delta: -0.5,
-                reason: "recent".into(),
-                solar_system_id: sys_id,
-                event_type_id: 0,
-                other_owner_id: None,
-                other_type_id: None,
-            },
-        );
-    });
+    crate::combat::crimewatch_tail_test_helpers::push_sec_status_tx(
+        &ctx,
+        crim,
+        crate::services::combat_crimewatch::SecStatusTransaction {
+            timestamp_unix: ctx.now_unix(),
+            old_sec: -0.5,
+            new_sec: -1.0,
+            delta: -0.5,
+            reason: "recent".into(),
+            solar_system_id: sys_id,
+            event_type_id: 0,
+            other_owner_id: None,
+            other_type_id: None,
+        },
+    );
     let mut dir2 = CrimeWatchDirector::new();
     dir2.states.insert(
         crim,

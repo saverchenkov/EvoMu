@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::combat::crimewatch_tail_test_helpers::sec_status_txs;
 use crate::combat::npc_ai::npc_test_helpers::{seed_npc_entity, update_npc_entity};
 use crate::combat::npc_ai::{NpcAiState, NpcCombatEntity, NpcSpawnManager};
 use crate::living_world::{LivingWorldConvoy, NpcArchetype};
@@ -150,10 +151,8 @@ async fn wave_creation_spawn_groups_trigger_and_empty_wave_advancement_and_space
         .db
         .with_snapshot(|snap| snap.combat_crimewatch_state.pending_bounty_ticks[&(sys_id, char_id)]);
     assert!((pending - 120_000.0).abs() < 1e-3);
-    let space_w2_trigger = with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.sec_status_transactions[&char_id].is_empty());
-        rt.encounter_waves[&4].trigger_ball_id
-    });
+    assert!(!sec_status_txs(&ctx, char_id).is_empty());
+    let space_w2_trigger = with_combat_runtime(&ctx, |rt| rt.encounter_waves[&4].trigger_ball_id);
 
     // Set security_status = 5.0 -> kills wave 2 trigger (spawns fallback wave 3 with 941_001 damage vector), skips sec status gain
     ctx.db.with_mut_snapshot(|snap| {

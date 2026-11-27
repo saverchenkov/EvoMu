@@ -2360,9 +2360,11 @@ async fn bl01_concurrent_set_password_rotation_rejects_stale_open_list_and_move_
             },
         );
     });
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.authorized_shipping_storage.insert((alsc_id, char_a));
-    });
+    crate::combat::crimewatch_tail_test_helpers::authorize_shipping_storage(
+        &ctx,
+        alsc_id,
+        char_a,
+    );
 
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     for (id, tid, pos) in [
@@ -2643,9 +2645,11 @@ async fn bl02_invbroker_add_commits_alsc_take_custom_flag_and_ship_unlock_atomic
         )
         .unwrap();
     });
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx1, |rt| {
-        rt.authorized_shipping_storage.insert((alsc_b, char_a));
-    });
+    crate::combat::crimewatch_tail_test_helpers::authorize_shipping_storage(
+        &ctx1,
+        alsc_b,
+        char_a,
+    );
 
     let sys_h = ctx1.systems.get_or_spawn(sys_id);
     for (id, tid, pos) in [

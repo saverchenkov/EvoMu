@@ -64,10 +64,16 @@ async fn remove_character_from_fleet_boss_handover_disband_and_cleanup() {
             },
         );
     }
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.authorized_shipping_storage.insert((100_000_001, 90_000_001));
-        rt.authorized_shipping_storage.insert((100_000_001, 90_000_003));
-    });
+    crate::combat::crimewatch_tail_test_helpers::authorize_shipping_storage(
+        &ctx,
+        100_000_001,
+        90_000_001,
+    );
+    crate::combat::crimewatch_tail_test_helpers::authorize_shipping_storage(
+        &ctx,
+        100_000_001,
+        90_000_003,
+    );
 
     // Remove boss 90_000_001: since 90_000_002 is disconnected, handover should pick connected 90_000_003 (SquadCommander) over disconnected 90_000_002 (WingCommander)!
     let (disbanded, new_boss) = remove_character_from_fleet(&ctx, fleet_id, 90_000_001);
@@ -81,10 +87,16 @@ async fn remove_character_from_fleet_boss_handover_disband_and_cleanup() {
         assert!(!ex.join_requests.get(&fleet_id).unwrap().contains(&90_000_001));
         assert_eq!(ex.adverts.get(&fleet_id).unwrap().leader_id, 90_000_003);
     }
-    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.authorized_shipping_storage.contains(&(100_000_001, 90_000_001)));
-        assert!(rt.authorized_shipping_storage.contains(&(100_000_001, 90_000_003)));
-    });
+    assert!(!crate::combat::crimewatch_tail_test_helpers::is_shipping_storage_authorized(
+        &ctx,
+        100_000_001,
+        90_000_001,
+    ));
+    assert!(crate::combat::crimewatch_tail_test_helpers::is_shipping_storage_authorized(
+        &ctx,
+        100_000_001,
+        90_000_003,
+    ));
 
     // Remove remaining members until fleet disbands
     let (d2, _) = remove_character_from_fleet(&ctx, fleet_id, 90_000_002);

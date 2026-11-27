@@ -13,10 +13,10 @@ use eve_server::living_world::{
     mining_escort_type_for_system, NpcArchetype,
 };
 use eve_server::router::ServerContext;
+use eve_server::combat::crimewatch_tail_test_helpers::has_disapproval_flag;
 use eve_server::services::combat_crimewatch::combat_npc_ai::{
     derive_npc_archetype, spawn_specialized_npc_entity, step_extended_npc_ai,
 };
-use eve_server::services::combat_crimewatch::with_mut_combat_runtime;
 use eve_server::services::space_destiny::space_pochven_wormholes::open_pochven_wormhole_and_spawn_guards;
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
@@ -391,9 +391,7 @@ async fn test_e2e_npc_navy_and_zarzakh_gate_guns_patrols() {
             .get(&pilot.char_id)
             .is_some_and(|st| st.is_criminal(ctx.now_unix()) || st.is_suspect(ctx.now_unix()))
     };
-    let has_disapproval = with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.contains_key(&pilot.char_id)
-    });
+    let has_disapproval = has_disapproval_flag(&ctx, pilot.char_id);
     assert!(
         has_suspect_or_criminal && shield_after_gate_gun < shield_before_gate_gun,
         "Flagged pilot ({has_suspect_or_criminal}) is engaged & damaged by ZarzakhGateGun ({shield_before_gate_gun} -> {shield_after_gate_gun})"
