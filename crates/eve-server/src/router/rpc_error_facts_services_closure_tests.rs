@@ -309,22 +309,34 @@ async fn dispatch_and_rbac_handlers_emit_typed_insufficient_role_facts() {
     };
     let ccp_err = services::auth_cache::dispatch_createccpevent_slash(&ctx, &gml_sess, &ccp_inv)
         .expect_err("ROLE_GML without ROLE_GMH must fail /createccpevent");
-    let (facts, _) = assert_rejected_wire_facts(
-        "slash",
-        "SlashCmd",
-        Some(char_id),
-        &ccp_err,
-        CODE_INSUFFICIENT_ROLE,
-        UserErrorKey::InsufficientRoles,
-    );
-    assert_eq!(
-        facts,
-        &RejectionFacts::InsufficientRole {
+    assert_eq!(ccp_err.code, CODE_INSUFFICIENT_ROLE);
+    assert!(matches!(
+        ccp_err.client_error.as_deref(),
+        Some(eve_proto::ClientError::Rejected {
+            key: UserErrorKey::InsufficientRoles,
+            facts,
+            ..
+        }) if facts == &RejectionFacts::InsufficientRole {
             required_role_mask: service_roles::ROLE_GMH,
             actual_role_mask: service_roles::ROLE_GML,
             action: "slash./createccpevent".into(),
         }
+    ));
+    let (ccp_wire, ccp_fb) = crate::router::rpc_fault_policy::map_call_req_error_with_telemetry(
+        &crate::flight_recorder::FlightRecorder::new(),
+        Some(char_id),
+        "slash",
+        "SlashCmd",
+        &ccp_err,
     );
+    assert!(!ccp_fb);
+    assert!(matches!(
+        ccp_wire,
+        eve_proto::ClientError::User {
+            key: UserErrorKey::SlashError,
+            ..
+        }
+    ));
 
     // 5. jump_clone_names (publicQaToolsServer.MoveMeTo), fitting_ships_mastery (SetShipKillCounter),
     //    combat_crimewatch (gm_admin_bounty_action), space_probe_scanning (QAScanSites / QAOverrideProbeExpiry)
@@ -900,7 +912,7 @@ async fn pve_dungeon_cache_editor_and_runtime_rpc_emit_typed_facts() {
     let ore_rep = services::pve_dungeon_cache::handle(
         &ctx,
         &mut player_sess,
-        "custom_agency_provider",
+        "dungeonInstanceCacheMgr",
         "GetOreAnomalyInstances",
         &[],
         &kw,
@@ -1288,14 +1300,13 @@ async fn mining_combat_gm_fit_and_remaining_space_handlers_emit_typed_facts() {
         )
         .await
         .expect_err("/fit drone into HiSlot0 must fail with FittingValidationFailed");
-    let (facts, args) = assert_rejected_wire_facts(
-        "slash",
-        "SlashCmd",
-        Some(char_id),
-        &fit_err,
-        CODE_FITTING_VALIDATION_FAILED,
-        UserErrorKey::ModuleFitFailed,
-    );
+    assert_eq!(fit_err.code, CODE_FITTING_VALIDATION_FAILED);
+    let Some(eve_proto::ClientError::Rejected { key, args, facts }) =
+        fit_err.client_error.as_deref()
+    else {
+        panic!("expected ClientError::Rejected on /fit error, got {:?}", fit_err.client_error);
+    };
+    assert_eq!(*key, UserErrorKey::ModuleFitFailed);
     assert!(args
         .iter()
         .any(|(k, v)| k == "moduleName" && v == &PyRep::String(format!("TestType_{drone_tid}"))));
@@ -1307,6 +1318,21 @@ async fn mining_combat_gm_fit_and_remaining_space_handlers_emit_typed_facts() {
             module_type_id: Some(tid),
             reason,
         } if *sid == ship_id && *tid == i64::from(drone_tid) && reason.contains("cannot be fitted")
+    ));
+    let (fit_wire, fit_fb) = crate::router::rpc_fault_policy::map_call_req_error_with_telemetry(
+        &crate::flight_recorder::FlightRecorder::new(),
+        Some(char_id),
+        "slash",
+        "SlashCmd",
+        &fit_err,
+    );
+    assert!(!fit_fb);
+    assert!(matches!(
+        fit_wire,
+        eve_proto::ClientError::User {
+            key: UserErrorKey::SlashError,
+            ..
+        }
     ));
 
     // 3. pve_ess_reserve_banks, fleet_social_fleet_ops, fleet_social_scanning, space_probe_scanning,
@@ -1351,6 +1377,11 @@ async fn mining_combat_gm_fit_and_remaining_space_handlers_emit_typed_facts() {
             mode: MovementMode::Stop,
         })
         .await;
+    // 3a. fleetMgr.WarpToMember while caller is docked -> fleet_social_fleet_ops ShipNotInSpace ("fleet_warp")
+    player_sess.station_id = Some(60_003_760);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = Some(60_003_760);
+    });
     let fleet_warp_err = ctx
         .dispatch_rpc(
             &mut player_sess,
@@ -1362,7 +1393,7 @@ async fn mining_combat_gm_fit_and_remaining_space_handlers_emit_typed_facts() {
             None,
         )
         .await
-        .expect_err("WarpToMember without caller ship ball must fail");
+        .expect_err("WarpToMember while caller is docked must fail with ShipNotInSpace");
     assert_ship_not_in_space(
         "fleetMgr",
         "WarpToMember",
@@ -1373,6 +1404,10 @@ async fn mining_combat_gm_fit_and_remaining_space_handlers_emit_typed_facts() {
         Some(sys_id),
         "fleet_warp",
     );
+    player_sess.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = None;
+    });
 
     let generic_gate_err = services::fleet_social::fleet_social_scanning::handle_scanning_and_wormholes(
         &ctx,
@@ -1393,7 +1428,7 @@ async fn mining_combat_gm_fit_and_remaining_space_handlers_emit_typed_facts() {
         ship_id,
         Some(char_id),
         Some(sys_id),
-        "activate_acceleration_gate",
+        "ValidateShipMovement",
     );
 
     let mut docked_sess = player_sess.clone();
