@@ -8,6 +8,7 @@ use super::super::{
     recover_scanner_probes_on_downtime,
 };
 use super::test_ctx;
+use crate::probe_test_helpers;
 use crate::router::{ActiveScannerProbe, BoundObjectEntry};
 use crate::services::mission_fixture::{self, MissionFixture};
 use crate::sp6_lifecycle::{with_mut_sp6_state, with_sp6_state, SafeLogoffEntry};
@@ -177,14 +178,16 @@ async fn downtime_recover_probes_bounties_safe_logoff_and_courier_mission() {
     }
 
     {
-        let mut map = ctx.active_scanner_probes.write().unwrap();
-        map.insert(p_expired_state, make_probe(p_expired_state, ship_ok_id, launcher_ok_id, -1, now_unix, 3600.0));
-        map.insert(p_expired_time, make_probe(p_expired_time, ship_ok_id, launcher_ok_id, 0, now_unix.saturating_sub(4000), 3600.0));
-        map.insert(p_missing_ship, make_probe(p_missing_ship, missing_ship_id, launcher_ok_id, 1, now_unix, 3600.0));
-        map.insert(p_full_ship, make_probe(p_full_ship, ship_full_id, launcher_full_id, 1, now_unix, 3600.0));
+        let mut seeded = vec![
+            make_probe(p_expired_state, ship_ok_id, launcher_ok_id, -1, now_unix, 3600.0),
+            make_probe(p_expired_time, ship_ok_id, launcher_ok_id, 0, now_unix.saturating_sub(4000), 3600.0),
+            make_probe(p_missing_ship, missing_ship_id, launcher_ok_id, 1, now_unix, 3600.0),
+            make_probe(p_full_ship, ship_full_id, launcher_full_id, 1, now_unix, 3600.0),
+        ];
         for &pid in &ok_probe_ids {
-            map.insert(pid, make_probe(pid, ship_ok_id, launcher_ok_id, 0, now_unix, 3600.0));
+            seeded.push(make_probe(pid, ship_ok_id, launcher_ok_id, 0, now_unix, 3600.0));
         }
+        probe_test_helpers::seed_probes(&ctx, seeded);
     }
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -219,7 +222,7 @@ async fn downtime_recover_probes_bounties_safe_logoff_and_courier_mission() {
         assert_eq!(cargo_qty, 1);
     });
     {
-        let map = ctx.active_scanner_probes.read().unwrap();
+        let map = probe_test_helpers::probes_snapshot(&ctx);
         assert_eq!(map.len(), 2);
         assert!(map.contains_key(&p_missing_ship));
         assert!(map.contains_key(&p_full_ship));

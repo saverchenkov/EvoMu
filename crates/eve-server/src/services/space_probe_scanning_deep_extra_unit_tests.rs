@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::probe_test_helpers;
 use crate::router::{ActiveScannerProbe, ServerContext};
 use crate::services::fleet_social;
 use crate::services::space_destiny::space_docking_cloaking::space_probe_scanning::{
@@ -111,19 +112,21 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 }
 
 fn set_active_probes_for_char(ctx: &ServerContext, char_id: i64, probes: Vec<ActiveScannerProbe>) {
-    if let Ok(mut map) = ctx.active_scanner_probes.write() {
-        map.retain(|_, p| p.owner_char_id != char_id);
-        for p in probes {
-            map.insert(p.probe_id, p);
-        }
+    let existing_ids: Vec<i64> = probe_test_helpers::probes_snapshot(ctx)
+        .into_iter()
+        .filter_map(|(pid, p)| (p.owner_char_id == char_id).then_some(pid))
+        .collect();
+    for pid in existing_ids {
+        probe_test_helpers::remove_probe(ctx, pid);
     }
+    probe_test_helpers::seed_probes(ctx, probes);
 }
 
 fn get_active_probes_for_char(ctx: &ServerContext, char_id: i64) -> Vec<ActiveScannerProbe> {
-    ctx.active_scanner_probes
-        .read()
-        .map(|m| m.values().filter(|p| p.owner_char_id == char_id).cloned().collect())
-        .unwrap_or_default()
+    probe_test_helpers::probes_snapshot(ctx)
+        .into_values()
+        .filter(|p| p.owner_char_id == char_id)
+        .collect()
 }
 
 #[test]
@@ -520,10 +523,10 @@ async fn request_scans_dict_move_warp_invalid_coords_and_tick_probe_warp_end() {
     assert_eq!(probes.iter().find(|p| p.probe_id == p_warp).unwrap().state, PROBE_STATE_WARPING);
 
     let past_ft = ctx.now_blueos_filetime_ticks().saturating_sub(10_000);
-    if let Ok(mut map) = ctx.active_scanner_probes.write() {
-        for p in map.values_mut().filter(|p| p.owner_char_id == char_id) {
-            p.warp_end_ft = Some(past_ft);
-        }
+    for p in get_active_probes_for_char(&ctx, char_id) {
+        probe_test_helpers::mutate_probe(&ctx, p.probe_id, |probe| {
+            probe.warp_end_ft = Some(past_ft);
+        });
     }
     tick_probe_warp_end(&ctx);
     assert!(get_active_probes_for_char(&ctx, char_id).iter().all(|p| p.state == PROBE_STATE_SCANNING));

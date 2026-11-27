@@ -4,6 +4,7 @@
 //! target class scanning (`Ship`/`Drone`/`AbyssalTrace`/`Structure`), and launcher clip recovery.
 
 use super::space_probe_scanning::*;
+use crate::probe_test_helpers;
 use crate::router::{ActiveScannerProbe, BoundObjectEntry, ServerContext};
 use eve_db::types::{CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, CombatState, MovementMode, SlimItemMeta};
@@ -418,7 +419,7 @@ async fn request_scans_dict_modes_combat_probes_and_launcher_clip_recovery() {
     }
 
     // 4. RequestScans with Dict format testing short move (<= 150km -> MOVING), long move (> 150km -> WARPING), scanRangeAU, scanRange, and x/y/z
-    let pids: Vec<i64> = ctx.active_scanner_probes.read().unwrap().keys().copied().collect();
+    let pids: Vec<i64> = probe_test_helpers::probe_ids(&ctx);
     let dict_arg = PyRep::Dict(vec![
         (
             PyRep::Integer(pids[0]),
@@ -473,11 +474,8 @@ async fn request_scans_dict_modes_combat_probes_and_launcher_clip_recovery() {
     assert!(!rows.iter().any(|r| r.dict_get("itemID") == Some(&PyRep::Integer(730_005))));
 
     // Verify pids[0] entered PROBE_STATE_MOVING (2) and pids[1] entered PROBE_STATE_WARPING (3)
-    {
-        let pm = ctx.active_scanner_probes.read().unwrap();
-        assert_eq!(pm.get(&pids[0]).unwrap().state, PROBE_STATE_MOVING);
-        assert_eq!(pm.get(&pids[1]).unwrap().state, PROBE_STATE_WARPING);
-    }
+    assert_eq!(probe_test_helpers::get_probe(&ctx, pids[0]).unwrap().state, PROBE_STATE_MOVING);
+    assert_eq!(probe_test_helpers::get_probe(&ctx, pids[1]).unwrap().state, PROBE_STATE_WARPING);
 
     // Advance time & tick_probe_warp_end twice (first completes warp -> SCANNING, second completes scan -> IDLE)
     ctx.advance_secs(60);
@@ -656,7 +654,7 @@ async fn issue_543_scanner_probes_sqlite_restart_rehydration_and_downtime_recove
     .await
     .expect("launch 2 core probes");
     assert_eq!(launched.dict_get("launchedCount"), Some(&PyRep::Integer(2)));
-    let pids1: Vec<i64> = ctx1.active_scanner_probes.read().unwrap().keys().copied().collect();
+    let pids1: Vec<i64> = probe_test_helpers::probe_ids(&ctx1);
     assert_eq!(pids1.len(), 2);
     drop(ctx1);
 
@@ -664,7 +662,7 @@ async fn issue_543_scanner_probes_sqlite_restart_rehydration_and_downtime_recove
     let repo2 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
     let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), repo2);
     {
-        let map = ctx2.active_scanner_probes.read().unwrap();
+        let map = probe_test_helpers::probes_snapshot(&ctx2);
         assert_eq!(map.len(), 2);
         for &pid in &pids1 {
             let p = &map[&pid];
@@ -771,10 +769,9 @@ async fn issue_543_scanner_probes_sqlite_restart_rehydration_and_downtime_recove
             SlimItemMeta { group_id: 479, category_id: 8, owner_id: char_id, ..Default::default() },
         )
         .await;
-    {
-        let mut map = ctx2.active_scanner_probes.write().unwrap();
-        map.insert(
-            expired_pid,
+    probe_test_helpers::seed_probes(
+        &ctx2,
+        [
             ActiveScannerProbe {
                 probe_id: expired_pid,
                 probe_type_id: 30_013,
@@ -792,9 +789,6 @@ async fn issue_543_scanner_probes_sqlite_restart_rehydration_and_downtime_recove
                 state: PROBE_STATE_IDLE,
                 warp_end_ft: None,
             },
-        );
-        map.insert(
-            blocked_pid,
             ActiveScannerProbe {
                 probe_id: blocked_pid,
                 probe_type_id: 30_013,
@@ -812,8 +806,8 @@ async fn issue_543_scanner_probes_sqlite_restart_rehydration_and_downtime_recove
                 state: PROBE_STATE_IDLE,
                 warp_end_ft: None,
             },
-        );
-    }
+        ],
+    );
     sync_scanner_probes_to_db(&ctx2);
 
     // 3. Daily downtime sweeps probes:
@@ -828,7 +822,7 @@ async fn issue_543_scanner_probes_sqlite_restart_rehydration_and_downtime_recove
     let repo3 = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen sqlite 3"));
     let ctx3 = ServerContext::with_sde_and_repository(sde, repo3);
     {
-        let map3 = ctx3.active_scanner_probes.read().unwrap();
+        let map3 = probe_test_helpers::probes_snapshot(&ctx3);
         assert!(!map3.contains_key(&pids1[1]), "recovered probe must be cleared");
         assert!(!map3.contains_key(&expired_pid), "expired probe must be purged");
         assert_eq!(map3.get(&blocked_pid).map(|p| p.state), Some(PROBE_STATE_INACTIVE));

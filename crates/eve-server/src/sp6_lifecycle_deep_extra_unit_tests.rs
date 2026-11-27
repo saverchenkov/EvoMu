@@ -1,6 +1,7 @@
 //! Deep branch-coverage and mutation-killing unit tests for `sp6_lifecycle`.
 
 use super::*;
+use crate::probe_test_helpers;
 use crate::router::{ActiveMoonSurveyProbe, ActiveScannerProbe, ServerContext};
 use crate::services::combat_crimewatch::DroneSpaceState;
 use crate::services::drone_test_helpers;
@@ -454,8 +455,8 @@ async fn deep_safe_logoff_disconnect_reconnect_and_drones_paths() {
             tp_sig_bonus_pct: 0.0,
         },
     );
-    ctx.active_scanner_probes.write().unwrap().insert(
-        710_100,
+    probe_test_helpers::seed_probe(
+        &ctx,
         ActiveScannerProbe {
             probe_id: 710_100,
             probe_type_id: 30013,
@@ -528,7 +529,7 @@ async fn deep_safe_logoff_disconnect_reconnect_and_drones_paths() {
 
     // Clean drones & probes -> start safe logoff -> abort safe logoff
     drone_test_helpers::clear_active_drones(&ctx);
-    ctx.active_scanner_probes.write().unwrap().clear();
+    probe_test_helpers::clear_probes(&ctx);
     ctx.active_moon_probes.write().unwrap().clear();
     let started = handle_safe_logoff(&ctx, &mut space_sess)
         .await

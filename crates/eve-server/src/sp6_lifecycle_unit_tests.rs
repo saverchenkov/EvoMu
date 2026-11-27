@@ -1,6 +1,7 @@
 //! Unit and mutation-killing tests for `sp6_lifecycle`.
 
 use super::*;
+use crate::probe_test_helpers;
 use crate::router::{ActiveMoonSurveyProbe, ActiveScannerProbe, ServerContext};
 use crate::services::combat_crimewatch::DroneSpaceState;
 use crate::services::drone_test_helpers;
@@ -374,8 +375,8 @@ async fn safe_logoff_disconnect_reconnect_and_drone_lifecycle_work_end_to_end() 
     let start_pos = DVec3::new(500_000.0, 100_000.0, -200_000.0);
     undock_char_in_space(&ctx, char_id, ship_id, sys_id, start_pos);
     register_self_destruct_countdown(&ctx, ship_id, char_id, sys_id, now, now + 120);
-    ctx.active_scanner_probes.write().unwrap().insert(
-        991_001,
+    probe_test_helpers::seed_probe(
+        &ctx,
         ActiveScannerProbe {
             probe_id: 991_001,
             probe_type_id: 30013,
@@ -412,7 +413,7 @@ async fn safe_logoff_disconnect_reconnect_and_drone_lifecycle_work_end_to_end() 
     assert!(failed_items.contains(&PyRep::String("SAFE_LOGOFF_SELF_DESTRUCT_ACTIVE".into())));
 
     // Clean up blocking state and verify safe logoff succeeds + abort works
-    ctx.active_scanner_probes.write().unwrap().clear();
+    probe_test_helpers::clear_probes(&ctx);
     ctx.active_moon_probes.write().unwrap().clear();
     assert!(abort_self_destruct_countdown(&ctx, ship_id));
     assert!(!abort_self_destruct_countdown(&ctx, ship_id));

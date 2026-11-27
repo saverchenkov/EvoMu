@@ -1,6 +1,7 @@
 //! Additional edge-case and branch coverage tests for `services::space_probe_scanning`.
 
 use super::*;
+use crate::probe_test_helpers;
 use crate::router::{ActiveScannerProbe, BoundObjectEntry, ServerContext};
 use crate::services::space_destiny::AU_IN_METERS;
 use eve_db::types::{CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag, InventoryItemRecord};
@@ -189,15 +190,11 @@ async fn launcher_activation_clamping_incompatible_and_max_probes() {
         snap.items.get_mut(&charge_id).unwrap().type_id = 30013; // Core Scanner Probe I
     });
     let now_unix = ctx.now_unix_secs();
-    {
-        let mut map = ctx.active_scanner_probes.write().unwrap();
-        for i in 1..=6_i64 {
-            map.insert(
-                96_710_000 + i,
-                make_test_probe(96_710_000 + i, char_id, ship_id, sys_id, 30_013, now_unix),
-            );
-        }
-    }
+    probe_test_helpers::seed_probes(
+        &ctx,
+        (1..=6_i64)
+            .map(|i| make_test_probe(96_710_000 + i, char_id, ship_id, sys_id, 30_013, now_unix)),
+    );
     let launched = activate_scan_probe_launcher(
         &ctx,
         &sess,
@@ -215,7 +212,7 @@ async fn launcher_activation_clamping_incompatible_and_max_probes() {
     .await
     .unwrap();
     assert!(matches!(launched, PyRep::Integer(2) | PyRep::KeyVal(_)) || launched != PyRep::None);
-    assert_eq!(ctx.active_scanner_probes.read().unwrap().len(), 8);
+    assert_eq!(probe_test_helpers::probe_count(&ctx), 8);
 
     // 4. Already at 8 -> MaxProbesLaunched
     assert_eq!(
@@ -327,15 +324,11 @@ async fn full_state_qa_rpcs_activity_states_system_scan_mgr_and_anomalies() {
     let pid1 = 96_720_001_i64;
     let pid2 = 96_720_002_i64;
     let now_unix = ctx.now_unix_secs();
-    {
-        let mut map = ctx.active_scanner_probes.write().unwrap();
-        for pid in [pid1, pid2] {
-            map.insert(
-                pid,
-                make_test_probe(pid, char_id, 100_000_001, sys_id, 30_013, now_unix),
-            );
-        }
-    }
+    probe_test_helpers::seed_probes(
+        &ctx,
+        [pid1, pid2]
+            .map(|pid| make_test_probe(pid, char_id, 100_000_001, sys_id, 30_013, now_unix)),
+    );
     assert_eq!(
         handle_scan_and_wormhole_extras(
             &ctx,
@@ -556,13 +549,10 @@ async fn request_scans_recover_reconnect_destroy_and_tick_warp_end() {
     // 2. Seed combat scanner probe + target balls (Ship, Drone, Container excluded)
     let pid = 96_730_001_i64;
     let now_unix = ctx.now_unix_secs();
-    {
-        let mut map = ctx.active_scanner_probes.write().unwrap();
-        map.insert(
-            pid,
-            make_test_probe(pid, char_id, ship_id, sys_id, 30_028, now_unix),
-        );
-    }
+    probe_test_helpers::seed_probe(
+        &ctx,
+        make_test_probe(pid, char_id, ship_id, sys_id, 30_028, now_unix),
+    );
     {
         let sys_h = ctx.systems.get_or_spawn(sys_id);
         let _ = sys_h
@@ -675,27 +665,21 @@ async fn request_scans_recover_reconnect_destroy_and_tick_warp_end() {
         .is_ok()
     );
     let past_ft = ctx.now_blueos_filetime_ticks().saturating_sub(10_000);
-    {
-        let mut map = ctx.active_scanner_probes.write().unwrap();
-        if let Some(p) = map.get_mut(&pid) {
-            p.warp_end_ft = Some(past_ft);
-        }
-    }
+    probe_test_helpers::mutate_probe(&ctx, pid, |p| {
+        p.warp_end_ft = Some(past_ft);
+    });
     tick_probe_warp_end(&ctx);
-    assert_eq!(ctx.active_scanner_probes.read().unwrap()[&pid].state, PROBE_STATE_SCANNING);
+    assert_eq!(probe_test_helpers::get_probe(&ctx, pid).unwrap().state, PROBE_STATE_SCANNING);
     ctx.db.with_mut_snapshot(|snap| {
         for e in &mut snap.fleet_and_social_ops.pending_probe_scans { e.5 = past_ft; }
     });
     tick_probe_warp_end(&ctx);
-    assert_eq!(ctx.active_scanner_probes.read().unwrap()[&pid].state, PROBE_STATE_IDLE);
+    assert_eq!(probe_test_helpers::get_probe(&ctx, pid).unwrap().state, PROBE_STATE_IDLE);
 
     // 3. ReconnectToLostProbes on inactive probe -> RecoverProbes (cargo fallback) -> DestroyProbe
-    {
-        let mut map = ctx.active_scanner_probes.write().unwrap();
-        if let Some(p) = map.get_mut(&pid) {
-            p.state = PROBE_STATE_INACTIVE;
-        }
-    }
+    probe_test_helpers::mutate_probe(&ctx, pid, |p| {
+        p.state = PROBE_STATE_INACTIVE;
+    });
     let reconn = handle_scan_and_wormhole_extras(&ctx, &mut sess, None, "scanMgr", "ReconnectToLostProbes", &[], &kw)
         .await
         .unwrap()
@@ -717,19 +701,16 @@ async fn request_scans_recover_reconnect_destroy_and_tick_warp_end() {
     assert_eq!(recov, PyRep::List(vec![PyRep::Integer(pid)]));
 
     // Add another probe and test DestroyProbe (all probes when empty args)
-    {
-        let mut map = ctx.active_scanner_probes.write().unwrap();
-        map.insert(
-            pid + 1,
-            make_test_probe(pid + 1, char_id, ship_id, sys_id, 30_013, now_unix),
-        );
-    }
+    probe_test_helpers::seed_probe(
+        &ctx,
+        make_test_probe(pid + 1, char_id, ship_id, sys_id, 30_013, now_unix),
+    );
     let dest = handle_scan_and_wormhole_extras(&ctx, &mut sess, None, "scanMgr", "DestroyProbe", &[], &kw)
         .await
         .unwrap()
         .unwrap();
     assert!(dest.dict_get("destroyedCount").is_some());
-    assert!(!ctx.active_scanner_probes.read().unwrap().contains_key(&(pid + 1)));
+    assert!(!probe_test_helpers::contains_probe(&ctx, pid + 1));
 
     // 4. evaluate_probe_dogma_state across None, direct drone_state, evaluated_drones type match, sde.types fallback, and unknown type
     assert!(super::evaluate_probe_dogma_state(None, 9001, 30_013, &ctx.sde).is_none());
@@ -1011,17 +992,18 @@ async fn w4_mutant_killers_launcher_skills_custom_scale_target_classes_and_sync(
 
     // 4. Multi-probe RequestScans across Ship, Cloaked Ship, Drone, AbyssalTrace, Structure + custom_scale + session.ship_id=None fallback
     {
-        let mut map = ctx.active_scanner_probes.write().unwrap();
-        map.clear();
+        probe_test_helpers::clear_probes(&ctx);
+        let mut seeded = Vec::with_capacity(5);
         for i in 0..4_i64 {
             let mut p = make_test_probe(96_810_000 + i, char_id, ship_id, sys_id, 30_028, ctx.now_unix_secs());
             p.base_sensor_strength = if i == 0 { 0.0 } else { 80.0 };
-            map.insert(p.probe_id, p);
+            seeded.push(p);
         }
         // Negative state probe should be ignored by sync_scanner_probes_to_db
         let mut dead = make_test_probe(96_810_099, char_id, ship_id, sys_id, 30_028, ctx.now_unix_secs());
         dead.state = -1;
-        map.insert(dead.probe_id, dead);
+        seeded.push(dead);
+        probe_test_helpers::seed_probes(&ctx, seeded);
     }
     for (bid, tid, cloaked) in [
         (96_820_001_i64, 587_u32, false),
@@ -1073,7 +1055,7 @@ async fn w4_mutant_killers_launcher_skills_custom_scale_target_classes_and_sync(
         ));
     });
     tick_probe_warp_end(&ctx);
-    assert_eq!(ctx.active_scanner_probes.read().unwrap()[&96_810_000].state, PROBE_STATE_IDLE);
+    assert_eq!(probe_test_helpers::get_probe(&ctx, 96_810_000).unwrap().state, PROBE_STATE_IDLE);
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.fleet_and_social_ops.pending_probe_scans.len(), 1);
         assert!(!snap.sp6_lifecycle.active_scanner_probes.contains_key(&96_810_099));
@@ -1372,7 +1354,7 @@ async fn combat_probe_destination_scanning_launch_offset_and_sov_ore_exclusion_g
     assert_eq!(probe_id_reps.len(), 8);
     let pids: Vec<i64> = probe_id_reps.iter().filter_map(|r| r.as_i64()).collect();
     {
-        let pm = ctx.active_scanner_probes.read().unwrap();
+        let pm = probe_test_helpers::probes_snapshot(&ctx);
         for &pid in &pids {
             let p = pm.get(&pid).expect("active probe");
             let d = DVec3::from_array(p.position).length();
@@ -1459,16 +1441,14 @@ async fn combat_probe_destination_scanning_launch_offset_and_sov_ore_exclusion_g
             *end_ft = 1;
         }
     });
-    if let Ok(mut pm) = ctx.active_scanner_probes.write() {
-        for &pid in &pids {
-            if let Some(p) = pm.get_mut(&pid) {
-                p.warp_end_ft = Some(1);
-            }
-        }
+    for &pid in &pids {
+        probe_test_helpers::mutate_probe(&ctx, pid, |p| {
+            p.warp_end_ft = Some(1);
+        });
     }
     tick_probe_warp_end(&ctx);
     {
-        let pm = ctx.active_scanner_probes.read().unwrap();
+        let pm = probe_test_helpers::probes_snapshot(&ctx);
         for &pid in &pids {
             let p = pm.get(&pid).expect("probe");
             assert_eq!(p.position, [remote_pos.x, remote_pos.y, remote_pos.z]);
@@ -1502,11 +1482,7 @@ async fn reconnect_to_lost_probes_emits_on_new_probe_before_state_changed_gh1121
     p_other_ship.position = [7_000.0, 8_000.0, 9_000.0];
     p_other_ship.destination = [10_000.0, 11_000.0, 12_000.0];
 
-    {
-        let mut map = ctx.active_scanner_probes.write().unwrap();
-        map.insert(p_inactive.probe_id, p_inactive.clone());
-        map.insert(p_other_ship.probe_id, p_other_ship.clone());
-    }
+    probe_test_helpers::seed_probes(&ctx, [p_inactive.clone(), p_other_ship.clone()]);
 
     let _ = ctx.drain_notifications_for_char(char_id);
     let before_ft = ctx.now_blueos_filetime_ticks();
@@ -1533,7 +1509,7 @@ async fn reconnect_to_lost_probes_emits_on_new_probe_before_state_changed_gh1121
     );
 
     {
-        let map = ctx.active_scanner_probes.read().unwrap();
+        let map = probe_test_helpers::probes_snapshot(&ctx);
         for pid in [p_inactive.probe_id, p_other_ship.probe_id] {
             let p = map.get(&pid).expect("reconnected probe retained");
             assert_eq!(p.state, PROBE_STATE_IDLE);
@@ -1632,17 +1608,17 @@ async fn reconnect_to_lost_probes_enforces_cap_filtering_expiry_and_idempotency_
     let launched_unix = now_unix.saturating_sub(120);
 
     {
-        let mut map = ctx.active_scanner_probes.write().unwrap();
+        let mut seeded = Vec::new();
         // 6 already-active probes on current ship leave exactly 2 slots under MAX_PROBES=8.
         for i in 0..6_i64 {
             let pid = 96_800_101 + i;
-            map.insert(pid, make_test_probe(pid, char_id, ship_id, sys_id, 30_013, launched_unix));
+            seeded.push(make_test_probe(pid, char_id, ship_id, sys_id, 30_013, launched_unix));
         }
         // 3 inactive lost probes in caller's system; lowest 2 by probe_id must reconnect.
         for pid in [96_800_110_i64, 96_800_111_i64, 96_800_112_i64] {
             let mut p = make_test_probe(pid, char_id, ship_id, sys_id, 30_013, launched_unix);
             p.state = PROBE_STATE_INACTIVE;
-            map.insert(pid, p);
+            seeded.push(p);
         }
         // 1 overdue inactive probe: must expire instead of reconnecting or emitting OnNewProbe.
         let mut p_expired = make_test_probe(
@@ -1654,14 +1630,15 @@ async fn reconnect_to_lost_probes_enforces_cap_filtering_expiry_and_idempotency_
             now_unix.saturating_sub(4_000),
         );
         p_expired.state = PROBE_STATE_INACTIVE;
-        map.insert(p_expired.probe_id, p_expired);
+        seeded.push(p_expired);
         // 1 inactive probe in another system + 1 inactive probe owned by another character.
         let mut p_other_sys = make_test_probe(96_800_130, char_id, ship_id, other_sys_id, 30_013, launched_unix);
         p_other_sys.state = PROBE_STATE_INACTIVE;
-        map.insert(p_other_sys.probe_id, p_other_sys);
+        seeded.push(p_other_sys);
         let mut p_other_char = make_test_probe(96_800_131, other_char_id, ship_id + 1, sys_id, 30_013, launched_unix);
         p_other_char.state = PROBE_STATE_INACTIVE;
-        map.insert(p_other_char.probe_id, p_other_char);
+        seeded.push(p_other_char);
+        probe_test_helpers::seed_probes(&ctx, seeded);
     }
 
     let _ = ctx.drain_notifications_for_char(char_id);
@@ -1720,7 +1697,7 @@ async fn reconnect_to_lost_probes_enforces_cap_filtering_expiry_and_idempotency_
     assert!(ctx.drain_notifications_for_char(other_char_id).is_empty());
 
     {
-        let map = ctx.active_scanner_probes.read().unwrap();
+        let map = probe_test_helpers::probes_snapshot(&ctx);
         let active_count = map
             .values()
             .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
@@ -1759,12 +1736,10 @@ async fn insert_test_probe_with_ball(
 ) {
     use eve_destiny::{CombatState, SlimItemMeta};
     let launched_unix = ctx.now_unix();
-    if let Ok(mut map) = ctx.active_scanner_probes.write() {
-        map.insert(
-            probe_id,
-            make_test_probe(probe_id, char_id, ship_id, sys_id, 30_013, launched_unix),
-        );
-    }
+    probe_test_helpers::seed_probe(
+        ctx,
+        make_test_probe(probe_id, char_id, ship_id, sys_id, 30_013, launched_unix),
+    );
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
         .spawn_ball_with_meta(
@@ -1837,8 +1812,11 @@ async fn pending_probe_scan_suppressed_after_stargate_jump_and_dock_gh1334() {
     .await
     .unwrap()
     .is_ok());
-    assert_eq!(ctx.active_scanner_probes.read().unwrap()[&pid].state, PROBE_STATE_WARPING);
-    assert!(ctx.active_scanner_probes.read().unwrap()[&pid].warp_end_ft.is_some());
+    {
+        let p = probe_test_helpers::get_probe(&ctx, pid).unwrap();
+        assert_eq!(p.state, PROBE_STATE_WARPING);
+        assert!(p.warp_end_ft.is_some());
+    }
     let _ = ctx.drain_notifications_for_char(char_id);
 
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(&ctx, char_id, ship_id, sys_a);
@@ -1860,9 +1838,9 @@ async fn pending_probe_scan_suppressed_after_stargate_jump_and_dock_gh1334() {
         assert!(snap.fleet_and_social_ops.pending_probe_scans.is_empty());
     });
     {
-        let pm = ctx.active_scanner_probes.read().unwrap();
-        assert_eq!(pm[&pid].state, PROBE_STATE_INACTIVE);
-        assert_eq!(pm[&pid].warp_end_ft, None);
+        let p = probe_test_helpers::get_probe(&ctx, pid).unwrap();
+        assert_eq!(p.state, PROBE_STATE_INACTIVE);
+        assert_eq!(p.warp_end_ft, None);
     }
 
     // B. Docking while probe still active converges server probe state to IDLE without notifications.
@@ -1874,13 +1852,11 @@ async fn pending_probe_scan_suppressed_after_stargate_jump_and_dock_gh1334() {
         }
     });
     sess.solar_system_id = Some(sys_a);
-    {
-        let mut pm = ctx.active_scanner_probes.write().unwrap();
-        let p = pm.get_mut(&pid).unwrap();
+    assert!(probe_test_helpers::mutate_probe(&ctx, pid, |p| {
         p.state = PROBE_STATE_IDLE;
         p.position = [0.0, 0.0, 0.0];
         p.destination = [0.0, 0.0, 0.0];
-    }
+    }));
     assert!(handle_scan_and_wormhole_extras(
         &ctx,
         &mut sess,
@@ -1905,10 +1881,10 @@ async fn pending_probe_scan_suppressed_after_stargate_jump_and_dock_gh1334() {
     tick_probe_warp_end(&ctx);
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
     {
-        let pm = ctx.active_scanner_probes.read().unwrap();
-        assert_eq!(pm[&pid].state, PROBE_STATE_IDLE);
-        assert_eq!(pm[&pid].warp_end_ft, None);
-        assert_eq!(pm[&pid].position, [50_000.0, 0.0, 0.0]);
+        let p = probe_test_helpers::get_probe(&ctx, pid).unwrap();
+        assert_eq!(p.state, PROBE_STATE_IDLE);
+        assert_eq!(p.warp_end_ft, None);
+        assert_eq!(p.position, [50_000.0, 0.0, 0.0]);
     }
 
     // C. GetSystemScanMgr in the new system prunes stale pending scans immediately before scan_end_ft.
@@ -2003,7 +1979,7 @@ async fn pending_probe_scan_suppressed_across_session_reconnect_and_server_resta
         ctx.drain_notifications_for_char(char_id).is_empty(),
         "scan started on prior session_id must not emit notifications after reconnect"
     );
-    assert_eq!(ctx.active_scanner_probes.read().unwrap()[&pid].state, PROBE_STATE_IDLE);
+    assert_eq!(probe_test_helpers::get_probe(&ctx, pid).unwrap().state, PROBE_STATE_IDLE);
 
     // 2. Persisted pending scan across server restart is suppressed even if ReconnectToLostProbes runs first.
     assert!(handle_scan_and_wormhole_extras(
@@ -2027,7 +2003,7 @@ async fn pending_probe_scan_suppressed_across_session_reconnect_and_server_resta
     );
     ctx2.hydrate_server_runtime_from_db();
     assert_eq!(
-        ctx2.active_scanner_probes.read().unwrap()[&pid].state,
+        probe_test_helpers::get_probe(&ctx2, pid).unwrap().state,
         PROBE_STATE_INACTIVE
     );
 
