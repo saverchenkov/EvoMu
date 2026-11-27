@@ -1365,7 +1365,7 @@ pub async fn handle_wrecks_killmails(
             if !ctx.db.with_snapshot(|s| s.items.get(&module_id).is_some_and(|i| i.owner_id == char_id && i.location_id == ship_id)) {
                 return Some(Err(BridgeRpcError { code: "ModuleNotOwnedByShip".into(), message: format!("Module {module_id} is not fitted to active ship {ship_id}"), client_error: None }));
             }
-            with_mut_combat_runtime(ctx, |rt| { rt.entropic_spools.remove(&(ship_id, module_id)); });
+            crate::services::combat_weapons_spool::clear_entropic_spool(ctx, ship_id, module_id);
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 if !sys.request_cycle_deactivation(ship_id, module_id).await.unwrap_or(false) {

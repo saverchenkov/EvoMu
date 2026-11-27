@@ -1360,7 +1360,7 @@ async fn prepare_direct_weapon_shot(
         );
     if is_entropic {
         let is_already_active = ctx.db.with_snapshot(|snap| snap.module_active_states.contains(&module_id))
-            && with_combat_runtime(ctx, |rt| rt.entropic_spools.get(&(ship_id, module_id)).is_some_and(|entry| entry.target_id == target_ball_id));
+            && sys_handle.get_entropic_spool(ship_id, module_id).await.is_some_and(|entry| entry.target_id == target_ball_id);
         if is_already_active {
             return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError { code: "AlreadyActive".into(), message: format!("Module {module_id} is already active"), client_error: None })));
         }

@@ -172,68 +172,6 @@ pub fn schedule_highsec_criminal_concord_if_needed(
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct EntropicSpoolState {
-    pub target_id: i64,
-    pub solar_system_id: u32,
-    pub attacker_char_id: i64,
-    pub attacker_ship_id: i64,
-    pub module_id: i64,
-    pub module_type_id: u32,
-    pub charge_item_id: Option<i64>,
-    pub base_damage: eve_destiny::DamageVector,
-    pub cap_need: f64,
-    pub duration_s: f64,
-    pub cycles: u32,
-    pub elapsed_in_cycle: f64,
-    pub per_cycle_bonus: f64,
-    pub max_bonus: f64,
-    pub current_multiplier: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct InFlightMissileState {
-    pub missile_ball_id: i64,
-    pub solar_system_id: u32,
-    pub attacker_char_id: i64,
-    pub attacker_ship_id: i64,
-    pub launcher_module_id: i64,
-    pub launcher_type_id: u32,
-    pub missile_type_id: u32,
-    pub target_ball_id: i64,
-    pub max_velocity: f64,
-    pub flight_time_s: f64,
-    pub remaining_flight_s: f64,
-    pub hp: f64,
-    pub max_hp: f64,
-    pub base_damage: DamageVector,
-    pub explosion_radius: f64,
-    pub explosion_velocity: f64,
-    pub drf: f64,
-    pub is_fof: bool,
-    pub is_breacher_pod: bool,
-    pub breacher_dot_duration_s: f64,
-    pub breacher_flat_cap: f64,
-    pub breacher_pct_cap: f64,
-    pub destroyed: bool,
-    pub expired: bool,
-    pub impacted: bool,
-    pub applied_damage: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ActiveBreacherDot {
-    pub target_ball_id: i64,
-    pub source_char_id: i64,
-    pub source_ship_id: i64,
-    pub weapon_type_id: u32,
-    pub charge_type_id: u32,
-    pub flat_cap_dps: f64,
-    pub pct_cap_fraction: f64,
-    pub remaining_s: f64,
-    pub tick_damage: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AssistLogEntry {
     pub attacker_char_id: i64,
     pub corporation_id: i64,
@@ -409,9 +347,6 @@ pub struct CombatRuntimeState {
     pub synced_ext_hash: u64,
     #[doc(hidden)]
     pub synced_baseline: Option<std::sync::Arc<eve_db::PersistedCombatCrimewatchState>>,
-    pub entropic_spools: HashMap<(i64, i64), EntropicSpoolState>,
-    pub in_flight_missiles: HashMap<i64, InFlightMissileState>,
-    pub active_breacher_dots: HashMap<i64, ActiveBreacherDot>,
     pub aggression_assist_log: HashMap<i64, Vec<AssistLogEntry>>,
     pub container_lifetimes: HashMap<i64, ContainerLifetimeEntry>,
     pub self_destruct_countdowns: HashMap<i64, SelfDestructCountdown>,
@@ -440,13 +375,18 @@ pub struct CombatRuntimeState {
     pub(crate) extended_npc_weapon_runtime: crate::combat::npc_ai_weapons_loot::SharedExtendedNpcWeaponRuntime,
 }
 
-pub use crate::system_actor::{DroneMiningState, DroneSpaceState};
+pub use crate::system_actor::{
+    ActiveBreacherDot, DroneMiningState, DroneSpaceState, EntropicSpoolState, InFlightMissileState,
+};
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct PersistedCombatExtendedPayload {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     entropic_spools: Vec<((i64, i64), EntropicSpoolState)>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     in_flight_missiles: HashMap<i64, InFlightMissileState>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     active_breacher_dots: HashMap<i64, ActiveBreacherDot>,
     aggression_assist_log: HashMap<i64, Vec<AssistLogEntry>>,
     container_lifetimes: HashMap<i64, ContainerLifetimeEntry>,
@@ -467,6 +407,28 @@ struct PersistedCombatExtendedPayload {
     npc_scrambled_ships: HashMap<u32, std::collections::HashSet<i64>>,
     npc_sec_gain_intervals: Vec<((i64, i32), (u64, f64))>,
     self_destruct_sim_remaining_secs: HashMap<i64, f64>,
+}
+
+impl PersistedCombatExtendedPayload {
+    fn legacy_weapon_effects_parts(
+        &self,
+    ) -> (
+        Vec<((i64, i64), EntropicSpoolState)>,
+        HashMap<i64, InFlightMissileState>,
+        HashMap<i64, ActiveBreacherDot>,
+    ) {
+        let Self {
+            entropic_spools,
+            in_flight_missiles,
+            active_breacher_dots,
+            ..
+        } = self;
+        (
+            entropic_spools.clone(),
+            in_flight_missiles.clone(),
+            active_breacher_dots.clone(),
+        )
+    }
 }
 
 impl CombatRuntimeState {
@@ -627,9 +589,6 @@ impl CombatRuntimeState {
         self.sync_core_from_persisted(p);
 
         if p.extended_runtime_json.is_empty() {
-            self.entropic_spools.clear();
-            self.in_flight_missiles.clear();
-            self.active_breacher_dots.clear();
             self.aggression_assist_log.clear();
             self.container_lifetimes.clear();
             self.self_destruct_countdowns.clear();
@@ -651,9 +610,6 @@ impl CombatRuntimeState {
         } else if let Ok(ext) =
             serde_json::from_str::<PersistedCombatExtendedPayload>(&p.extended_runtime_json)
         {
-            self.entropic_spools = ext.entropic_spools.into_iter().collect();
-            self.in_flight_missiles = ext.in_flight_missiles;
-            self.active_breacher_dots = ext.active_breacher_dots;
             self.aggression_assist_log = ext.aggression_assist_log;
             self.container_lifetimes = ext.container_lifetimes;
             self.self_destruct_countdowns = ext.self_destruct_countdowns;
@@ -677,10 +633,7 @@ impl CombatRuntimeState {
     }
 
     fn has_extended_runtime_state(&self) -> bool {
-        !self.entropic_spools.is_empty()
-            || !self.in_flight_missiles.is_empty()
-            || !self.active_breacher_dots.is_empty()
-            || !self.aggression_assist_log.is_empty()
+        !self.aggression_assist_log.is_empty()
             || !self.container_lifetimes.is_empty()
             || !self.self_destruct_countdowns.is_empty()
             || !self.self_destruct_generations.is_empty()
@@ -700,16 +653,24 @@ impl CombatRuntimeState {
             || !self.npc_sec_gain_intervals.is_empty()
     }
 
-    fn encode_extended_runtime_json(&self) -> String {
-        if self.has_extended_runtime_state() {
+    fn encode_extended_runtime_json_preserving(&self, existing_json: &str) -> String {
+        let (legacy_spools, legacy_missiles, legacy_breachers) = if existing_json.is_empty() {
+            (Vec::new(), HashMap::new(), HashMap::new())
+        } else if let Ok(prev) = serde_json::from_str::<PersistedCombatExtendedPayload>(existing_json)
+        {
+            prev.legacy_weapon_effects_parts()
+        } else {
+            (Vec::new(), HashMap::new(), HashMap::new())
+        };
+        if self.has_extended_runtime_state()
+            || !legacy_spools.is_empty()
+            || !legacy_missiles.is_empty()
+            || !legacy_breachers.is_empty()
+        {
             let mut payload = PersistedCombatExtendedPayload {
-                entropic_spools: self
-                    .entropic_spools
-                    .iter()
-                    .map(|(k, v)| (*k, v.clone()))
-                    .collect(),
-                in_flight_missiles: self.in_flight_missiles.clone(),
-                active_breacher_dots: self.active_breacher_dots.clone(),
+                entropic_spools: legacy_spools,
+                in_flight_missiles: legacy_missiles,
+                active_breacher_dots: legacy_breachers,
                 aggression_assist_log: self.aggression_assist_log.clone(),
                 container_lifetimes: self.container_lifetimes.clone(),
                 self_destruct_countdowns: self.self_destruct_countdowns.clone(),
@@ -741,7 +702,6 @@ impl CombatRuntimeState {
                     .collect(),
                 self_destruct_sim_remaining_secs: self.self_destruct_sim_remaining_secs.clone(),
             };
-            payload.entropic_spools.sort_by_key(|(k, _)| *k);
             payload.sentry_gun_aggression.sort_by_key(|(k, _)| *k);
             payload.authorized_shipping_storage.sort_unstable();
             payload.npc_sec_gain_intervals.sort_by_key(|(k, _)| *k);
@@ -762,7 +722,8 @@ impl CombatRuntimeState {
         dst.npc_timers = self.npc_timers.clone();
         dst.disapproval_flags = self.disapproval_flags.clone();
         dst.corp_aggression_settings = self.corp_aggression_settings.clone();
-        dst.extended_runtime_json = self.encode_extended_runtime_json();
+        dst.extended_runtime_json =
+            self.encode_extended_runtime_json_preserving(&dst.extended_runtime_json);
     }
 
     /// Serializes runtime-owned fields on top of `current_db` so DB-owned fields are never clobbered.
@@ -955,10 +916,12 @@ fn merge_extended_payload_3way(
         &db.self_destruct_sim_remaining_secs,
         &ram.self_destruct_sim_remaining_secs,
     );
+    let (entropic_spools, in_flight_missiles, active_breacher_dots) =
+        db.legacy_weapon_effects_parts();
     PersistedCombatExtendedPayload {
-        entropic_spools: merge_pair_vec_3way(&base.entropic_spools, &db.entropic_spools, &ram.entropic_spools),
-        in_flight_missiles: merge_map_3way(&base.in_flight_missiles, &db.in_flight_missiles, &ram.in_flight_missiles),
-        active_breacher_dots: merge_map_3way(&base.active_breacher_dots, &db.active_breacher_dots, &ram.active_breacher_dots),
+        entropic_spools,
+        in_flight_missiles,
+        active_breacher_dots,
         aggression_assist_log: merge_map_3way(&base.aggression_assist_log, &db.aggression_assist_log, &ram.aggression_assist_log),
         container_lifetimes: merge_map_3way(&base.container_lifetimes, &db.container_lifetimes, &ram.container_lifetimes),
         self_destruct_countdowns,

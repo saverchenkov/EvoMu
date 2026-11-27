@@ -1263,29 +1263,32 @@ fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
             .authorized_shipping_storage
             .iter()
             .any(|&(cid, oid)| cid == CHAR_B_ID || oid == CORP_B_ID),
-        entropic_spools: rt
-            .entropic_spools
-            .iter()
-            .filter(|(&(s, t), _)| b_ships.contains(&s) || b_ships.contains(&t))
-            .map(|(&k, v)| (k, format!("{v:?}")))
+        entropic_spools: fix
+            .ctx
+            .systems
+            .active_entropic_spools_matching(|&(s, t), _| b_ships.contains(&s) || b_ships.contains(&t))
+            .into_iter()
+            .map(|(k, v)| (k, format!("{v:?}")))
             .collect(),
-        active_breacher_dots: rt
-            .active_breacher_dots
-            .iter()
-            .filter(|(&tid, d)| {
+        active_breacher_dots: fix
+            .ctx
+            .systems
+            .active_breacher_dots_matching(|&tid, d| {
                 b_ships.contains(&tid) || d.source_char_id == CHAR_B_ID || b_ships.contains(&d.source_ship_id)
             })
-            .map(|(&k, v)| (k, format!("{v:?}")))
+            .into_iter()
+            .map(|(k, v)| (k, format!("{v:?}")))
             .collect(),
-        in_flight_missiles: rt
-            .in_flight_missiles
-            .iter()
-            .filter(|(_, m)| {
+        in_flight_missiles: fix
+            .ctx
+            .systems
+            .active_in_flight_missiles_matching(|_, m| {
                 m.attacker_char_id == CHAR_B_ID
                     || b_ships.contains(&m.attacker_ship_id)
                     || b_ships.contains(&m.target_ball_id)
             })
-            .map(|(&k, v)| (k, format!("{v:?}")))
+            .into_iter()
+            .map(|(k, v)| (k, format!("{v:?}")))
             .collect(),
     })
 }

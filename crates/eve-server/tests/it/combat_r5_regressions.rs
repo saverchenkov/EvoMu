@@ -23,8 +23,8 @@ use eve_proto::PyRep;
 use eve_server::combat::death_pipeline::execute_death_pipeline_sync_inner;
 use eve_server::router::{ActiveScannerProbe, ServerContext};
 use eve_server::services::combat_crimewatch::{
-    record_killmail_assist_action, step_combat_system, with_combat_runtime,
-    with_mut_combat_runtime, ActiveBreacherDot, EntropicSpoolState, SafetyLevel,
+    record_killmail_assist_action, step_combat_system, ActiveBreacherDot, EntropicSpoolState,
+    SafetyLevel,
 };
 use eve_server::services::pve_exploration::{
     with_pve_exploration_reg, HackingGameSession, HackingNodeKind, HackingTileState, PveSiteInstance,
@@ -290,18 +290,16 @@ async fn test_r5_202_207_weapon_zero_lock_deactivation_and_vorton_secondary_arc_
         snap.module_active_states.insert(gun_id);
     });
     ctx.invalidate_ship_fitting(ship_id);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.entropic_spools.insert(
-            (ship_id, gun_id),
-            EntropicSpoolState {
-                target_id: npc_ball_id, solar_system_id: sys_id, attacker_char_id: char_id,
-                attacker_ship_id: ship_id, module_id: gun_id, module_type_id: 486,
-                charge_item_id: Some(ammo_id), base_damage: DamageVector::new(10.0, 10.0, 10.0, 10.0),
-                cap_need: 1.0, duration_s: 3.0, cycles: 5, elapsed_in_cycle: 0.0,
-                per_cycle_bonus: 0.1, max_bonus: 1.5, current_multiplier: 1.5,
-            },
-        );
-    });
+    sys_handle
+        .update_entropic_spool(EntropicSpoolState {
+            target_id: npc_ball_id, solar_system_id: sys_id, attacker_char_id: char_id,
+            attacker_ship_id: ship_id, module_id: gun_id, module_type_id: 486,
+            charge_item_id: Some(ammo_id), base_damage: DamageVector::new(10.0, 10.0, 10.0, 10.0),
+            cap_need: 1.0, duration_s: 3.0, cycles: 5, elapsed_in_cycle: 0.0,
+            per_cycle_bonus: 0.1, max_bonus: 1.5, current_multiplier: 1.5,
+        })
+        .await
+        .unwrap();
 
     let err = {
         let mut harness = common::borrow_wire_harness(&ctx, &mut sess);
@@ -311,7 +309,7 @@ async fn test_r5_202_207_weapon_zero_lock_deactivation_and_vorton_secondary_arc_
             .expect_err("Firing weapon with zero locked targets must fail")
     };
     assert_eq!(err.code, "TargetNotLocked");
-    let spool_exists = with_combat_runtime(&ctx, |rt| rt.entropic_spools.contains_key(&(ship_id, gun_id)));
+    let spool_exists = sys_handle.entropic_spool(ship_id, gun_id).is_some();
     assert!(!spool_exists, "Entropic spool must reset when lock check fails");
 }
 
@@ -511,18 +509,17 @@ async fn test_r5_208_209_breacher_dot_impact_system_scoping_and_smartbomb_wreck_
     let mut atk_sess = setup_pilot_in_space(&ctx, 82081, atk_id, 1_000_125, atk_ship, 645, sys_a, DVec3::ZERO).await;
     let _vic_sess = setup_pilot_in_space(&ctx, 82082, vic_id, 1_000_126, vic_ship, 587, sys_a, DVec3::new(1_000.0, 0.0, 0.0)).await;
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_breacher_dots.insert(
-            vic_ship,
-            ActiveBreacherDot {
-                target_ball_id: vic_ship, source_char_id: atk_id, source_ship_id: atk_ship,
-                weapon_type_id: 486, charge_type_id: 178, flat_cap_dps: 100.0,
-                pct_cap_fraction: 0.01, remaining_s: 50.0, tick_damage: 100.0,
-            },
-        );
-    });
+    let sys_handle_a = ctx.systems.get_or_spawn(sys_a);
+    sys_handle_a
+        .upsert_active_breacher_dot(ActiveBreacherDot {
+            target_ball_id: vic_ship, solar_system_id: sys_a, source_char_id: atk_id, source_ship_id: atk_ship,
+            weapon_type_id: 486, charge_type_id: 178, flat_cap_dps: 100.0,
+            pct_cap_fraction: 0.01, remaining_s: 50.0, tick_damage: 100.0,
+        })
+        .await
+        .unwrap();
     step_combat_system(&ctx, sys_b, 10.0).await;
-    let rem_after_other_sys = with_combat_runtime(&ctx, |rt| rt.active_breacher_dots[&vic_ship].remaining_s);
+    let rem_after_other_sys = sys_handle_a.active_breacher_dot(vic_ship).unwrap().remaining_s;
     assert!((rem_after_other_sys - 50.0).abs() < 1e-6, "Stepping another solar system must not decrement Breacher DoT timer");
 
     let sys_handle = ctx.systems.get_or_spawn(sys_a);

@@ -459,9 +459,7 @@ async fn laser_capacitor_crystal_volatility_shatter_and_fof_auto_target() {
 #[tokio::test]
 async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs() {
     use crate::rng::TEST_MODE_DEFAULT_SEED;
-    use crate::services::combat_crimewatch::{
-        set_char_safety_level, with_mut_combat_runtime, SafetyLevel,
-    };
+    use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
     use eve_sde::attr_ids;
 
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
@@ -777,11 +775,12 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
             .await.unwrap().unwrap_err().code,
         "AlreadyActive"
     );
-    with_mut_combat_runtime(&ctx, |rt| {
-        let entry = rt.entropic_spools.get_mut(&(ship_id, ent_id)).unwrap();
+    {
+        let mut entry = sys_handle.entropic_spool(ship_id, ent_id).unwrap();
         entry.cycles = 3;
         entry.current_multiplier = 1.21;
-    });
+        sys_handle.update_entropic_spool(entry).await.unwrap();
+    }
     ctx.db.with_mut_snapshot(|s| { s.module_active_states.remove(&ent_id); });
     ctx.clear_all_reactivation_delays();
     let ent2 = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(ent_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_primary_id)], &kwargs)
@@ -1592,9 +1591,7 @@ async fn weapon_ammo_depletion_one_to_zero_emits_item_tombstone_and_sublocation_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh1124() {
-    use crate::services::combat_crimewatch::{
-        set_char_safety_level, with_combat_runtime, SafetyLevel,
-    };
+    use crate::services::combat_crimewatch::{set_char_safety_level, SafetyLevel};
     use crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles;
 
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
@@ -1812,7 +1809,7 @@ async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh
     .expect_err("untrained preloaded Entropic charge must fail");
     assert_eq!(err_ent_pre.code, "SkillPrerequisitesNotMet");
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&entropic_t2_slot_ammo].quantity), 5);
-    assert!(with_combat_runtime(&ctx, |rt| !rt.entropic_spools.contains_key(&(ship_id, entropic_preloaded_id))));
+    assert!(ctx.systems.active_entropic_spool(ship_id, entropic_preloaded_id).is_none());
 
     // 2. Preloaded untrained T2 charge on Vorton `handle_weapons` -> SkillPrerequisitesNotMet
     let err_vor_pre = handle_weapons(
@@ -1861,7 +1858,7 @@ async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh
             );
             assert!(!s.module_active_charges.contains_key(&entropic_auto_id), "{label}: no active charge recorded");
         });
-        assert!(with_combat_runtime(&ctx, |rt| !rt.entropic_spools.contains_key(&(ship_id, entropic_auto_id))), "{label}: no spool started");
+        assert!(ctx.systems.active_entropic_spool(ship_id, entropic_auto_id).is_none(), "{label}: no spool started");
         let notifs = ctx.drain_notifications_for_char(char_id);
         assert!(
             !notifs.iter().any(|n| matches!(n.event.as_str(), "OnItemChange" | "OnGodmaPrimeItem" | "OnModuleAttributeChanges" | "OnChargeLoadedToModule")),
@@ -1926,9 +1923,7 @@ async fn handle_weapons_and_fastpath_enforce_skill_prereqs_and_gated_autoload_gh
             .expect("T1 charge loaded into HiSlot2");
         assert_eq!(slot_charge.type_id, 19_878);
         assert_eq!(slot_charge.quantity, 9, "10 loaded then 1 round fired -> 9 remaining");
-        assert!(with_combat_runtime(&ctx, |rt| {
-            rt.entropic_spools.get(&(ship_id, entropic_auto_id)).and_then(|st| st.charge_item_id) == Some(slot_charge.item_id)
-        }));
+        assert!(ctx.systems.active_entropic_spool(ship_id, entropic_auto_id).and_then(|st| st.charge_item_id) == Some(slot_charge.item_id));
     });
     let ok_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(ok_notifs.iter().any(|n| n.event == "OnGodmaPrimeItem"));
@@ -2686,7 +2681,7 @@ async fn handle_weapons_missile_and_breacher_surface_spawn_and_oor_no_ammo_burn_
     assert_eq!(brl_ok.dict_get("isBreacherPod"), Some(&PyRep::Bool(true)));
     assert!(brl_ok.dict_get("breacherTickDPS").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
     assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&brl_ammo_id).map(|i| i.quantity)), Some(4));
-    assert!(with_combat_runtime(&ctx, |rt| rt.active_breacher_dots.contains_key(&target_hit)));
+    assert!(ctx.systems.active_breacher_dot(target_hit).is_some());
 }
 
 #[tokio::test]

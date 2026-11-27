@@ -708,8 +708,6 @@ async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool
     });
     ctx.invalidate_ship_fitting(ship_id);
 
-    use crate::services::combat_crimewatch::with_combat_runtime;
-
     spawn_combat_ball(&ctx, high_sys, ship_id, 23_915, DVec3::ZERO, 1_000.0).await;
     spawn_combat_ball(&ctx, high_sys, vic_ship_a, 23_915, DVec3::new(1_000.0, 0.0, 0.0), 50_000.0).await;
     lock_target(&ctx, high_sys, ship_id, vic_ship_a).await;
@@ -730,7 +728,7 @@ async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool
         .unwrap_err();
         assert_eq!(err.code, "CantDoInCurrentSafetyLevel");
         assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].quantity), 20);
-        assert!(with_combat_runtime(&ctx, |rt| rt.entropic_spools.is_empty()));
+        assert!(ctx.systems.active_entropic_spools_matching(|_, _| true).is_empty());
     }
 
     // 2. Low-sec Green safety must reject suspect aggression BEFORE ammo or spool mutation
@@ -758,7 +756,7 @@ async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool
     .unwrap_err();
     assert_eq!(low_green_err.code, "CantDoInCurrentSafetyLevel");
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].quantity), 20);
-    assert!(with_combat_runtime(&ctx, |rt| rt.entropic_spools.is_empty()));
+    assert!(ctx.systems.active_entropic_spools_matching(|_, _| true).is_empty());
 
     // 3. Switch to Red safety in low-sec and build Entropic Disintegrator spool on Target A (initial shot + 1 tick cycle)
     set_char_safety_level(&ctx, char_id, SafetyLevel::Red);
@@ -777,20 +775,20 @@ async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool
     .unwrap();
     let dmg1 = hit1.dict_get("appliedDamage").unwrap().as_f64().unwrap();
     assert!(dmg1 > 0.0);
-    with_combat_runtime(&ctx, |rt| {
-        let st = &rt.entropic_spools[&(ship_id, mod_id)];
+    {
+        let st = low_handle.entropic_spool(ship_id, mod_id).unwrap();
         assert_eq!(st.cycles, 0);
         assert_eq!(st.target_id, vic_ship_a);
-    });
+    }
 
     for _ in 0..2 {
         let _ = low_handle.step_manual(0.6).await;
     }
-    with_combat_runtime(&ctx, |rt| {
-        let st = &rt.entropic_spools[&(ship_id, mod_id)];
+    {
+        let st = low_handle.entropic_spool(ship_id, mod_id).unwrap();
         assert_eq!(st.cycles, 1);
         assert_eq!(st.target_id, vic_ship_a);
-    });
+    }
     let qty_before_rejections = ctx.db.with_snapshot(|s| s.items[&charge_id].quantity);
     assert_eq!(qty_before_rejections, 18);
 
@@ -828,11 +826,11 @@ async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool
     assert_eq!(tgt_teth.code, "TargetInvulnerable");
     low_handle.try_update_combat_state(vic_ship_b, |cs| cs.is_tethered = false);
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].quantity), 18);
-    with_combat_runtime(&ctx, |rt| {
-        let st = &rt.entropic_spools[&(ship_id, mod_id)];
+    {
+        let st = low_handle.entropic_spool(ship_id, mod_id).unwrap();
         assert_eq!(st.cycles, 1);
         assert_eq!(st.target_id, vic_ship_a);
-    });
+    }
 
     // 5. Switching target to Target B must reset Entropic Disintegrator spool back to cycle 0
     let hit_b1 = call_dogma_activate(
@@ -848,11 +846,11 @@ async fn issue_542_dogma_activate_safety_tether_and_entropic_target_switch_spool
     .unwrap();
     let dmg_b1 = hit_b1.dict_get("appliedDamage").unwrap().as_f64().unwrap();
     assert!(dmg_b1 > 0.0);
-    with_combat_runtime(&ctx, |rt| {
-        let st = &rt.entropic_spools[&(ship_id, mod_id)];
+    {
+        let st = low_handle.entropic_spool(ship_id, mod_id).unwrap();
         assert_eq!(st.cycles, 0);
         assert_eq!(st.target_id, vic_ship_b);
-    });
+    }
 }
 
 #[tokio::test]

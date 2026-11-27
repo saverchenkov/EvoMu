@@ -332,8 +332,9 @@ async fn activate_missile_and_breacher_launcher_fof_defer_and_dot_application() 
     .await
     .unwrap();
     assert_eq!(py_val(&fof_rep, "inFlight"), Some(&PyRep::Bool(true)));
+    let sys_handle = ctx.systems.get_handle(sys_id).unwrap();
     let fof_ball = py_val(&fof_rep, "missileBallID").and_then(PyRep::as_i64).unwrap();
-    assert!(with_combat_runtime(&ctx, |rt| rt.in_flight_missiles.contains_key(&fof_ball)));
+    assert!(sys_handle.in_flight_missile(fof_ball).is_some());
 
     // 2. Non-deferred Breacher Pod impacts immediately and activates DoT
     let br_rep = activate_missile_or_breacher_launcher(
@@ -359,5 +360,5 @@ async fn activate_missile_and_breacher_launcher_fof_defer_and_dot_application() 
     assert_eq!(py_val(&br_rep, "impacted"), Some(&PyRep::Bool(true)));
     assert_eq!(py_val(&br_rep, "isBreacherPod"), Some(&PyRep::Bool(true)));
     assert!(py_val(&br_rep, "breacherTickDPS").and_then(PyRep::as_f64).unwrap_or(0.0) > 0.0);
-    assert!(with_combat_runtime(&ctx, |rt| rt.active_breacher_dots.contains_key(&target_ship)));
+    assert!(sys_handle.active_breacher_dot(target_ship).is_some());
 }

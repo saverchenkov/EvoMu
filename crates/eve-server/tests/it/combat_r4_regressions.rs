@@ -333,22 +333,21 @@ async fn test_r4_155_156_smartbomb_safety_invulnerability_and_breacher_dot_letha
             },
         )
         .await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_breacher_dots.insert(
-            vic_ship_id,
-            ActiveBreacherDot {
-                target_ball_id: vic_ship_id,
-                source_char_id: atk_id,
-                source_ship_id: atk_ship_id,
-                weapon_type_id: 83482,
-                charge_type_id: 83485,
-                flat_cap_dps: 500.0,
-                pct_cap_fraction: 0.5,
-                remaining_s: 10.0,
-                tick_damage: 50.0,
-            },
-        );
-    });
+    sys_handle
+        .upsert_active_breacher_dot(ActiveBreacherDot {
+            target_ball_id: vic_ship_id,
+            solar_system_id: jita_sys,
+            source_char_id: atk_id,
+            source_ship_id: atk_ship_id,
+            weapon_type_id: 83482,
+            charge_type_id: 83485,
+            flat_cap_dps: 500.0,
+            pct_cap_fraction: 0.5,
+            remaining_s: 10.0,
+            tick_damage: 50.0,
+        })
+        .await
+        .unwrap();
     step_combat_system(&ctx, jita_sys, 1.0).await;
     assert!(
         sys_handle

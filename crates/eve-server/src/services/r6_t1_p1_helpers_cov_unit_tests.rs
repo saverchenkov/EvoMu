@@ -6,7 +6,7 @@
 use super::*;
 use crate::router::{ActiveFighterSquadron, ServerContext};
 use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
-use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, ActiveBreacherDot};
+use crate::services::combat_crimewatch::ActiveBreacherDot;
 use eve_db::WorldRepository;
 use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_proto::PyRep;
@@ -235,42 +235,42 @@ async fn breacher_dots_invulnerability_jump_state_wormhole_and_point_parsing() {
     assert!(!is_target_invulnerable_or_tethered(&ctx, target_id, &cs_vuln, now_unix));
     assert!(is_target_invulnerable_or_tethered(&ctx, tethered_id, &cs_teth, now_unix));
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_breacher_dots.insert(
-            target_id,
-            ActiveBreacherDot {
-                target_ball_id: target_id,
-                source_char_id: 90_000_001,
-                source_ship_id: 98_500_999,
-                weapon_type_id: 2873,
-                charge_type_id: 192,
-                flat_cap_dps: 50.0,
-                pct_cap_fraction: 0.05,
-                remaining_s: 2.0,
-                tick_damage: 0.0,
-            },
-        );
-        rt.active_breacher_dots.insert(
-            tethered_id,
-            ActiveBreacherDot {
-                target_ball_id: tethered_id,
-                source_char_id: 90_000_001,
-                source_ship_id: 98_500_999,
-                weapon_type_id: 2873,
-                charge_type_id: 192,
-                flat_cap_dps: 50.0,
-                pct_cap_fraction: 0.05,
-                remaining_s: 0.5,
-                tick_damage: 0.0,
-            },
-        );
-    });
+    sys_handle
+        .upsert_active_breacher_dot(ActiveBreacherDot {
+            target_ball_id: target_id,
+            solar_system_id: sys_id,
+            source_char_id: 90_000_001,
+            source_ship_id: 98_500_999,
+            weapon_type_id: 2873,
+            charge_type_id: 192,
+            flat_cap_dps: 50.0,
+            pct_cap_fraction: 0.05,
+            remaining_s: 2.0,
+            tick_damage: 0.0,
+        })
+        .await
+        .unwrap();
+    sys_handle
+        .upsert_active_breacher_dot(ActiveBreacherDot {
+            target_ball_id: tethered_id,
+            solar_system_id: sys_id,
+            source_char_id: 90_000_001,
+            source_ship_id: 98_500_999,
+            weapon_type_id: 2873,
+            charge_type_id: 192,
+            flat_cap_dps: 50.0,
+            pct_cap_fraction: 0.05,
+            remaining_s: 0.5,
+            tick_damage: 0.0,
+        })
+        .await
+        .unwrap();
 
     step_active_breacher_dots(&ctx, &sys_handle, sys_id, 1.0).await;
     let after_cs = sys_handle.get_combat_state(target_id).await.unwrap().unwrap();
     assert!(after_cs.shield_hp < 500.0);
     // Tethered dot expired after dt = 1.0
-    assert!(with_combat_runtime(&ctx, |rt| !rt.active_breacher_dots.contains_key(&tethered_id)));
+    assert!(sys_handle.active_breacher_dot(tethered_id).is_none());
 
     // apply_preserved_combat_state
     let mut prev = CombatState::default();
@@ -732,6 +732,7 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
 
     let mk_dot = |tid: i64, src_char: i64, rem_s: f64| ActiveBreacherDot {
         target_ball_id: tid,
+        solar_system_id: sys_id,
         source_char_id: src_char,
         source_ship_id: src_ship,
         weapon_type_id: 2873,
@@ -741,22 +742,22 @@ async fn r6_t1_p1_helpers_extra_edge_branches_and_mutations() {
         remaining_s: rem_s,
         tick_damage: 0.0,
     };
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_breacher_dots.insert(t_missing, mk_dot(t_missing, 90_000_001, 2.0));
-        rt.active_breacher_dots.insert(t_invuln_keep, mk_dot(t_invuln_keep, 90_000_001, 3.0));
-        rt.active_breacher_dots.insert(t_hull_only, mk_dot(t_hull_only, 90_000_001, 0.4));
-        rt.active_breacher_dots.insert(t_fatal, mk_dot(t_fatal, 90_000_001, 5.0));
-        rt.active_breacher_dots.insert(t_no_src, mk_dot(t_no_src, 0, 5.0));
-        rt.active_breacher_dots.insert(t_module_cloaked, mk_dot(t_module_cloaked, 90_000_001, 3.0));
-    });
+    for dot in [
+        mk_dot(t_missing, 90_000_001, 2.0),
+        mk_dot(t_invuln_keep, 90_000_001, 3.0),
+        mk_dot(t_hull_only, 90_000_001, 0.4),
+        mk_dot(t_fatal, 90_000_001, 5.0),
+        mk_dot(t_no_src, 0, 5.0),
+        mk_dot(t_module_cloaked, 90_000_001, 3.0),
+    ] {
+        sys_handle.upsert_active_breacher_dot(dot).await.unwrap();
+    }
 
     step_active_breacher_dots(&ctx, &sys_handle, sys_id, 1.0).await;
-    with_combat_runtime(&ctx, |rt| {
-        assert!((rt.active_breacher_dots[&t_invuln_keep].remaining_s - 2.0).abs() < 1e-6);
-        assert!(!rt.active_breacher_dots.contains_key(&t_hull_only));
-        assert!(!rt.active_breacher_dots.contains_key(&t_fatal));
-        assert!(rt.active_breacher_dots.contains_key(&t_no_src));
-    });
+    assert!((sys_handle.active_breacher_dot(t_invuln_keep).unwrap().remaining_s - 2.0).abs() < 1e-6);
+    assert!(sys_handle.active_breacher_dot(t_hull_only).is_none());
+    assert!(sys_handle.active_breacher_dot(t_fatal).is_none());
+    assert!(sys_handle.active_breacher_dot(t_no_src).is_some());
     assert_eq!(sys_handle.get_combat_state(t_invuln_keep).await.unwrap().unwrap().shield_hp, 100.0);
     let cloaked_after_dot = sys_handle.get_combat_state(t_module_cloaked).await.unwrap().unwrap();
     assert!(cloaked_after_dot.shield_hp < 100.0, "BF-02: breacher DoT must damage module-cloaked ship");
@@ -959,22 +960,21 @@ async fn step_active_breacher_dots_total_hp_damage_ratios_and_zero_gates_pin_mut
     }
 
     // 1. dt == 0.0 with source_char_id > 0: applied_dmg == 0.0 -> NO combat log or damage state notifications
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_breacher_dots.insert(
-            t_layered,
-            ActiveBreacherDot {
-                target_ball_id: t_layered,
-                source_char_id: attacker_id,
-                source_ship_id: src_ship,
-                weapon_type_id: 2873,
-                charge_type_id: 192,
-                flat_cap_dps: 200.0,
-                pct_cap_fraction: 0.05,
-                remaining_s: 5.0,
-                tick_damage: 0.0,
-            },
-        );
-    });
+    sys_handle
+        .upsert_active_breacher_dot(ActiveBreacherDot {
+            target_ball_id: t_layered,
+            solar_system_id: sys_id,
+            source_char_id: attacker_id,
+            source_ship_id: src_ship,
+            weapon_type_id: 2873,
+            charge_type_id: 192,
+            flat_cap_dps: 200.0,
+            pct_cap_fraction: 0.05,
+            remaining_s: 5.0,
+            tick_damage: 0.0,
+        })
+        .await
+        .unwrap();
     let _ = ctx.drain_notifications_for_char(attacker_id);
     step_active_breacher_dots(&ctx, &sys_handle, sys_id, 0.0).await;
     let zero_dt_notifs = ctx.drain_notifications_for_char(attacker_id);
@@ -988,23 +988,22 @@ async fn step_active_breacher_dots_total_hp_damage_ratios_and_zero_gates_pin_mut
 
     // 2. source_char_id == 0 with positive damage: deals exact pct_cap_fraction * (500 + 300 + 200) = 50.0,
     //    but emits NO combat log / damage state notification for attacker_id
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_breacher_dots.remove(&t_layered);
-        rt.active_breacher_dots.insert(
-            t_no_src,
-            ActiveBreacherDot {
-                target_ball_id: t_no_src,
-                source_char_id: 0,
-                source_ship_id: src_ship,
-                weapon_type_id: 2873,
-                charge_type_id: 192,
-                flat_cap_dps: 200.0,
-                pct_cap_fraction: 0.05,
-                remaining_s: 5.0,
-                tick_damage: 0.0,
-            },
-        );
-    });
+    let _ = sys_handle.remove_active_breacher_dot(t_layered).await.unwrap();
+    sys_handle
+        .upsert_active_breacher_dot(ActiveBreacherDot {
+            target_ball_id: t_no_src,
+            solar_system_id: sys_id,
+            source_char_id: 0,
+            source_ship_id: src_ship,
+            weapon_type_id: 2873,
+            charge_type_id: 192,
+            flat_cap_dps: 200.0,
+            pct_cap_fraction: 0.05,
+            remaining_s: 5.0,
+            tick_damage: 0.0,
+        })
+        .await
+        .unwrap();
     step_active_breacher_dots(&ctx, &sys_handle, sys_id, 1.0).await;
     let no_src_notifs = ctx.drain_notifications_for_char(attacker_id);
     assert!(
@@ -1016,37 +1015,39 @@ async fn step_active_breacher_dots_total_hp_damage_ratios_and_zero_gates_pin_mut
     );
 
     // 3. Layered total_max_hp (500+300+200 = 1000 * 0.05 = 50.0) & partial armor/hull ratios (0.0, 0.5, 0.5)
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_breacher_dots.clear();
-        rt.active_breacher_dots.insert(
-            t_layered,
-            ActiveBreacherDot {
-                target_ball_id: t_layered,
-                source_char_id: attacker_id,
-                source_ship_id: src_ship,
-                weapon_type_id: 2873,
-                charge_type_id: 192,
-                flat_cap_dps: 200.0,
-                pct_cap_fraction: 0.05,
-                remaining_s: 5.0,
-                tick_damage: 0.0,
-            },
-        );
-        rt.active_breacher_dots.insert(
-            t_partial,
-            ActiveBreacherDot {
-                target_ball_id: t_partial,
-                source_char_id: attacker_id,
-                source_ship_id: src_ship,
-                weapon_type_id: 2873,
-                charge_type_id: 192,
-                flat_cap_dps: 50.0,
-                pct_cap_fraction: 0.25,
-                remaining_s: 5.0,
-                tick_damage: 0.0,
-            },
-        );
-    });
+    for dot in sys_handle.active_breacher_dots_snapshot().await {
+        let _ = sys_handle.remove_active_breacher_dot(dot.target_ball_id).await;
+    }
+    sys_handle
+        .upsert_active_breacher_dot(ActiveBreacherDot {
+            target_ball_id: t_layered,
+            solar_system_id: sys_id,
+            source_char_id: attacker_id,
+            source_ship_id: src_ship,
+            weapon_type_id: 2873,
+            charge_type_id: 192,
+            flat_cap_dps: 200.0,
+            pct_cap_fraction: 0.05,
+            remaining_s: 5.0,
+            tick_damage: 0.0,
+        })
+        .await
+        .unwrap();
+    sys_handle
+        .upsert_active_breacher_dot(ActiveBreacherDot {
+            target_ball_id: t_partial,
+            solar_system_id: sys_id,
+            source_char_id: attacker_id,
+            source_ship_id: src_ship,
+            weapon_type_id: 2873,
+            charge_type_id: 192,
+            flat_cap_dps: 50.0,
+            pct_cap_fraction: 0.25,
+            remaining_s: 5.0,
+            tick_damage: 0.0,
+        })
+        .await
+        .unwrap();
     let _ = ctx.drain_notifications_for_char(attacker_id);
     step_active_breacher_dots(&ctx, &sys_handle, sys_id, 1.0).await;
 

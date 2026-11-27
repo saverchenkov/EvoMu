@@ -39,7 +39,7 @@ use crate::services::combat_crimewatch::combat_wrecks_killmails::{
     compute_killmail_esi_hash, handle_wrecks_killmails, process_ship_insurance_payout,
 };
 use crate::services::combat_crimewatch::{
-    set_char_safety_level, with_combat_runtime, with_mut_combat_runtime, AssistLogEntry,
+    set_char_safety_level, with_mut_combat_runtime, AssistLogEntry,
     InFlightMissileState, SafetyLevel,
 };
 use crate::services::fitting_cycles_overheat::{
@@ -622,29 +622,29 @@ async fn missiles_and_breacher_pod_step_edges() {
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let spawn_m = |mid: i64, pos: DVec3, vel: f64, rem_s: f64, breacher: bool, spawn_ball: bool| {
-        if spawn_ball {
-            let mut cs = CombatState::default();
-            cs.structure_hp = 50.0;
-            sys_handle.try_spawn_ball_with_combat(
-                Ball {
-                    id: mid,
-                    type_id: 210,
-                    position: pos,
-                    velocity: DVec3::new(vel, 0.0, 0.0),
-                    max_velocity: vel,
-                    inertia: 1.0,
-                    mass: 100.0,
-                    radius: 1.0,
-                    speed_fraction: 1.0,
-                    mode: MovementMode::Missile { target_id: def_ship },
-                },
-                cs,
-            );
-        }
-        with_mut_combat_runtime(&ctx, |rt| {
-            rt.in_flight_missiles.insert(
-                mid,
-                InFlightMissileState {
+        let sys_handle = sys_handle.clone();
+        async move {
+            if spawn_ball {
+                let mut cs = CombatState::default();
+                cs.structure_hp = 50.0;
+                sys_handle.try_spawn_ball_with_combat(
+                    Ball {
+                        id: mid,
+                        type_id: 210,
+                        position: pos,
+                        velocity: DVec3::new(vel, 0.0, 0.0),
+                        max_velocity: vel,
+                        inertia: 1.0,
+                        mass: 100.0,
+                        radius: 1.0,
+                        speed_fraction: 1.0,
+                        mode: MovementMode::Missile { target_id: def_ship },
+                    },
+                    cs,
+                );
+            }
+            sys_handle
+                .upsert_in_flight_missile(InFlightMissileState {
                     missile_ball_id: mid,
                     solar_system_id: sys_id,
                     attacker_char_id: attacker,
@@ -671,21 +671,22 @@ async fn missiles_and_breacher_pod_step_edges() {
                     expired: false,
                     impacted: false,
                     applied_damage: 0.0,
-                },
-            );
-        });
+                })
+                .await
+                .unwrap();
+        }
     };
 
-    spawn_m(600_100_001, DVec3::new(500.0, 0.0, 0.0), 1000.0, 2.0, false, false);
-    spawn_m(600_100_002, DVec3::new(500.0, 0.0, 0.0), 1000.0, 0.2, false, true);
-    spawn_m(600_100_003, DVec3::new(995.0, 0.0, 0.0), 2000.0, 3.0, true, true);
+    spawn_m(600_100_001, DVec3::new(500.0, 0.0, 0.0), 1000.0, 2.0, false, false).await;
+    spawn_m(600_100_002, DVec3::new(500.0, 0.0, 0.0), 1000.0, 0.2, false, true).await;
+    spawn_m(600_100_003, DVec3::new(995.0, 0.0, 0.0), 2000.0, 3.0, true, true).await;
 
     let completed = step_missiles_and_breachers(&ctx, sys_id, 0.5).await;
     assert_eq!(completed.len(), 3);
     assert!(completed.iter().any(|m| m.missile_ball_id == 600_100_001 && m.destroyed));
     assert!(completed.iter().any(|m| m.missile_ball_id == 600_100_002 && m.expired));
     assert!(completed.iter().any(|m| m.missile_ball_id == 600_100_003 && m.impacted));
-    let breacher_registered = with_combat_runtime(&ctx, |rt| rt.active_breacher_dots.contains_key(&def_ship));
+    let breacher_registered = sys_handle.active_breacher_dot(def_ship).is_some();
     assert!(breacher_registered);
 }
 

@@ -15,8 +15,7 @@ use crate::router::notify_registry::{
 };
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{
-    with_combat_runtime, with_mut_combat_runtime, with_mut_combat_runtime_tx_locks,
-    EntropicSpoolState,
+    with_mut_combat_runtime, with_mut_combat_runtime_tx_locks, EntropicSpoolState,
 };
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::InvType;
@@ -24,12 +23,10 @@ use eve_sde::InvType;
 /// Gets the current spool multiplier for an entropic module on a ship (defaults to 1.0).
 // parity: feat:modules.entropic-disintegrator-damage-spool
 pub fn get_entropic_spool_multiplier(ctx: &ServerContext, ship_id: i64, module_id: i64) -> f64 {
-    with_combat_runtime(ctx, |rt| {
-        rt.entropic_spools
-            .get(&(ship_id, module_id))
-            .map(|s| s.current_multiplier)
-            .unwrap_or(1.0)
-    })
+    ctx.systems
+        .active_entropic_spool(ship_id, module_id)
+        .map(|s| s.current_multiplier)
+        .unwrap_or(1.0)
 }
 
 /// Advances entropic spool for an active module by one server cycle tick.
@@ -40,23 +37,13 @@ pub fn advance_entropic_spool_cycle(
     ship_id: i64,
     module_id: i64,
 ) -> (u32, f64) {
-    with_mut_combat_runtime(ctx, |rt| {
-        if let Some(entry) = rt.entropic_spools.get_mut(&(ship_id, module_id)) {
-            entry.cycles = entry.cycles.saturating_add(1);
-            let mult = 1.0 + (entry.cycles as f64 * entry.per_cycle_bonus).min(entry.max_bonus);
-            entry.current_multiplier = mult;
-            (entry.cycles, mult)
-        } else {
-            (0, 1.0)
-        }
-    })
+    ctx.systems
+        .advance_entropic_spool_cycle_sync(ship_id, module_id)
 }
 
 /// Resets/clears the entropic spool for a module to 1.0 (e.g. on deactivation or target switch).
 pub fn clear_entropic_spool(ctx: &ServerContext, ship_id: i64, module_id: i64) {
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.entropic_spools.remove(&(ship_id, module_id));
-    });
+    let _ = ctx.systems.remove_entropic_spool_sync(ship_id, module_id);
 }
 
 pub fn reset_entropic_spool(ctx: &ServerContext, ship_id: i64, module_id: i64) {
@@ -116,13 +103,9 @@ pub fn clear_entropic_spools_on_target_unlock(
     char_id: i64,
     target_id_opt: Option<i64>,
 ) {
-    let to_stop: Vec<i64> = with_combat_runtime(ctx, |rt| {
-        rt.entropic_spools
-            .iter()
-            .filter(|((s, _), st)| *s == ship_id && target_id_opt.map_or(true, |tid| st.target_id == tid))
-            .map(|((_, m), _)| *m)
-            .collect()
-    });
+    let to_stop = ctx
+        .systems
+        .collect_and_clear_entropic_spools_for_ship_sync(ship_id, target_id_opt);
     for mod_id in to_stop {
         stop_entropic_spool_and_deactivate(ctx, char_id, ship_id, mod_id);
     }
@@ -183,59 +166,75 @@ pub fn handle_entropic_activation(
         snap.module_active_states.contains(&module_id)
     });
 
-    with_mut_combat_runtime(ctx, |rt| {
-        if let Some(entry) = rt.entropic_spools.get_mut(&(ship_id, module_id)) {
-            if entry.target_id == target_ball_id && is_active_in_db {
-                // Activating an already-active module on the same target is rejected!
-                return Err(BridgeRpcError {
-                    code: "AlreadyActive".into(),
-                    message: format!("Module {module_id} is already active"),
-                    client_error: None,
-                });
-            } else {
-                // Switched target! Reset spool to 1.0
-                entry.target_id = target_ball_id;
-                entry.solar_system_id = solar_system_id;
-                entry.attacker_char_id = char_id;
-                entry.attacker_ship_id = ship_id;
-                entry.module_id = module_id;
-                entry.module_type_id = mod_type.type_id;
-                entry.charge_item_id = charge_item_id;
-                entry.base_damage = base_damage;
-                entry.cap_need = cap_need;
-                entry.duration_s = duration_s;
-                entry.cycles = 0;
-                entry.elapsed_in_cycle = 0.0;
-                entry.per_cycle_bonus = per_cycle;
-                entry.max_bonus = max_bonus;
-                entry.current_multiplier = 1.0;
-                return Ok((0, 1.0));
-            }
-        }
+    let sys_handle = ctx
+        .systems
+        .try_wake_for_weapon_effects_seed(solar_system_id)
+        .map_err(|err| {
+            BridgeRpcError::from_client_error(eve_proto::ClientError::Internal(err.to_string()))
+        })?;
+    apply_entropic_activation_to_handle(
+        &sys_handle,
+        char_id,
+        ship_id,
+        solar_system_id,
+        module_id,
+        target_ball_id,
+        mod_type.type_id,
+        charge_item_id,
+        base_damage,
+        cap_need,
+        duration_s,
+        per_cycle,
+        max_bonus,
+        is_active_in_db,
+    )
+}
 
-        // Fresh activation (cycle 0)
-        rt.entropic_spools.insert(
-            (ship_id, module_id),
-            EntropicSpoolState {
-                target_id: target_ball_id,
-                solar_system_id,
-                attacker_char_id: char_id,
-                attacker_ship_id: ship_id,
-                module_id,
-                module_type_id: mod_type.type_id,
-                charge_item_id,
-                base_damage,
-                cap_need,
-                duration_s,
-                cycles: 0,
-                elapsed_in_cycle: 0.0,
-                per_cycle_bonus: per_cycle,
-                max_bonus,
-                current_multiplier: 1.0,
-            },
-        );
-        Ok((0, 1.0))
-    })
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_entropic_activation_to_handle(
+    sys_handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    solar_system_id: u32,
+    module_id: i64,
+    target_ball_id: i64,
+    module_type_id: u32,
+    charge_item_id: Option<i64>,
+    base_damage: eve_destiny::DamageVector,
+    cap_need: f64,
+    duration_s: f64,
+    per_cycle_bonus: f64,
+    max_bonus: f64,
+    is_active_in_db: bool,
+) -> Result<(u32, f64), BridgeRpcError> {
+    let spool = EntropicSpoolState {
+        target_id: target_ball_id,
+        solar_system_id,
+        attacker_char_id: char_id,
+        attacker_ship_id: ship_id,
+        module_id,
+        module_type_id,
+        charge_item_id,
+        base_damage,
+        cap_need,
+        duration_s,
+        cycles: 0,
+        elapsed_in_cycle: 0.0,
+        per_cycle_bonus,
+        max_bonus,
+        current_multiplier: 1.0,
+    };
+    match sys_handle.upsert_entropic_spool_activation_sync(spool, is_active_in_db) {
+        Ok(Some(res)) => Ok(res),
+        Ok(None) => Err(BridgeRpcError {
+            code: "AlreadyActive".into(),
+            message: format!("Module {module_id} is already active"),
+            client_error: None,
+        }),
+        Err(err) => Err(BridgeRpcError::from_client_error(
+            eve_proto::ClientError::Internal(err),
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -885,29 +884,29 @@ pub async fn step_system_entropic_spools(
     dt: f64,
 ) {
     crate::services::combat_crimewatch::combat_npc_encounters::finalize_cycle_destroyed_npcs(ctx, solar_system_id).await;
-    let active_spool_keys: Vec<(i64, i64)> =
-        crate::services::combat_crimewatch::with_combat_runtime(ctx, |guard| {
-            guard
-                .entropic_spools
-                .iter()
-                .filter(|(_, state)| state.solar_system_id == solar_system_id)
-                .map(|(&key, _)| key)
-                .collect()
-        });
+    let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) else {
+        return;
+    };
+    step_system_entropic_spools_with_handle(ctx, &sys_handle, solar_system_id, dt).await;
+}
 
-    if active_spool_keys.is_empty() {
+pub(crate) async fn step_system_entropic_spools_with_handle(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    solar_system_id: u32,
+    dt: f64,
+) {
+    let view = sys_handle.view();
+    if !view.weapon_effects_needs_sqlite_hydration && view.weapon_effects.entropic_spools.is_empty() {
+        return;
+    }
+    let active_spools = sys_handle.active_entropic_spools_snapshot().await;
+    if active_spools.is_empty() {
         return;
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-
-    for (ship_id, module_id) in active_spool_keys {
-        let spool_state = with_combat_runtime(ctx, |guard| {
-            guard.entropic_spools.get(&(ship_id, module_id)).cloned()
-        });
-        let Some(mut state) = spool_state else {
-            continue;
-        };
+    for mut state in active_spools {
+        let (ship_id, module_id) = (state.attacker_ship_id, state.module_id);
 
         // Verify module is still active in DB
         let is_active = ctx.db.with_snapshot(|snap| {
@@ -1254,9 +1253,7 @@ pub async fn step_system_entropic_spools(
         }
 
         if !stopped {
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.entropic_spools.insert((ship_id, module_id), state);
-            });
+            let _ = sys_handle.update_entropic_spool(state).await;
         }
     }
 }

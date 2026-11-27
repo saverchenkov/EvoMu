@@ -83,6 +83,10 @@ pub struct SystemView {
     pub fighters: super::SystemFighterState,
     pub ewar: super::ActorEwarState,
     pub module_cooldowns: super::ActorModuleCooldownState,
+    pub weapon_effects: super::ActorWeaponEffectsState,
+    pub has_active_weapon_effects: bool,
+    pub weapon_effects_needs_sqlite_hydration: bool,
+    pub(crate) weapon_effects_coord: Option<Arc<super::WeaponEffectsFlushCoord>>,
 }
 
 impl Default for SystemView {
@@ -135,6 +139,10 @@ impl Default for SystemView {
             fighters: super::SystemFighterState::default(),
             ewar: super::ActorEwarState::default(),
             module_cooldowns: super::ActorModuleCooldownState::default(),
+            weapon_effects: super::ActorWeaponEffectsState::default(),
+            has_active_weapon_effects: false,
+            weapon_effects_needs_sqlite_hydration: false,
+            weapon_effects_coord: None,
         }
     }
 }
@@ -167,6 +175,10 @@ struct ViewActorSnapshot {
     fighters: super::SystemFighterState,
     ewar: super::ActorEwarState,
     module_cooldowns: super::ActorModuleCooldownState,
+    weapon_effects: super::ActorWeaponEffectsState,
+    has_active_weapon_effects: bool,
+    weapon_effects_needs_sqlite_hydration: bool,
+    weapon_effects_coord: Option<Arc<super::WeaponEffectsFlushCoord>>,
 }
 
 impl SystemView {
@@ -269,6 +281,10 @@ impl SystemView {
                 fighters: st.fighters.clone(),
                 ewar: st.ewar_state.clone(),
                 module_cooldowns: st.module_cooldowns.clone(),
+                has_active_weapon_effects: st.weapon_effects.has_active_work(),
+                weapon_effects: st.weapon_effects.clone(),
+                weapon_effects_needs_sqlite_hydration: st.weapon_effects_needs_sqlite_hydration,
+                weapon_effects_coord: Some(Arc::clone(&st.weapon_effects_coord)),
             }
         } else if let Some(prev) = previous {
             ViewActorSnapshot {
@@ -300,6 +316,10 @@ impl SystemView {
                 fighters: prev.fighters.clone(),
                 ewar: prev.ewar.clone(),
                 module_cooldowns: prev.module_cooldowns.clone(),
+                weapon_effects: prev.weapon_effects.clone(),
+                has_active_weapon_effects: prev.has_active_weapon_effects,
+                weapon_effects_needs_sqlite_hydration: prev.weapon_effects_needs_sqlite_hydration,
+                weapon_effects_coord: prev.weapon_effects_coord.clone(),
             }
         } else {
             ViewActorSnapshot::default()
@@ -361,6 +381,10 @@ impl SystemView {
             fighters: actor.fighters,
             ewar: actor.ewar,
             module_cooldowns: actor.module_cooldowns,
+            weapon_effects: actor.weapon_effects,
+            has_active_weapon_effects: actor.has_active_weapon_effects,
+            weapon_effects_needs_sqlite_hydration: actor.weapon_effects_needs_sqlite_hydration,
+            weapon_effects_coord: actor.weapon_effects_coord,
         }
     }
 

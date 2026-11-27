@@ -209,10 +209,10 @@ fn entropic_spool_lifecycle_target_switch_unlock_and_weapon_banking() {
     .unwrap();
     advance_entropic_spool_cycle(&ctx, ship_id, mod2);
     clear_entropic_spools_on_target_unlock(&ctx, ship_id, char_id, Some(300_000_002));
-    assert!(!with_combat_runtime(&ctx, |rt| rt.entropic_spools.contains_key(&(ship_id, mod1))));
-    assert!(with_combat_runtime(&ctx, |rt| rt.entropic_spools.contains_key(&(ship_id, mod2))));
+    assert!(ctx.systems.active_entropic_spool(ship_id, mod1).is_none());
+    assert!(ctx.systems.active_entropic_spool(ship_id, mod2).is_some());
     reset_entropic_spool(&ctx, ship_id, mod2);
-    assert!(!with_combat_runtime(&ctx, |rt| rt.entropic_spools.contains_key(&(ship_id, mod2))));
+    assert!(ctx.systems.active_entropic_spool(ship_id, mod2).is_none());
 
     // LinkAllWeapons ownership violation check + weapon bank grouping
     let err_own = handle_link_all_weapons(&ctx, 999_888, ship_id).unwrap_err();

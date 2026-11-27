@@ -210,6 +210,7 @@ pub(crate) enum PostUnlockIntent {
         damage_fids: Vec<i64>,
         tube_rearms: Vec<(i64, usize)>,
     },
+    WeaponEffectsCheckpoint(Box<super::weapon_effects::WeaponEffectsCheckpointOp>),
     DeactivationHook(DeferredDeactivationHookOp),
     CooldownDeactivation(Box<DeferredCooldownDeactOp>),
     TargetLockHook(DeferredTargetLockHookOp),
@@ -924,8 +925,12 @@ pub(crate) fn step_module_reloads_sim_clock_collecting(
 }
 
 type CheckpointBatch = Vec<(SolarSystemId, Vec<ConditionCheckpointEntry>, usize, Option<Arc<AtomicUsize>>)>;
+type WeaponEffectsCheckpointBatch = Vec<Box<super::weapon_effects::WeaponEffectsCheckpointOp>>;
 
-fn should_open_db_tx(db: &Arc<WorldRepository>, intents: &[PostUnlockIntent]) -> (bool, CheckpointBatch) {
+fn should_open_db_tx(
+    db: &Arc<WorldRepository>,
+    intents: &[PostUnlockIntent],
+) -> (bool, CheckpointBatch, WeaponEffectsCheckpointBatch) {
     let mut has_unconditional_write = false;
     let mut check_asteroid_inserts = Vec::new();
     let mut check_tether_heals = Vec::new();
@@ -934,6 +939,7 @@ fn should_open_db_tx(db: &Arc<WorldRepository>, intents: &[PostUnlockIntent]) ->
     let mut check_reloads = Vec::new();
     let mut check_ship_clears = Vec::new();
     let mut check_checkpoints = Vec::new();
+    let mut check_weapon_effects: WeaponEffectsCheckpointBatch = Vec::new();
 
     for intent in intents {
         match intent {
@@ -951,17 +957,18 @@ fn should_open_db_tx(db: &Arc<WorldRepository>, intents: &[PostUnlockIntent]) ->
             PostUnlockIntent::ConditionCheckpoint { solar_system_id, entries, written_out } => {
                 check_checkpoints.push((*solar_system_id, entries.as_slice(), written_out));
             }
+            PostUnlockIntent::WeaponEffectsCheckpoint(op) => check_weapon_effects.push(op.clone()),
             other if other.writes_db() => { has_unconditional_write = true; break; }
             _ => {}
         }
     }
 
-    if has_unconditional_write { return (true, Vec::new()); }
+    if has_unconditional_write { return (true, Vec::new(), Vec::new()); }
     if check_asteroid_inserts.is_empty() && check_tether_heals.is_empty() && check_positions.is_empty()
         && check_combat_hps.is_empty() && check_reloads.is_empty()
         && check_ship_clears.is_empty() && check_checkpoints.is_empty()
     {
-        return (false, Vec::new());
+        return (false, Vec::new(), check_weapon_effects);
     }
 
     let (any_change, skipped_checkpoints) = db.with_snapshot(|snap| {
@@ -998,7 +1005,7 @@ fn should_open_db_tx(db: &Arc<WorldRepository>, intents: &[PostUnlockIntent]) ->
         }
         (changed, valid_only)
     });
-    if any_change { (true, Vec::new()) } else { (false, skipped_checkpoints) }
+    if any_change { (true, Vec::new(), Vec::new()) } else { (false, skipped_checkpoints, check_weapon_effects) }
 }
 
 fn collect_non_db_hooks(
@@ -1024,6 +1031,7 @@ fn apply_intent_in_snap(
     intent: PostUnlockIntent,
     local_actions: &mut Vec<PendingCycleAction>,
     sqlite_checkpoints: &mut CheckpointBatch,
+    sqlite_weapon_effects: &mut WeaponEffectsCheckpointBatch,
     deferred_deact_hooks: &mut Vec<DeferredDeactivationHookOp>,
     deferred_cooldown_hooks: &mut Vec<Box<DeferredCooldownDeactOp>>,
     deferred_lock_hooks: &mut Vec<DeferredTargetLockHookOp>,
@@ -1166,6 +1174,9 @@ fn apply_intent_in_snap(
         PostUnlockIntent::PruneLegacyFighterExtJson { damage_fids, tube_rearms } => {
             super::fighters_persistence::prune_migrated_ext_json_in_snap(snap, &damage_fids, &tube_rearms);
         }
+        PostUnlockIntent::WeaponEffectsCheckpoint(op) => {
+            sqlite_weapon_effects.push(op);
+        }
         PostUnlockIntent::DeactivationHook(hook) => deferred_deact_hooks.push(hook),
         PostUnlockIntent::CooldownDeactivation(hook) => deferred_cooldown_hooks.push(hook),
         PostUnlockIntent::TargetLockHook(hook) => deferred_lock_hooks.push(hook),
@@ -1303,21 +1314,45 @@ fn execute_post_unlock_ops_inner(
     let mut deferred_cooldown_hooks = Vec::new();
     let mut deferred_lock_hooks = Vec::new();
     let mut sqlite_checkpoints: CheckpointBatch = Vec::new();
+    let mut sqlite_weapon_effects: WeaponEffectsCheckpointBatch = Vec::new();
     let mut post_commit_bp_ops: Vec<PostCommitBallparkOp> = Vec::new();
     let mut post_commit_arena = Vec::new();
     let mut tx_committed = false;
+    let mut any_weapon_effects_persisted = false;
 
     if let Some(db) = db_opt.filter(|_| can_write_db) {
-        let (open_tx, prechecked_checkpoints) = match db_arc_opt {
+        let (open_tx, prechecked_checkpoints, prechecked_weapon_effects) = match db_arc_opt {
             Some(db_arc) => should_open_db_tx(db_arc, &ops.intents),
-            None => (ops.intents.iter().any(PostUnlockIntent::writes_db), Vec::new()),
+            None => {
+                let any_snap_write = ops.intents.iter().any(|i| {
+                    !matches!(i, PostUnlockIntent::WeaponEffectsCheckpoint(_)) && i.writes_db()
+                });
+                if any_snap_write {
+                    (true, Vec::new(), Vec::new())
+                } else {
+                    let we = ops.intents.iter().filter_map(|i| match i {
+                        PostUnlockIntent::WeaponEffectsCheckpoint(op) => Some(op.clone()),
+                        _ => None,
+                    }).collect();
+                    (false, Vec::new(), we)
+                }
+            }
         };
         if open_tx {
+            let pending_we_coords: Vec<_> = ops
+                .intents
+                .iter()
+                .filter_map(|i| match i {
+                    PostUnlockIntent::WeaponEffectsCheckpoint(op) => op.flush_coord.clone(),
+                    _ => None,
+                })
+                .collect();
             let mut tx_hooks = Vec::new();
             let mut tx_cooldown_hooks = Vec::new();
             let mut tx_lock_hooks = Vec::new();
             let mut tx_actions = Vec::new();
             let mut tx_checkpoints = Vec::new();
+            let mut tx_weapon_effects = Vec::new();
             let mut tx_bp_ops = Vec::new();
             let mut tx_arena = Vec::new();
             let mut intents_cell = Some(ops.intents);
@@ -1330,6 +1365,7 @@ fn execute_post_unlock_ops_inner(
                             intent,
                             &mut tx_actions,
                             &mut tx_checkpoints,
+                            &mut tx_weapon_effects,
                             &mut tx_hooks,
                             &mut tx_cooldown_hooks,
                             &mut tx_lock_hooks,
@@ -1348,6 +1384,7 @@ fn execute_post_unlock_ops_inner(
                     tx_committed = true;
                     emitted_actions = tx_actions;
                     sqlite_checkpoints = tx_checkpoints;
+                    sqlite_weapon_effects = tx_weapon_effects;
                     deferred_deact_hooks = tx_hooks;
                     deferred_cooldown_hooks = tx_cooldown_hooks;
                     deferred_lock_hooks = tx_lock_hooks;
@@ -1355,11 +1392,13 @@ fn execute_post_unlock_ops_inner(
                     post_commit_arena = tx_arena;
                 }
                 Err(err) => {
+                    super::weapon_effects::mark_flush_coords_retry_needed(&pending_we_coords);
                     tracing::error!(error = %err, "system_actor_post_unlock DB transaction failed; skipping post-commit hooks");
                 }
             }
         } else {
             sqlite_checkpoints = prechecked_checkpoints;
+            sqlite_weapon_effects = prechecked_weapon_effects;
             collect_non_db_hooks(
                 ops.intents,
                 &mut deferred_deact_hooks,
@@ -1384,7 +1423,12 @@ fn execute_post_unlock_ops_inner(
                 slot.store(snap_written.max(sqlite_written), Ordering::Release);
             }
         }
+        for op in sqlite_weapon_effects {
+            any_weapon_effects_persisted |=
+                super::weapon_effects::persist_and_prune_checkpoint_op(db, &op);
+        }
     } else {
+        super::weapon_effects::mark_intents_retry_needed(&ops.intents);
         collect_non_db_hooks(
             ops.intents,
             &mut deferred_deact_hooks,
@@ -1468,6 +1512,42 @@ fn execute_post_unlock_ops_inner(
         if let Some(lock_hook) = lock_completed_hook {
             for hook_op in deferred_lock_hooks {
                 lock_hook(hook_op.char_id, hook_op.target_id);
+            }
+        }
+        if any_weapon_effects_persisted {
+            if let Some(PostCommitBallparkTarget::Actor(ref targets)) = post_commit_target {
+                let _ = targets.with_actor_locks(true, |bp_opt, actor_st, cur_tidi| {
+                    let bp = bp_opt.expect("require_bp=true checked");
+                    let flushed = actor_st
+                        .weapon_effects_coord
+                        .flushed_seq
+                        .load(Ordering::Acquire);
+                    let retry = actor_st
+                        .weapon_effects_coord
+                        .retry_needed
+                        .load(Ordering::Acquire);
+                    let pending_prune = actor_st
+                        .weapon_effects_coord
+                        .has_pending_legacy_prune
+                        .load(Ordering::Acquire);
+                    if actor_st.weapon_effects_dirty
+                        && !retry
+                        && !pending_prune
+                        && flushed >= actor_st.weapon_effects_seq
+                    {
+                        actor_st.weapon_effects_dirty = false;
+                        actor_st
+                            .weapon_effects_coord
+                            .dirty
+                            .store(false, Ordering::Release);
+                    }
+                    super::celestials::update_system_hibernation_flag(
+                        actor_st,
+                        bp,
+                        targets.event_tx.receiver_count(),
+                    );
+                    targets.publish_view(bp, actor_st, cur_tidi);
+                });
             }
         }
     } else if !deferred_deact_hooks.is_empty()
@@ -1968,6 +2048,7 @@ fn is_batch_barrier_cmd(cmd: &SystemCommand) -> bool {
             | SystemCommand::StepManualTickOnly { .. }
             | SystemCommand::FireWeaponCycleVolley { .. }
             | SystemCommand::FlushConditionCheckpoint { .. }
+            | SystemCommand::FlushWeaponEffectsCheckpoint { .. }
     )
 }
 

@@ -1031,86 +1031,33 @@ async fn has_extended_runtime_state_fields_epoch_sync_and_sig_radius_mutants() {
     }
 
     let dmg = DamageVector::default();
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
-            r.entropic_spools.insert(
-                (1, 2),
-                EntropicSpoolState {
-                    target_id: 2,
-                    solar_system_id: 30_000_142,
-                    attacker_char_id: 1,
-                    attacker_ship_id: 10,
-                    module_id: 11,
-                    module_type_id: 47269,
-                    charge_item_id: None,
-                    base_damage: dmg,
-                    cap_need: 10.0,
-                    duration_s: 4.0,
-                    cycles: 1,
-                    elapsed_in_cycle: 0.0,
-                    per_cycle_bonus: 0.1,
-                    max_bonus: 1.5,
-                    current_multiplier: 1.1,
-                },
-            );
-        },
-        |r: &mut CombatRuntimeState| r.entropic_spools.clear()
-    );
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
-            r.in_flight_missiles.insert(
-                1,
-                InFlightMissileState {
-                    missile_ball_id: 1,
-                    solar_system_id: 30_000_142,
-                    attacker_char_id: 1,
-                    attacker_ship_id: 10,
-                    launcher_module_id: 11,
-                    launcher_type_id: 2404,
-                    missile_type_id: 209,
-                    target_ball_id: 2,
-                    max_velocity: 1000.0,
-                    flight_time_s: 5.0,
-                    remaining_flight_s: 4.0,
-                    hp: 50.0,
-                    max_hp: 50.0,
-                    base_damage: dmg,
-                    explosion_radius: 40.0,
-                    explosion_velocity: 100.0,
-                    drf: 0.6,
-                    is_fof: false,
-                    is_breacher_pod: false,
-                    breacher_dot_duration_s: 0.0,
-                    breacher_flat_cap: 0.0,
-                    breacher_pct_cap: 0.0,
-                    destroyed: false,
-                    expired: false,
-                    impacted: false,
-                    applied_damage: 0.0,
-                },
-            );
-        },
-        |r: &mut CombatRuntimeState| r.in_flight_missiles.clear()
-    );
-    check_ext_field!(
-        |r: &mut CombatRuntimeState| {
-            r.active_breacher_dots.insert(
-                1,
-                ActiveBreacherDot {
-                    target_ball_id: 1,
-                    source_char_id: 2,
-                    source_ship_id: 3,
-                    weapon_type_id: 4,
-                    charge_type_id: 5,
-                    flat_cap_dps: 100.0,
-                    pct_cap_fraction: 0.01,
-                    remaining_s: 10.0,
-                    tick_damage: 10.0,
-                },
-            );
-        },
-        |r: &mut CombatRuntimeState| r.active_breacher_dots.clear()
-    );
+    let mut legacy_rt = CombatRuntimeState::default();
+    let legacy_json = serde_json::json!({
+        "entropic_spools": [[[1, 2], crate::system_actor::EntropicSpoolState {
+            target_id: 2, solar_system_id: 30_000_142, attacker_char_id: 1, attacker_ship_id: 10,
+            module_id: 11, module_type_id: 47269, charge_item_id: None, base_damage: dmg,
+            cap_need: 10.0, duration_s: 4.0, cycles: 1, elapsed_in_cycle: 0.0,
+            per_cycle_bonus: 0.1, max_bonus: 1.5, current_multiplier: 1.1,
+        }]],
+        "in_flight_missiles": {"1": InFlightMissileState {
+            missile_ball_id: 1, solar_system_id: 30_000_142, attacker_char_id: 1, attacker_ship_id: 10,
+            launcher_module_id: 11, launcher_type_id: 2404, missile_type_id: 209, target_ball_id: 2,
+            max_velocity: 1000.0, flight_time_s: 5.0, remaining_flight_s: 4.0, hp: 50.0, max_hp: 50.0,
+            base_damage: dmg, explosion_radius: 40.0, explosion_velocity: 100.0, drf: 0.6, is_fof: false,
+            is_breacher_pod: false, breacher_dot_duration_s: 0.0, breacher_flat_cap: 0.0,
+            breacher_pct_cap: 0.0, destroyed: false, expired: false, impacted: false, applied_damage: 0.0,
+        }},
+        "active_breacher_dots": {"1": ActiveBreacherDot {
+            target_ball_id: 1, solar_system_id: 30_000_142, source_char_id: 2, source_ship_id: 3,
+            weapon_type_id: 4, charge_type_id: 5, flat_cap_dps: 100.0, pct_cap_fraction: 0.01,
+            remaining_s: 10.0, tick_damage: 10.0,
+        }}
+    }).to_string();
+    let mut legacy_persisted = eve_db::PersistedCombatCrimewatchState::default();
+    legacy_persisted.extended_runtime_json = legacy_json;
+    legacy_rt.sync_from_persisted(&legacy_persisted);
+    let repersisted = legacy_rt.to_persisted();
+    assert!(repersisted.extended_runtime_json.is_empty());
     check_ext_field!(
         |r: &mut CombatRuntimeState| {
             r.aggression_assist_log.insert(

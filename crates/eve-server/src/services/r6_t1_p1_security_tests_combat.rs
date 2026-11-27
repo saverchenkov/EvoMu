@@ -4,7 +4,7 @@
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_missiles_aoe::step_missiles_and_breachers;
 use crate::services::combat_crimewatch::{
-    set_char_safety_level, with_mut_combat_runtime, ActiveBreacherDot, SafetyLevel,
+    set_char_safety_level, ActiveBreacherDot, SafetyLevel,
 };
 use crate::services::space_destiny::space_cyno_filaments;
 use crate::services::tactical_modules::apply_projected_remote_assistance;
@@ -159,22 +159,20 @@ async fn issue_366_breacher_dot_respects_tether_and_records_killmail_assist_and_
     cs.max_shield_hp = 1_000.0;
     let _ = sys.set_combat_state(victim_ship, cs).await;
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_breacher_dots.insert(
-            victim_ship,
-            ActiveBreacherDot {
-                target_ball_id: victim_ship,
-                source_char_id: attacker_char,
-                source_ship_id: attacker_ship,
-                weapon_type_id: 81_280,
-                charge_type_id: 81_282,
-                flat_cap_dps: 100.0,
-                pct_cap_fraction: 1.0,
-                remaining_s: 10.0,
-                tick_damage: 100.0,
-            },
-        );
-    });
+    sys.upsert_active_breacher_dot(ActiveBreacherDot {
+        target_ball_id: victim_ship,
+        solar_system_id: sys_id,
+        source_char_id: attacker_char,
+        source_ship_id: attacker_ship,
+        weapon_type_id: 81_280,
+        charge_type_id: 81_282,
+        flat_cap_dps: 100.0,
+        pct_cap_fraction: 1.0,
+        remaining_s: 10.0,
+        tick_damage: 100.0,
+    })
+    .await
+    .unwrap();
 
     step_missiles_and_breachers(&ctx, sys_id, 1.0).await;
     let after_tether = sys.get_combat_state(victim_ship).await.unwrap().unwrap();
@@ -433,22 +431,20 @@ async fn arch_585_breacher_dot_respects_invuln_guards_and_preserves_destruction_
     vcs.is_tethered = true;
     let _ = sys.set_combat_state(victim_ship, vcs.clone()).await;
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.active_breacher_dots.insert(
-            victim_ship,
-            ActiveBreacherDot {
-                target_ball_id: victim_ship,
-                source_char_id: attacker_char,
-                source_ship_id: attacker_ship,
-                weapon_type_id: 81_280,
-                charge_type_id: 81_282,
-                flat_cap_dps: 1_000.0,
-                pct_cap_fraction: 1.0,
-                remaining_s: 3.0,
-                tick_damage: 1_000.0,
-            },
-        );
-    });
+    sys.upsert_active_breacher_dot(ActiveBreacherDot {
+        target_ball_id: victim_ship,
+        solar_system_id: sys_id,
+        source_char_id: attacker_char,
+        source_ship_id: attacker_ship,
+        weapon_type_id: 81_280,
+        charge_type_id: 81_282,
+        flat_cap_dps: 1_000.0,
+        pct_cap_fraction: 1.0,
+        remaining_s: 3.0,
+        tick_damage: 1_000.0,
+    })
+    .await
+    .unwrap();
 
     // Tethered victim must take zero true damage from Breacher DoT.
     step_missiles_and_breachers(&ctx, sys_id, 1.0).await;
