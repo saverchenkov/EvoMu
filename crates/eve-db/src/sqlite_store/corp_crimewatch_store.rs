@@ -453,6 +453,8 @@ impl_decomposed_domain_struct!(
         command_node_scores,
         sov_dev_decay_last_unix,
         command_node_regen_last_unix,
+        entosis_active_links,
+        entosis_target_cycles,
     ],
     sorted_set_maps: [],
     sets: [sov_upgrade_combat_npcs],

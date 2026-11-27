@@ -1031,3 +1031,146 @@ fn test_bastion_siege_triage_and_sensor_remote_assistance_attrs() {
     assert!(triage_attrs[&192] >= 9.0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_context_isolation_for_entosis_nav_lock_and_precheck() {
+    let ctx_a = test_ctx_with_custom_types(|_| {});
+    let ctx_b = test_ctx_with_custom_types(|_| {});
+    let now = ctx_a.now_unix_secs();
+
+    let sys_id = 30_000_142_u32;
+    let hub_id = 1_094_000_001_i64;
+    let def_ally = 99_100_001_i64;
+    let att_ally = 99_100_002_i64;
+    let def_char = 941_001_i64;
+    let def_ship = 942_001_i64;
+    let att_ship = 942_002_i64;
+
+    for ctx in [&ctx_a, &ctx_b] {
+        ensure_char(ctx, def_char, 98_100_001, sys_id, def_ship, 2);
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&def_char) {
+                ch.alliance_id = Some(def_ally);
+            }
+            snap.system_states.insert(
+                sys_id,
+                eve_db::SystemDynamicState {
+                    solar_system_id: sys_id,
+                    sov_alliance_id: Some(def_ally),
+                    ..Default::default()
+                },
+            );
+            snap.structures.insert(
+                hub_id,
+                eve_db::UpwellStructureRecord {
+                    structure_id: hub_id,
+                    type_id: crate::services::sov_services::TYPE_SOVEREIGNTY_HUB,
+                    solar_system_id: sys_id,
+                    owner_corp_id: 98_100_001,
+                    name: "Isolation Hub".into(),
+                    position: [0.0, 0.0, 0.0],
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 100,
+                    ..Default::default()
+                },
+            );
+        });
+        spawn_ship_ball_with_cs(ctx, sys_id, def_ship, 587, def_char, 98_100_001, DVec3::new(10_000.0, 0.0, 0.0), 1_000.0).await;
+    }
+
+    tactical_test_helpers::insert_active_entosis_link(
+        &ctx_a,
+        att_ship,
+        ActiveEntosisLinkState {
+            ship_id: att_ship,
+            char_id: 941_002,
+            side_id: att_ally,
+            module_id: 943_001,
+            target_id: hub_id,
+            cycle_index: 2,
+            cycle_duration_s: 300.0,
+            started_unix: now,
+            expires_unix: now + 300,
+            is_capital: false,
+        },
+    );
+    tactical_test_helpers::set_entosis_target_cycles(&ctx_a, hub_id, att_ship, 2);
+
+    assert!(tactical_test_helpers::has_active_entosis_link(&ctx_a, att_ship));
+    assert!(!tactical_test_helpers::has_active_entosis_link(&ctx_b, att_ship));
+    assert!(tactical_test_helpers::has_entosis_target_cycles(&ctx_a, hub_id, att_ship));
+    assert!(!tactical_test_helpers::has_entosis_target_cycles(&ctx_b, hub_id, att_ship));
+
+    assert_eq!(
+        check_ship_navigation_lock(&ctx_a, att_ship, "warp")
+            .unwrap_err()
+            .code,
+        "EntosisLinkActive"
+    );
+    assert!(check_ship_navigation_lock(&ctx_b, att_ship, "warp").is_ok());
+    assert_eq!(ship_navigation_lock_expiry_unix(&ctx_a, att_ship), now + 300);
+    assert_eq!(ship_navigation_lock_expiry_unix(&ctx_b, att_ship), 0);
+
+    assert!(
+        crate::services::sov_gameplay::sov_gameplay_entosis::precheck_entosis_activation(
+            &ctx_a, hub_id, def_ship, def_char
+        )
+        .await
+        .expect("contested hub permits friendly counter-entosis in ctx_a")
+    );
+    assert_eq!(
+        crate::services::sov_gameplay::sov_gameplay_entosis::precheck_entosis_activation(
+            &ctx_b, hub_id, def_ship, def_char
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CannotEntosisFriendlyStructure"
+    );
+}
+
+#[test]
+fn clear_entosis_warmup_on_unlock_is_noop_when_absent() {
+    let ctx = test_ctx_with_custom_types(|_| {});
+    let now = ctx.now_unix_secs();
+    let entosis_ship = 944_001_i64;
+    let non_entosis_ship = 944_002_i64;
+    let target_a = 1_094_000_010_i64;
+    let target_b = 1_094_000_011_i64;
+
+    tactical_test_helpers::insert_active_entosis_link(
+        &ctx,
+        entosis_ship,
+        ActiveEntosisLinkState {
+            ship_id: entosis_ship,
+            char_id: 944_100,
+            side_id: 99_100_005,
+            module_id: 944_500,
+            target_id: target_a,
+            cycle_index: 1,
+            cycle_duration_s: 300.0,
+            started_unix: now,
+            expires_unix: now + 300,
+            is_capital: false,
+        },
+    );
+    tactical_test_helpers::set_entosis_target_cycles(&ctx, target_a, entosis_ship, 1);
+
+    let epoch_before = ctx.db.state_epoch();
+    let tx_before = ctx.db.tx_commit_count();
+
+    clear_entosis_warmup_on_unlock(&ctx, non_entosis_ship, Some(target_a));
+    clear_entosis_warmup_on_unlock(&ctx, non_entosis_ship, None);
+    clear_entosis_warmup_on_unlock(&ctx, entosis_ship, Some(target_b));
+
+    assert_eq!(ctx.db.state_epoch(), epoch_before);
+    assert_eq!(ctx.db.tx_commit_count(), tx_before);
+    assert!(tactical_test_helpers::has_active_entosis_link(&ctx, entosis_ship));
+    assert!(tactical_test_helpers::has_entosis_target_cycles(&ctx, target_a, entosis_ship));
+
+    clear_entosis_warmup_on_unlock(&ctx, entosis_ship, Some(target_a));
+    assert_eq!(ctx.db.tx_commit_count(), tx_before + 1);
+    assert!(!tactical_test_helpers::has_active_entosis_link(&ctx, entosis_ship));
+    assert!(!tactical_test_helpers::has_entosis_target_cycles(&ctx, target_a, entosis_ship));
+}
+

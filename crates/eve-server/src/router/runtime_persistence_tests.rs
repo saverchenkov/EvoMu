@@ -1060,9 +1060,14 @@ async fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync(
                 }],
             );
         });
-        assert_tac_crash_lost("entosis_active_links", &|ts, k| {
-            ts.entosis_active_links.insert(
-                (k, 13),
+        {
+            use crate::services::tactical_modules::tactical_test_helpers::{
+                has_active_entosis_link, has_any_entosis_target_cycles, insert_active_entosis_link,
+                set_entosis_target_cycles,
+            };
+            insert_active_entosis_link(
+                &ctx,
+                13,
                 ActiveEntosisLinkState {
                     ship_id: 13,
                     char_id: 1,
@@ -1076,10 +1081,22 @@ async fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync(
                     is_capital: false,
                 },
             );
-        });
-        assert_tac_crash_lost("entosis_target_cycles", &|ts, k| {
-            ts.entosis_target_cycles.insert((k, 14, 15), 2);
-        });
+            set_entosis_target_cycles(&ctx, 14, 15, 2);
+            ctx.persist_server_runtime_to_db();
+            assert!(
+                !db.with_sqlite_conn(|conn| {
+                    eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn)
+                })
+                .expect("check checkpoints"),
+                "crash-lost sov_runtime entosis maps must NOT persist into system_checkpoint"
+            );
+            let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+            ctx2.hydrate_server_runtime_from_db();
+            assert!(!has_active_entosis_link(&ctx2, 13));
+            assert!(!has_any_entosis_target_cycles(&ctx2));
+            assert!(!has_active_entosis_link(&ctx, 13));
+            assert!(!has_any_entosis_target_cycles(&ctx));
+        }
         assert_tac_crash_lost("pending_wubble_probes", &|ts, k| {
             ts.pending_wubble_probes.push((
                 k,

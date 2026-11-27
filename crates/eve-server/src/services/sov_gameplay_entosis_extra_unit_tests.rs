@@ -5,9 +5,7 @@
 use crate::router::ServerContext;
 use crate::services::sov_gameplay::sov_gameplay_entosis::*;
 use crate::services::sov_services::{TYPE_PHAROLUX_CYNO_BEACON, TYPE_SOVEREIGNTY_HUB};
-use crate::services::tactical_modules::tactical_test_helpers::{
-    insert_active_entosis_link, insert_foreign_active_entosis_link,
-};
+use crate::services::tactical_modules::tactical_test_helpers::insert_active_entosis_link;
 use crate::services::tactical_modules::ActiveEntosisLinkState;
 use eve_db::durable_domain_types::PersistedHubUpgrade;
 use eve_db::{CosmicAnomalyRecord, UpwellStructureRecord};
@@ -1780,10 +1778,11 @@ async fn precheck_entosis_link_filter_clauses_and_tick_merc_den_precheck_mutants
             .await;
     }
 
-    // Seed distractor active links covering every clause of `(k == db_key && l.target_id == target_id)` and `side_id != attacker_alliance`
-    // Wrong db_key, matching target_id, hostile side_id
-    insert_foreign_active_entosis_link(
-        &ctx,
+    // Seed distractor active links covering every clause of context isolation, `l.target_id == target_id`, and `side_id != attacker_alliance`
+    // Separate ServerContext, matching target_id, hostile side_id
+    let foreign_ctx = test_ctx();
+    insert_active_entosis_link(
+        &foreign_ctx,
         8_001,
         ActiveEntosisLinkState {
             module_id: 8_001,

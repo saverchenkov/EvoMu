@@ -329,10 +329,14 @@ async fn tick_entosis_captures_contested_unattended_counter_decapture_stront_and
             .insert(hub_id, (90_000_001, third_alliance, ship_a, 500.0, 2_500));
     });
     insert_entosis_link(&ctx, ship_a, 90_000_001, third_alliance, 8005, hub_id, 2_400, 2_520);
-    // Tick at 2_550: renews cycle using 1 stront, accrued = 550 < 600
+    // Tick at 2_550: renews cycle using 1 stront in the same transaction, accrued = 550 < 600
     tick_entosis_captures(&ctx, 2_550).await;
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&777_001].quantity, 1);
+        let link = &snap.sov_runtime.entosis_active_links[&ship_a];
+        assert_eq!(link.cycle_index, 2);
+        assert_eq!(link.started_unix, 2_520);
+        assert_eq!(link.expires_unix, 2_640);
         assert!((snap.sov_runtime.entosis_capture_progress[&hub_id].3 - 550.0).abs() < 1e-6);
     });
     // Tick at 2_610: accrued = 610 >= 600 -> Hub captured -> HullReinforced!
@@ -476,7 +480,13 @@ fn remove_ship_entosis_link_clears_active_links_target_cycles_and_module_state()
         snap.module_active_states.insert(mod_id);
     });
 
+    let idle_tx_before = ctx.db.tx_commit_count();
+    remove_ship_entosis_link(&ctx, ship_id + 999);
+    assert_eq!(ctx.db.tx_commit_count(), idle_tx_before);
+
+    let tx_before = ctx.db.tx_commit_count();
     remove_ship_entosis_link(&ctx, ship_id);
+    assert_eq!(ctx.db.tx_commit_count(), tx_before + 1);
 
     assert!(!has_active_entosis_link(&ctx, ship_id));
     assert!(!has_entosis_target_cycles(&ctx, target_id, ship_id));

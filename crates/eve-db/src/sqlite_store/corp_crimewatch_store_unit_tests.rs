@@ -1140,6 +1140,22 @@ fn corp_crimewatch_all_substruct_fields_survive_tx_commit_and_sqlite_reopen() {
         sov_upgrade_combat_npcs: BTreeSet::from([80_001, 80_002]),
         sov_dev_decay_last_unix: HashMap::from([(30_000_142, 1_700_001_400)]),
         command_node_regen_last_unix: HashMap::from([(7001, 1_700_001_500)]),
+        entosis_active_links: HashMap::from([(
+            80_010,
+            crate::ActiveEntosisLinkRecord {
+                ship_id: 80_010,
+                char_id: 90_000_001,
+                side_id: 99_000_001,
+                module_id: 80_011,
+                target_id: 7001,
+                cycle_index: 2,
+                cycle_duration_s: 300.0,
+                started_unix: 1_700_001_500,
+                expires_unix: 1_700_001_800,
+                is_capital: false,
+            },
+        )]),
+        entosis_target_cycles: HashMap::from([((7001, 80_010), 2)]),
     };
 
     let expected_insurgency = PersistedInsurgencyState {

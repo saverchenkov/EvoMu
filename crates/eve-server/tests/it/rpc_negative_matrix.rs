@@ -1370,19 +1370,32 @@ fn capture_target_b_runtime(fix: &MatrixFixture) -> TargetBRuntimeSlice {
             .map(|(&pid, _)| pid)
             .collect()
     };
+    let (entosis_links_count, entosis_cycles_count) = fix.ctx.db.with_snapshot(|snap| {
+        (
+            snap.sov_runtime
+                .entosis_active_links
+                .iter()
+                .filter(|(&sid, l)| {
+                    b_ships.contains(&sid)
+                        || l.char_id == CHAR_B_ID
+                        || b_ships.contains(&l.target_id)
+                })
+                .count(),
+            snap.sov_runtime
+                .entosis_target_cycles
+                .iter()
+                .filter(|(&(tid, sid), _)| b_ships.contains(&sid) || b_ships.contains(&tid))
+                .count(),
+        )
+    });
     let tactical_entries = {
         let ts = fix.ctx.tactical_state.read().expect("tactical_state");
         (
             ts.remote_assistance.iter().filter(|(&(_, sid), _)| b_ships.contains(&sid)).count(),
             ts.lance_caster_lock_until.iter().filter(|(&(_, sid), _)| b_ships.contains(&sid)).count(),
             ts.lance_victim_debuff_until.iter().filter(|(&(_, sid), _)| b_ships.contains(&sid)).count(),
-            ts.entosis_active_links
-                .iter()
-                .filter(|(&(_, sid), l)| {
-                    b_ships.contains(&sid) || l.char_id == CHAR_B_ID || b_ships.contains(&l.target_id)
-                })
-                .count(),
-            ts.entosis_target_cycles.iter().filter(|(&(_, sid, tid), _)| b_ships.contains(&sid) || b_ships.contains(&tid)).count(),
+            entosis_links_count,
+            entosis_cycles_count,
         )
     };
     let pending_notifications_b_sigs = {
