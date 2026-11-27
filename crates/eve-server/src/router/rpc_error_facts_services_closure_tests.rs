@@ -1773,7 +1773,7 @@ async fn mining_activation_cap_and_drone_return_emit_typed_facts() {
             .expect("synthetic mining laser type");
         miner.name = "Test Miner I".into();
         miner.default_effect_id = Some(mining_laser_eid);
-        miner.effect_ids = vec![mining_laser_eid, 16];
+        miner.effect_ids = vec![mining_laser_eid, 12, 16];
     }
     upsert_test_type(&mut ctx.sde, 34, ast_tid, 462, 25, &[(182, 3386.0)]);
 
