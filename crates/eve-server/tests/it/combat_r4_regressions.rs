@@ -22,9 +22,9 @@ use eve_proto::PyRep;
 use eve_server::combat::drones_salvage_tractor::execute_wreck_salvage_cycle;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
-    record_killmail_assist_action, step_combat_system, with_mut_combat_runtime, ActiveBreacherDot,
-    SafetyLevel,
+    record_killmail_assist_action, step_combat_system, ActiveBreacherDot, SafetyLevel,
 };
+use eve_server::services::gm_soak_commands::combat_ephemeral_test_helpers::mutate_self_destruct;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -228,11 +228,13 @@ async fn test_r4_154_self_destruct_docked_rejection_countdown_and_pvp_assist_att
         false,
         ctx.now_unix(),
     );
-    with_mut_combat_runtime(&ctx, |rt| {
-        if let Some(cd) = rt.self_destruct_countdowns.get_mut(&vic_ship_id) {
-            cd.detonate_at_unix = ctx.now_unix();
-        }
-    });
+    let detonate_now = ctx.now_unix();
+    assert!(
+        mutate_self_destruct(&ctx, vic_ship_id, |cd| {
+            cd.detonate_at_unix = detonate_now;
+        }),
+        "self-destruct countdown must be active before detonation"
+    );
     step_combat_system(&ctx, sys_id, 1.0).await;
 
     let km_attacker = ctx.db.with_snapshot(|snap| {

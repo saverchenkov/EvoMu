@@ -466,8 +466,9 @@ async fn npc_ai_ball_destructions_drone_disconnected_assist_and_sleeper_interval
     };
     use crate::combat::npc_ai::npc_test_helpers::{has_npc_entity, seed_npc_entity};
     use crate::services::combat_crimewatch::{
-        with_mut_combat_runtime, AssistLogEntry, DroneSpaceState, ExtendedNpcEntity,
+        AssistLogEntry, DroneSpaceState, ExtendedNpcEntity,
     };
+    use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::seed_assist_log;
     use crate::sp6_lifecycle::{with_mut_sp6_state, DisconnectedShipEntry};
 
     let mut ctx = test_ctx();
@@ -559,33 +560,32 @@ async fn npc_ai_ball_destructions_drone_disconnected_assist_and_sleeper_interval
             tp_sig_bonus_pct: 0.0,
         },
     );
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.aggression_assist_log.insert(
-            ship_on,
-            vec![
-                AssistLogEntry {
-                    attacker_char_id: 0,
-                    corporation_id: 1_000_009,
-                    alliance_id: None,
-                    ship_type_id: 0,
-                    weapon_type_id: 0,
-                    damage_done: 10.0,
-                    is_ewar: false,
-                    last_action_unix: now - 10,
-                },
-                AssistLogEntry {
-                    attacker_char_id: char_att,
-                    corporation_id: 1_000_009,
-                    alliance_id: None,
-                    ship_type_id: 587,
-                    weapon_type_id: 0,
-                    damage_done: 500.0,
-                    is_ewar: false,
-                    last_action_unix: now - 2,
-                },
-            ],
-        );
-    });
+    seed_assist_log(
+        &ctx,
+        ship_on,
+        vec![
+            AssistLogEntry {
+                attacker_char_id: 0,
+                corporation_id: 1_000_009,
+                alliance_id: None,
+                ship_type_id: 0,
+                weapon_type_id: 0,
+                damage_done: 10.0,
+                is_ewar: false,
+                last_action_unix: now - 10,
+            },
+            AssistLogEntry {
+                attacker_char_id: char_att,
+                corporation_id: 1_000_009,
+                alliance_id: None,
+                ship_type_id: 587,
+                weapon_type_id: 0,
+                damage_done: 500.0,
+                is_ewar: false,
+                last_action_unix: now - 2,
+            },
+        ],
+    );
     seed_npc_entity(
         &ctx,
         ExtendedNpcEntity {
@@ -724,7 +724,8 @@ async fn death_pipeline_self_destruct_guards_nested_fittings_and_escape_frigate(
     use super::death_pipeline::{
         drain_nested_ship_fittings, execute_live_self_destruct_sync, is_item_descendant_of_in_snap,
     };
-    use crate::services::combat_crimewatch::{with_mut_combat_runtime, AssistLogEntry};
+    use crate::services::combat_crimewatch::AssistLogEntry;
+    use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::seed_assist_log;
 
     let ctx = test_ctx();
     let sys_id = 30_000_142u32;
@@ -822,21 +823,20 @@ async fn death_pipeline_self_destruct_guards_nested_fittings_and_escape_frigate(
         }
     }
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.aggression_assist_log.insert(
-            main_bs,
-            vec![AssistLogEntry {
-                attacker_char_id: other_char,
-                corporation_id: 1_000_009,
-                alliance_id: None,
-                ship_type_id: 587,
-                weapon_type_id: 0,
-                damage_done: 250.0,
-                is_ewar: false,
-                last_action_unix: now - 5,
-            }],
-        );
-    });
+    seed_assist_log(
+        &ctx,
+        main_bs,
+        vec![AssistLogEntry {
+            attacker_char_id: other_char,
+            corporation_id: 1_000_009,
+            alliance_id: None,
+            ship_type_id: 587,
+            weapon_type_id: 0,
+            damage_done: 250.0,
+            is_ewar: false,
+            last_action_unix: now - 5,
+        }],
+    );
     let res = execute_live_self_destruct_sync(&ctx, sys_id, char_id, main_bs, DVec3::ZERO, now)
         .unwrap()
         .expect("live self destruct fires");

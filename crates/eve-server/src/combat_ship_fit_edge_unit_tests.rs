@@ -39,9 +39,9 @@ use crate::services::combat_crimewatch::combat_wrecks_killmails::{
     compute_killmail_esi_hash, handle_wrecks_killmails, process_ship_insurance_payout,
 };
 use crate::services::combat_crimewatch::{
-    set_char_safety_level, with_mut_combat_runtime, AssistLogEntry,
-    InFlightMissileState, SafetyLevel,
+    set_char_safety_level, AssistLogEntry, InFlightMissileState, SafetyLevel,
 };
+use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::seed_assist_log;
 use crate::services::fitting_cycles_overheat::{
     check_nanite_repair_overheat_lockout, compute_overload_multiplier,
     handle_active_overload_toggle, has_category5_overload, prepare_ancillary_module,
@@ -531,21 +531,20 @@ async fn death_pipeline_self_destruct_insurance_hash_and_loot_edges() {
 
     let sd_ship_assisted = 500_001_002;
     spawn_ship_ball(&ctx, sys_id, sd_ship_assisted, victim, 587, DVec3::new(20_000.0, 0.0, 0.0), MovementMode::Stop);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.aggression_assist_log.insert(
-            sd_ship_assisted,
-            vec![AssistLogEntry {
-                attacker_char_id: attacker,
-                corporation_id: 98_000_002,
-                alliance_id: None,
-                ship_type_id: 587,
-                weapon_type_id: 2873,
-                damage_done: 100.0,
-                is_ewar: false,
-                last_action_unix: now,
-            }],
-        );
-    });
+    seed_assist_log(
+        &ctx,
+        sd_ship_assisted,
+        vec![AssistLogEntry {
+            attacker_char_id: attacker,
+            corporation_id: 98_000_002,
+            alliance_id: None,
+            ship_type_id: 587,
+            weapon_type_id: 2873,
+            damage_done: 100.0,
+            is_ewar: false,
+            last_action_unix: now,
+        }],
+    );
     let contested = execute_live_self_destruct_sync(&ctx, sys_id, victim, sd_ship_assisted, DVec3::new(20_000.0, 0.0, 0.0), now).unwrap().unwrap();
     assert!(contested.killmail_id > 0);
     let contested_fb = ctx.db.with_snapshot(|s| s.killmails.get(&contested.killmail_id).map(|k| k.attacker_character_id));

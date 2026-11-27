@@ -12,7 +12,7 @@ use eve_destiny::{Ball, DVec3, DestinyEvent, MovementMode, SlimItemMeta};
 use eve_machonet::service_roles::ROLE_LOGIN;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::with_combat_runtime;
+use eve_server::services::gm_soak_commands::combat_ephemeral_test_helpers::get_gm_deadwarp;
 use eve_server::services::mobile_deployables::{write_deployable_state_snap, GROUP_MOBILE_DEPOT};
 use eve_server::services::space_destiny::record_session_change_timer;
 use eve_server::sp6_lifecycle::{
@@ -385,7 +385,7 @@ async fn gm_deadwarp_round_trip_and_stop() {
     for _ in 0..240 {
         ctx.advance_secs(1);
         step_active_systems_physics_tick(&ctx, 1).await;
-        let state_opt = with_combat_runtime(&ctx, |rt| rt.gm_deadwarps.get(&pilot.ship_id).cloned());
+        let state_opt = get_gm_deadwarp(&ctx, pilot.ship_id);
         match state_opt {
             Some(st) => {
                 if st.phase == eve_server::services::gm_soak_commands::DeadwarpPhase::Returning {

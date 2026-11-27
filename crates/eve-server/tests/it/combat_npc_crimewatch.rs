@@ -9,8 +9,8 @@ use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     check_crimewatch_action_restriction, compute_killmail_esi_hash, dispatch_combat_rpc, evaluate_faction_police_response, evaluate_remote_assistance_legality,
     faction_police_sec_threshold, record_killmail_assist_action, register_container_lifetime, step_combat_system, step_sentry_gun_grid_aggression, step_wreck_and_jetcan_decay,
-    with_mut_combat_runtime,
 };
+use eve_server::services::gm_soak_commands::combat_ephemeral_test_helpers::mutate_self_destruct;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -298,11 +298,13 @@ async fn test_c3_wrecks_loot_50pct_ownership_killmails_esi_hash_pod_corpse_and_s
     // Re-initiate countdown, record an EWAR/damage assist from victim_id, and advance 120s
     let _ = dispatch_combat_rpc(&ctx, &mut attacker_sess, "ship", "SelfDestruct", &[PyRep::Integer(attacker_ship_id)], &kw_sd).await.expect("Re-start SelfDestruct");
     record_killmail_assist_action(&ctx, attacker_ship_id, victim_id, 587, 486, 150.0, false, ctx.now_unix());
-    with_mut_combat_runtime(&ctx, |rt| {
-        if let Some(cd) = rt.self_destruct_countdowns.get_mut(&attacker_ship_id) {
-            cd.detonate_at_unix = ctx.now_unix();
-        }
-    });
+    let detonate_now = ctx.now_unix();
+    assert!(
+        mutate_self_destruct(&ctx, attacker_ship_id, |cd| {
+            cd.detonate_at_unix = detonate_now;
+        }),
+        "self-destruct countdown must be active before detonation"
+    );
     step_combat_system(&ctx, sys_id, 1.0).await;
     assert!(sys_handle.get_ball_snapshot(attacker_ship_id).await.unwrap().is_none(), "Ship must detonate when 120s self-destruct countdown completes");
 

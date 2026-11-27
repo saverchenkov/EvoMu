@@ -5,9 +5,8 @@
 
 use super::super::*;
 use super::*;
-use crate::services::combat_crimewatch::{
-    with_mut_combat_runtime, ContainerLifetimeEntry, DroneSpaceState,
-};
+use crate::services::combat_crimewatch::{ContainerLifetimeEntry, DroneSpaceState};
+use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::seed_container_lifetime;
 use eve_db::types::{FleetMemberRecord, FleetRecord, FleetRole};
 use eve_db::{
     corp_roles, BookmarkRecord, CorporationRecord, InventoryFlag, InventoryItemRecord,
@@ -333,20 +332,19 @@ async fn beyonce_corp_asset_transfer_self_destruct_siphon_expiry_and_spawnpoint_
         "ItemNotFound"
     );
 
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.container_lifetimes.insert(
-            can_id,
-            ContainerLifetimeEntry {
-                item_id: can_id,
-                solar_system_id: sys_id,
-                type_id: 23,
-                owner_id: corp_id,
-                created_unix: 1_700_000_000,
-                lifetime_secs: 7_200,
-                is_abandoned: false,
-            },
-        );
-    });
+    seed_container_lifetime(
+        &ctx,
+        can_id,
+        ContainerLifetimeEntry {
+            item_id: can_id,
+            solar_system_id: sys_id,
+            type_id: 23,
+            owner_id: corp_id,
+            created_unix: 1_700_000_000,
+            lifetime_secs: 7_200,
+            is_abandoned: false,
+        },
+    );
     let exp = call_ops(&ctx, &mut sess, "beyonce", "GetContainerExpiryDate", &[PyRep::Integer(can_id)])
         .await
         .unwrap();

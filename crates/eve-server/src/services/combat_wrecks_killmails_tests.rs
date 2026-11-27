@@ -5,6 +5,9 @@
 mod combat_wrecks_loot_ops_cov_tests;
 
 use super::*;
+use crate::services::gm_soak_commands::combat_ephemeral_test_helpers::{
+    contains_self_destruct, seed_self_destruct, self_destruct_count,
+};
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
@@ -310,18 +313,17 @@ async fn container_decay_crystal_damage_deactivate_loot_all_and_self_destruct_ki
 
     // Record an assist, set expired countdown, and detonate
     record_killmail_assist_action(&ctx, ship_id, 90_000_009, 23_915, 2_905, 450.0, true, now);
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.self_destruct_countdowns.insert(
+    seed_self_destruct(
+        &ctx,
+        ship_id,
+        SelfDestructCountdown {
             ship_id,
-            SelfDestructCountdown {
-                ship_id,
-                char_id,
-                solar_system_id: sys_id,
-                started_unix: now.saturating_sub(120),
-                detonate_at_unix: now,
-            },
-        );
-    });
+            char_id,
+            solar_system_id: sys_id,
+            started_unix: now.saturating_sub(120),
+            detonate_at_unix: now,
+        },
+    );
     let sd_det = handle_wrecks_killmails(
         &ctx,
         &mut session,
@@ -953,7 +955,7 @@ async fn self_destruct_rpc_cancel_concurrent_with_lifecycle_has_zero_post_cancel
         0
     );
     assert_eq!(
-        with_combat_runtime(&ctx, |rt| rt.self_destruct_countdowns.len()),
+        self_destruct_count(&ctx),
         0
     );
 }
@@ -1532,9 +1534,7 @@ async fn self_destruct_and_abort_validate_optional_pickid() {
     .unwrap()
     .unwrap_err();
     assert_eq!(err_abort_mismatch.code, "InvalidShip");
-    assert!(with_combat_runtime(&ctx, |rt| {
-        rt.self_destruct_countdowns.contains_key(&ship_id)
-    }));
+    assert!(contains_self_destruct(&ctx, ship_id));
 
     let abort_ok = handle_wrecks_killmails(
         &ctx,
@@ -1633,7 +1633,7 @@ async fn cloaked_self_destruct_and_docked_abort_reject_without_mutating_db_or_ru
         assert_eq!(ctx.db.state_epoch(), epoch_0);
         assert_eq!(ctx.db.tx_commit_count(), tx_0);
         assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.self_destructs.is_empty()));
-        assert!(with_combat_runtime(&ctx, |rt| rt.self_destruct_countdowns.is_empty()));
+        assert_eq!(self_destruct_count(&ctx), 0);
         assert!(sys_h.get_combat_state(ship_id).await.unwrap().unwrap().is_cloaked);
     }
 
@@ -1679,7 +1679,7 @@ async fn cloaked_self_destruct_and_docked_abort_reject_without_mutating_db_or_ru
     assert_eq!(ctx.db.state_epoch(), epoch_unsynced);
     assert_eq!(ctx.db.tx_commit_count(), tx_unsynced);
     assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.self_destructs.is_empty()));
-    assert!(with_combat_runtime(&ctx, |rt| rt.self_destruct_countdowns.is_empty()));
+    assert_eq!(self_destruct_count(&ctx), 0);
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.remove(&cloak_mod_id);
         snap.items.remove(&cloak_mod_id);

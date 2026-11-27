@@ -2080,6 +2080,10 @@ pub fn step_gm_soak_and_deadwarp_for_system(ctx: &ServerContext, solar_system_id
     step_logi_soak_for_system(ctx, solar_system_id);
 }
 
+#[cfg(any(test, feature = "testkit"))]
+#[path = "combat_ephemeral_test_helpers.rs"]
+pub mod combat_ephemeral_test_helpers;
+
 #[cfg(test)]
 #[path = "gm_soak_commands_tests.rs"]
 mod gm_soak_commands_tests;
