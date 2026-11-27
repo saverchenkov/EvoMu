@@ -6,6 +6,7 @@
 //! `RouteExecutionResult`, or Quasar protobuf messages.
 
 pub mod career_goals;
+pub mod combat_ops;
 pub mod corp_governance;
 pub mod fleets;
 pub mod items;

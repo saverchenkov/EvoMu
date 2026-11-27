@@ -748,3 +748,102 @@ async fn gm_giveitem_and_createitem_update_shadow_client_in_station_and_cargo_ov
         assert!(!snap.items[&cargo_ships_stack_id].singleton);
     });
 }
+
+#[tokio::test]
+async fn gm_kill_npc_updates_shadow_client_and_invalid_args_reject_over_wire() {
+    let ctx = ServerContext::new();
+    let _guard = common::teardown_guard(&ctx);
+    let kw = HashMap::new();
+    let (mut harness, _ship_id) = prepare_undocked_gm_wire_harness(&ctx, 119_312).await;
+
+    let npc_type_id = ctx
+        .sde
+        .types
+        .iter()
+        .find(|(_, t)| t.category_id == 11 && ctx.sde.resolve_wreck_type_id(t.type_id, None).is_some())
+        .map(|(&tid, _)| tid)
+        .unwrap_or(587);
+    let spawn_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/spawnnpc {npc_type_id}"))],
+            &kw,
+        )
+        .await;
+    let npc_id = spawn_rep
+        .dict_get("npcID")
+        .and_then(PyRep::as_i64)
+        .filter(|&id| id > 0)
+        .expect("positive npcID from /spawnnpc");
+
+    let jita_handle = ctx.systems.get_handle(JITA).expect("Jita loaded");
+    assert!(
+        jita_handle
+            .get_ball_snapshot(npc_id)
+            .await
+            .expect("ball lookup")
+            .is_some(),
+        "spawned NPC ball must exist in Jita ballpark before /kill"
+    );
+
+    let kill_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/kill {npc_id}"))],
+            &kw,
+        )
+        .await;
+    assert_eq!(kill_rep.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    assert_eq!(kill_rep.dict_get("targetID"), Some(&PyRep::Integer(npc_id)));
+    let wreck_id = kill_rep
+        .dict_get("wreckID")
+        .and_then(PyRep::as_i64)
+        .filter(|&id| id > 0)
+        .expect("positive wreckID from /kill");
+    let killmail_id = kill_rep
+        .dict_get("killmailID")
+        .and_then(PyRep::as_i64)
+        .filter(|&id| id > 0)
+        .expect("positive killmailID from /kill");
+
+    harness.assert_shadow_converged();
+    let shadow = harness.shadow().unwrap();
+    assert!(
+        !shadow.ballpark.balls.contains_key(&npc_id),
+        "/kill must remove destroyed NPC ball from ShadowBallpark"
+    );
+    assert!(
+        shadow.ballpark.balls.contains_key(&wreck_id),
+        "/kill must propagate spawned wreck ball to ShadowBallpark"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.items.contains_key(&wreck_id));
+        assert!(snap.killmails.contains_key(&killmail_id));
+    });
+
+    for (bad_cmd, expected_code) in [
+        ("/heal badtarget", "InvalidSlashArgument"),
+        ("/heal 0", "InvalidSlashArgument"),
+        ("/heal -5", "InvalidSlashArgument"),
+        ("/heal me extra", "InvalidSlashArgument"),
+        ("/kill", "UnknownSlashCommand"),
+        ("/kill ", "UnknownSlashCommand"),
+        ("/kill \"\"", "InvalidSlashArgument"),
+        ("/kill 0", "InvalidSlashArgument"),
+        ("/kill -1", "InvalidSlashArgument"),
+        ("/kill badtarget", "InvalidSlashArgument"),
+        ("/kill me extra", "InvalidSlashArgument"),
+    ] {
+        let err = harness
+            .call_exchange("slash", None, "SlashCmd", &[PyRep::String(bad_cmd.into())], &kw)
+            .await
+            .result
+            .expect_err("invalid /heal or /kill args must reject over wire");
+        assert_eq!(err.code, expected_code, "{bad_cmd}");
+    }
+    harness.assert_shadow_converged();
+}

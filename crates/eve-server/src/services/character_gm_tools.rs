@@ -6,7 +6,6 @@ use super::{
     catch_up_skill_queue, is_valid_doll_or_portrait_payload, notify_watchlist_logon,
     serialize_doll_pyrep, serialize_portrait_pyrep,
 };
-use crate::combat::death_pipeline::execute_death_pipeline;
 use crate::router::notify_registry::{
     OnModuleFitted, OnSecurityStatusUpdate, OnSetPlayerStanding,
 };
@@ -16,8 +15,8 @@ use crate::router::slash_registry::{
 };
 use crate::router::slash_registry::{unknown_slash_error, SlashBoxFuture, SlashInvocation};
 use crate::router::{NotificationTarget, ServerContext};
-use eve_db::{InventoryFlag, InventoryItemRecord, KillmailRecord, SkillHistoryEntry};
-use eve_destiny::{Ball, CombatState, MovementMode};
+use eve_db::{InventoryFlag, InventoryItemRecord, SkillHistoryEntry};
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 use glam::DVec3;
@@ -668,7 +667,7 @@ pub fn handle_char_unbound(
 }
 
 pub(crate) use crate::services::character_gm_helpers::{
-    execute_gm_heal, is_me_or_myship, parse_slash_tokens, remove_npc_runtime_state,
+    execute_gm_heal_parsed, is_me_or_myship, parse_slash_tokens, remove_npc_runtime_state,
     resolve_gm_char_prefix, resolve_item_or_char_active_ship,
 };
 
@@ -1661,174 +1660,85 @@ pub(crate) fn dispatch_kill_slash<'a>(
             return Err(unknown_slash_error(inv.raw));
         }
         let (_, cid) = ServerContext::require_character(session)?;
-        let cmd = inv.raw;
-        let tokens = parse_slash_tokens(inv.rest);
-        let Some(tok) = tokens.first() else {
-            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /kill <target_id>".into(), client_error: None });
+        let parsed = crate::router::slash_registry::parse_kill_slash_args(inv.rest)?;
+        let target_id = match parsed.target {
+            crate::router::slash_registry::KillSlashTarget::SelfChar => cid,
+            crate::router::slash_registry::KillSlashTarget::EntityOrCharId(id) => id,
         };
-        let target_id = if is_me_or_myship(tok) {
-            cid
-        } else {
-            let Some(tid) = tok.parse::<i64>().ok().filter(|&id| id > 0) else {
-                return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /kill <target_id>".into(), client_error: None });
-            };
-            tid
-        };
-        let lookup = ctx.db.with_snapshot(|snap| {
-            let caller_sys = session
-                .solar_system_id
-                .or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id))
-                .unwrap_or(0);
-            if let Some(ch) = snap.characters.get(&target_id) {
-                Some((ch.character_id, ch.active_ship_id, ch.solar_system_id, true))
-            } else if let Some(item) = snap.items.get(&target_id) {
-                let sys = snap
-                    .characters
-                    .get(&item.owner_id)
-                    .map(|c| c.solar_system_id)
-                    .unwrap_or(caller_sys);
-                Some((item.owner_id, target_id, sys, true))
-            } else {
-                Some((cid, target_id, caller_sys, false))
-            }
-        });
-        let default_sys = session.solar_system_id.unwrap_or(0);
         let (victim_char_id, victim_ship_id, sys_id, in_db_items) =
-            lookup.unwrap_or((cid, target_id, default_sys, false));
-        let handle = ctx.systems.get_or_spawn(sys_id);
-        let ball_opt = handle
-            .get_ball_snapshot(victim_ship_id)
-            .await
-            .ok()
-            .flatten();
-        let victim_pos = ball_opt
-            .as_ref()
-            .map(|(_, b)| b.position)
-            .unwrap_or(DVec3::ZERO);
+            ctx.db.with_snapshot(|snap| {
+                let caller_sys = session
+                    .solar_system_id
+                    .filter(|&s| s > 0)
+                    .or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id))
+                    .unwrap_or(0);
+                if let Some(ch) = snap.characters.get(&target_id) {
+                    let eff_sys = if target_id == cid {
+                        session
+                            .solar_system_id
+                            .filter(|&s| s > 0)
+                            .unwrap_or(ch.solar_system_id)
+                    } else {
+                        ch.solar_system_id
+                    };
+                    let eff_ship = if target_id == cid {
+                        session
+                            .ship_id
+                            .filter(|&id| id > 0)
+                            .unwrap_or(ch.active_ship_id)
+                    } else {
+                        ch.active_ship_id
+                    };
+                    (ch.character_id, eff_ship, eff_sys, true)
+                } else if let Some(item) = snap.items.get(&target_id) {
+                    let item_sys = u32::try_from(item.location_id)
+                        .ok()
+                        .filter(|&s| ctx.sde.solar_systems.contains_key(&s));
+                    let sys = item_sys
+                        .or_else(|| snap.characters.get(&item.owner_id).map(|c| c.solar_system_id))
+                        .unwrap_or(caller_sys);
+                    (item.owner_id, target_id, sys, true)
+                } else {
+                    (cid, target_id, caller_sys, false)
+                }
+            });
 
-        if in_db_items {
-            match execute_death_pipeline(
-                ctx,
-                sys_id,
+        let outcome = crate::domain::combat_ops::destroy_entity_in_system(
+            ctx,
+            crate::domain::combat_ops::DestroyEntityRequest {
+                target_id,
                 victim_char_id,
                 victim_ship_id,
-                cid,
-                victim_pos,
-                ctx.now_unix(),
-            )
-            .await
-            {
-                Ok(outcome) => {
-                    if victim_char_id == cid {
-                        if let Some(cap_id) = outcome.ejected_capsule_id {
-                            let _ = ctx.execute_session_transition_sync(
-                                Some(session),
-                                crate::router::SessionTransitionSpec::for_kind(
-                                    cid,
-                                    crate::router::TransitionKind::EjectToPod { capsule_id: cap_id },
-                                    "gm_kill",
-                                )
-                                .with_apply_db(false)
-                                .with_emit_on_session_changed(false),
-                            );
-                        }
-                    }
-                    return Ok(PyRep::keyval([
-                        ("command", PyRep::String(cmd.to_string())),
-                        ("targetID", PyRep::Integer(victim_ship_id)),
-                        ("wreckID", PyRep::Integer(outcome.wreck_item_id)),
-                        ("killmailID", PyRep::Integer(outcome.killmail_id)),
-                        ("destroyed", PyRep::Bool(true)),
-                    ]));
-                }
-                Err(e) => {
-                    return Err(BridgeRpcError { code: "KillFailed".into(), message: e, client_error: None });
-                }
-            }
-        } else {
-            let Some((_, ball)) = ball_opt else {
-                return Err(BridgeRpcError { code: "TargetNotFound".into(), message: format!("Target entity {target_id} not found"), client_error: None });
-            };
-            let _ = handle.remove_ball(victim_ship_id).await;
-            ctx.systems
-                .invoke_npc_death_hook(sys_id, victim_ship_id, Some(cid))
-                .await;
-            crate::services::fw_gameplay::on_space_entity_destroyed(
-                ctx,
                 sys_id,
-                Some(cid),
-                victim_ship_id,
-                0,
-            )
-            .await;
-            if let Ok(mut spawns) = ctx.npc_spawns.write() {
-                if let Some(mgr) = spawns.get_mut(&sys_id) {
-                    mgr.entities.remove(&victim_ship_id);
-                }
+                killer_char_id: cid,
+                in_db_items,
+            },
+        )
+        .await
+        .map_err(crate::services::domain_err_to_rpc)?;
+
+        if in_db_items && victim_char_id == cid {
+            if let Some(cap_id) = outcome.ejected_capsule_id {
+                let _ = ctx.execute_session_transition_sync(
+                    Some(session),
+                    crate::router::SessionTransitionSpec::for_kind(
+                        cid,
+                        crate::router::TransitionKind::EjectToPod { capsule_id: cap_id },
+                        "gm_kill",
+                    )
+                    .with_apply_db(false)
+                    .with_emit_on_session_changed(false),
+                );
             }
-            let wreck_type_id = ctx.sde.resolve_wreck_type_id(ball.type_id, None).unwrap_or(26557);
-            let (wreck_id, killmail_id) = ctx.db.with_mut_snapshot(|snap| {
-                snap.next_entity_id += 1;
-                let wid = snap.next_entity_id;
-                snap.items.insert(
-                    wid,
-                    InventoryItemRecord {
-                        item_id: wid,
-                        type_id: wreck_type_id,
-                        owner_id: cid,
-                        location_id: sys_id as i64,
-                        flag: InventoryFlag::Cargo,
-                        quantity: 1,
-                        singleton: true,
-                        version: 1,
-                        dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                        is_blueprint_copy: false,
-                        blueprint_runs_remaining: None,
-                    },
-                );
-                snap.next_entity_id += 1;
-                let kid = snap.next_entity_id;
-                snap.record_killmail(
-                    KillmailRecord {
-                        kill_id: kid,
-                        victim_character_id: 0,
-                        attacker_character_id: cid,
-                        solar_system_id: sys_id,
-                        ship_type_id: ball.type_id,
-                        total_value_isk: 10_000.0,
-                        ..Default::default()
-                    },
-                    ctx.now_unix(),
-                );
-                (wid, kid)
-            });
-            let _ = handle
-                .spawn_ball_with_combat(
-                    Ball {
-                        id: wreck_id,
-                        type_id: wreck_type_id,
-                        position: victim_pos,
-                        velocity: DVec3::ZERO,
-                        max_velocity: 0.0,
-                        inertia: 1.0,
-                        mass: 10_000.0,
-                        radius: 50.0,
-                        speed_fraction: 0.0,
-                        mode: MovementMode::Stop,
-                    },
-                    CombatState::default(),
-                )
-                .await;
-            Ok(PyRep::keyval([
-                ("command", PyRep::String(cmd.to_string())),
-                ("targetID", PyRep::Integer(victim_ship_id)),
-                ("wreckID", PyRep::Integer(wreck_id)),
-                ("killmailID", PyRep::Integer(killmail_id)),
-                ("destroyed", PyRep::Bool(true)),
-            ]))
         }
+
+        Ok(PyRep::keyval([
+            ("command", PyRep::String(inv.raw.to_string())),
+            ("targetID", PyRep::Integer(outcome.target_id)),
+            ("wreckID", PyRep::Integer(outcome.wreck_id)),
+            ("killmailID", PyRep::Integer(outcome.killmail_id)),
+            ("destroyed", PyRep::Bool(true)),
+        ]))
     })
 }
 

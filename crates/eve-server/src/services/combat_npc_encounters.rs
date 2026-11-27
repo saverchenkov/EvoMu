@@ -237,7 +237,7 @@ async fn handle_npc_destroyed_in_space_inner(
     if killer > 0 {
         crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity_in_db(
             db,
-            None,
+            notify_ctx.map(|c| &*c.quasar_gateway),
             killer,
             &["DamageNPCShips", "DestroyNPCShips"],
             1,

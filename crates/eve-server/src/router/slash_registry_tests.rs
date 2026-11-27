@@ -1568,3 +1568,113 @@ fn track2_items_domain_parity_source_guard() {
         );
     }
 }
+
+#[test]
+fn typed_heal_and_kill_argument_parsers_enforce_contract() {
+    assert_eq!(
+        parse_heal_slash_args("").expect("empty /heal"),
+        HealSlashArgs {
+            target: HealSlashTarget::SelfShip,
+        }
+    );
+    for alias in ["  ", "me", "ME", "myship", "self", "  \"me\"  "] {
+        assert_eq!(
+            parse_heal_slash_args(alias).expect("self alias /heal"),
+            HealSlashArgs {
+                target: HealSlashTarget::SelfShip,
+            },
+            "for {alias:?}"
+        );
+    }
+    assert_eq!(
+        parse_heal_slash_args(" 90000002 ").expect("explicit ID /heal"),
+        HealSlashArgs {
+            target: HealSlashTarget::EntityOrCharId(90_000_002),
+        }
+    );
+    for bad in ["0", "-5", "badtarget", "me extra", "90000002 1", "\"\""] {
+        let err = parse_heal_slash_args(bad).expect_err("bad /heal arg must fail");
+        assert_eq!(err.code, "InvalidSlashArgument", "for /heal {bad:?}");
+        assert!(matches!(
+            err.client_error.as_deref(),
+            Some(ClientError::User {
+                key: UserErrorKey::SlashError,
+                ..
+            })
+        ));
+    }
+
+    for alias in ["me", "MYSHIP", "self", " \"self\" "] {
+        assert_eq!(
+            parse_kill_slash_args(alias).expect("self alias /kill"),
+            KillSlashArgs {
+                target: KillSlashTarget::SelfChar,
+            },
+            "for {alias:?}"
+        );
+    }
+    assert_eq!(
+        parse_kill_slash_args(" 950001 ").expect("explicit ID /kill"),
+        KillSlashArgs {
+            target: KillSlashTarget::EntityOrCharId(950_001),
+        }
+    );
+    for bad in ["", "   ", "0", "-1", "badtarget", "me extra", "950001 2", "\"\""] {
+        let err = parse_kill_slash_args(bad).expect_err("bad /kill arg must fail");
+        assert_eq!(err.code, "InvalidSlashArgument", "for /kill {bad:?}");
+        assert!(matches!(
+            err.client_error.as_deref(),
+            Some(ClientError::User {
+                key: UserErrorKey::SlashError,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn track2_combat_domain_parity_source_guard() {
+    let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    let helpers_raw =
+        fs::read_to_string(src_root.join("services/character_gm_helpers.rs")).expect("helpers");
+    let helpers_prod = production_prefix(&helpers_raw);
+    assert!(helpers_prod.contains("restore_ship_vital_state("));
+    for forbidden in ["get_or_spawn", "snap.items.values_mut", "heal_combat_state("] {
+        assert!(
+            !helpers_prod.contains(forbidden),
+            "character_gm_helpers.rs must not contain `{forbidden}`"
+        );
+    }
+
+    let tools_raw =
+        fs::read_to_string(src_root.join("services/character_gm_tools.rs")).expect("tools");
+    let tools_prod = production_prefix(&tools_raw);
+    let kill_start = tools_prod
+        .find("pub(crate) fn dispatch_kill_slash")
+        .expect("dispatch_kill_slash");
+    let kill_end = tools_prod[kill_start..]
+        .find("pub(crate) fn dispatch_location_slash")
+        .map(|off| kill_start + off)
+        .expect("dispatch_location_slash");
+    let kill_fn = &tools_prod[kill_start..kill_end];
+    assert!(kill_fn.contains("destroy_entity_in_system("));
+    for forbidden in ["get_or_spawn", "execute_death_pipeline(", "snap.items.insert", "10_000.0"] {
+        assert!(
+            !kill_fn.contains(forbidden),
+            "dispatch_kill_slash must not contain `{forbidden}`"
+        );
+    }
+
+    let combat_ops_raw =
+        fs::read_to_string(src_root.join("domain/combat_ops.rs")).expect("domain/combat_ops.rs");
+    let combat_ops_prod = production_prefix(&combat_ops_raw);
+    assert!(!combat_ops_prod.contains("get_or_spawn"));
+    assert!(!combat_ops_prod.contains("items.insert("));
+
+    let repair_raw =
+        fs::read_to_string(src_root.join("services/repair_service.rs")).expect("repair_service");
+    let repair_prod = production_prefix(&repair_raw);
+    assert!(repair_prod.contains("clear_ship_and_fitted_damage_in_snap("));
+    assert!(repair_prod.contains("clear_fitted_module_damage_in_cache("));
+}
