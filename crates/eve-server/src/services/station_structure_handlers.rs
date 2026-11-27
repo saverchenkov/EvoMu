@@ -1256,9 +1256,11 @@ pub fn validate_npc_station_docking_gate(ctx: &ServerContext, char_id: i64, stat
         let weapons_active = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states
             .get(&char_id)
             .is_some_and(|s| s.is_weapon_timer_active(now_unix));
-        let retribution_active = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            rt.disapproval_flags.get(&char_id).copied().is_some_and(|exp| now_unix < exp)
-        });
+        let retribution_active = crate::services::combat_crimewatch::is_disapproval_flag_active(
+            ctx,
+            char_id,
+            now_unix,
+        );
         if weapons_active || retribution_active {
             return Err(BridgeRpcError::user_error("FulcrumRefusesTimerActive"));
         }

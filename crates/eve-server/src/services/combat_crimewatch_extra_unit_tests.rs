@@ -21,10 +21,10 @@ async fn defaults_ephemeral_accessors_and_signature_radius_shield_recharge_edges
     let (mut ctx, _session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
 
     with_mut_combat_ephemeral(&ctx, |rt| {
-        rt.disapproval_flags.insert(char_id, 123_456);
+        rt.clone_soldier_cooldown_until.insert(sys_id, 123_456);
     });
     assert_eq!(
-        with_combat_ephemeral(&ctx, |rt| rt.disapproval_flags.get(&char_id).copied()),
+        with_combat_ephemeral(&ctx, |rt| rt.clone_soldier_cooldown_until.get(&sys_id).copied()),
         Some(123_456)
     );
 
@@ -1299,7 +1299,7 @@ async fn has_extended_runtime_state_fields_epoch_sync_and_sig_radius_mutants() {
             .modified_system_securities
             .insert(30_000_145, 0.55);
     });
-    assert_eq!(with_combat_runtime(&ctx, |r| r.disapproval_flags.get(&char_id).copied()), Some(44_444));
+    assert_eq!(char_disapproval_flag_until(&ctx, char_id), Some(44_444));
     assert_eq!(
         with_combat_runtime(&ctx, |r| r.clone_soldier_cooldown_until.get(&30_000_145).copied()),
         Some(550)
@@ -1623,16 +1623,19 @@ fn in_snap_combat_mutations_survive_subsequent_reads_and_roll_back_cleanly_on_ab
 
 #[test]
 fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_concurrently() {
-    let (ctx, _session, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let (ctx, _session, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
     let victim_id = char_id + 2;
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.combat_crimewatch_state
             .disapproval_flags
             .insert(victim_id, 100_000);
+        with_mut_combat_runtime_in_snap(snap, |rt| {
+            rt.clone_soldier_cooldown_until.insert(sys_id, 100_000);
+        });
     });
     assert_eq!(
-        with_combat_runtime(&ctx, |rt| rt.disapproval_flags.get(&victim_id).copied()),
+        with_combat_runtime(&ctx, |rt| rt.clone_soldier_cooldown_until.get(&sys_id).copied()),
         Some(100_000)
     );
     let epoch_e1 = ctx.db.combat_state_epoch();
@@ -1650,6 +1653,9 @@ fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_co
                 snap.combat_crimewatch_state
                     .disapproval_flags
                     .insert(victim_id, 999_000);
+                with_mut_combat_runtime_in_snap(snap, |rt| {
+                    rt.clone_soldier_cooldown_until.insert(sys_id, 999_000);
+                });
             });
         }
     });
@@ -1659,8 +1665,12 @@ fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_co
     {
         let guard = ctx.combat_ephemeral.read().unwrap();
         assert_eq!(guard.synced_db_epoch, epoch_e2);
-        assert_eq!(guard.disapproval_flags.get(&victim_id).copied(), Some(999_000));
+        assert_eq!(
+            guard.clone_soldier_cooldown_until.get(&sys_id).copied(),
+            Some(999_000)
+        );
     }
+    assert_eq!(char_disapproval_flag_until(&ctx, victim_id), Some(999_000));
 
     // Flush path 1: concurrent DB commit between snapshot check and epoch stamp refuses stale stamp & rehydrates.
     let mut flush_injected = false;
@@ -1674,6 +1684,9 @@ fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_co
                     snap.combat_crimewatch_state
                         .disapproval_flags
                         .insert(victim_id, 1_500_000);
+                    with_mut_combat_runtime_in_snap(snap, |rt| {
+                        rt.clone_soldier_cooldown_until.insert(sys_id, 1_500_000);
+                    });
                 });
             }
         },
@@ -1685,7 +1698,7 @@ fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_co
         let guard = ctx.combat_ephemeral.read().unwrap();
         assert_eq!(guard.synced_db_epoch, epoch_e3);
         assert_eq!(
-            guard.disapproval_flags.get(&victim_id).copied(),
+            guard.clone_soldier_cooldown_until.get(&sys_id).copied(),
             Some(1_500_000)
         );
     }
@@ -1705,6 +1718,9 @@ fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_co
                     snap.combat_crimewatch_state
                         .disapproval_flags
                         .insert(victim_id, 2_250_000);
+                    with_mut_combat_runtime_in_snap(snap, |rt| {
+                        rt.clone_soldier_cooldown_until.insert(sys_id, 2_250_000);
+                    });
                 });
             }
         },
@@ -1721,7 +1737,7 @@ fn rehydrate_and_flush_reject_stale_snapshot_when_combat_state_epoch_advances_co
         let guard = ctx.combat_ephemeral.read().unwrap();
         assert_eq!(guard.synced_db_epoch, epoch_e4);
         assert_eq!(
-            guard.disapproval_flags.get(&victim_id).copied(),
+            guard.clone_soldier_cooldown_until.get(&sys_id).copied(),
             Some(2_250_000)
         );
     }
@@ -1738,13 +1754,29 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
     with_combat_runtime(&ctx, |_| {});
 
     // 1. Prior `_in_snap` commit modifies DB-owned (`player_bounty_pool`, `safety_levels`, `drone_settings`, `npc_timers`,
-    // `crimewatch_timer_states`, `crimewatch_timer_triggered_at`, `npc_sec_gain_intervals`, `modified_system_securities[&sys_a]`),
-    // core (`disapproval_flags`), and extended (`clone_soldier_cooldown_until[&sys_a]`) directly in DB without touching `combat_ephemeral`.
+    // `crimewatch_timer_states`, `crimewatch_timer_triggered_at`, `npc_sec_gain_intervals`, `disapproval_flags`,
+    // `sec_status_transactions`, `modified_system_securities[&sys_a]`) and extended (`clone_soldier_cooldown_until[&sys_a]`)
+    // directly in DB without touching `combat_ephemeral`.
     ctx.db.with_mut_snapshot(|snap| {
         set_char_safety_level_in_snap(snap, victim_id, SafetyLevel::Yellow);
         let cw = snap.combat_crimewatch_state.as_inner_mut();
         cw.drone_settings.insert(victim_id, (false, true));
         cw.npc_timers.insert(victim_id, 1_700_000_500);
+        cw.disapproval_flags.insert(victim_id, 500_000);
+        cw.sec_status_transactions.insert(
+            victim_id,
+            vec![SecStatusTransaction {
+                timestamp_unix: 1_700_000_100,
+                old_sec: 1.0,
+                new_sec: 0.9,
+                delta: -0.1,
+                reason: "Illegal Ship Aggression".into(),
+                solar_system_id: sys_a,
+                event_type_id: 379,
+                other_owner_id: Some(char_id),
+                other_type_id: None,
+            }],
+        );
         cw.crimewatch_timer_states
             .insert(victim_id, (101, 201, 401, 300, 500));
         cw.crimewatch_timer_triggered_at
@@ -1760,7 +1792,6 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
             .insert((sys_a, victim_id), 1_700_000_000);
         cw.record_destroyed_item_id(998_877);
         with_mut_combat_runtime_in_snap(snap, |rt| {
-            rt.disapproval_flags.insert(victim_id, 500_000);
             rt.clone_soldier_cooldown_until.insert(sys_a, 400);
         });
     });
@@ -1791,12 +1822,13 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
                 hook_injected = true;
                 ctx.db.with_mut_snapshot(|snap| {
                     set_char_safety_level_in_snap(snap, victim_concurrent, SafetyLevel::Red);
-                    snap.combat_crimewatch_state
-                        .as_inner_mut()
-                        .player_bounty_pool
+                    let cw = snap.combat_crimewatch_state.as_inner_mut();
+                    cw.player_bounty_pool
                         .insert(victim_concurrent, 900_000.0);
+                    cw.disapproval_flags
+                        .insert(victim_concurrent, 900_000);
                     with_mut_combat_runtime_in_snap(snap, |rt| {
-                        rt.disapproval_flags.insert(victim_concurrent, 900_000);
+                        rt.ci_sentry_deployed_systems.insert(sys_a);
                     });
                 });
             }
@@ -1811,14 +1843,15 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
         char_safety_level(&ctx, victim_concurrent),
         Some(SafetyLevel::Red)
     );
+    assert_eq!(char_disapproval_flag_until(&ctx, victim_id), Some(500_000));
+    assert_eq!(
+        char_disapproval_flag_until(&ctx, victim_concurrent),
+        Some(900_000)
+    );
     with_combat_runtime(&ctx, |rt| {
-        assert_eq!(rt.disapproval_flags.get(&victim_id).copied(), Some(500_000));
-        assert_eq!(
-            rt.disapproval_flags.get(&victim_concurrent).copied(),
-            Some(900_000)
-        );
         assert_eq!(rt.clone_soldier_cooldown_until.get(&sys_a).copied(), Some(400));
         assert_eq!(rt.clone_soldier_cooldown_until.get(&sys_b).copied(), Some(250));
+        assert!(rt.ci_sentry_deployed_systems.contains(&sys_a));
         assert_eq!(
             rt.self_destruct_countdowns
                 .get(&ship_id)
@@ -1859,6 +1892,10 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
         persisted.disapproval_flags.get(&victim_concurrent).copied(),
         Some(900_000)
     );
+    assert_eq!(
+        persisted.sec_status_transactions.get(&victim_id).map(Vec::len),
+        Some(1)
+    );
     assert_eq!(persisted.modified_system_securities.get(&sys_a).copied(), Some(0.4));
     assert_eq!(
         persisted.pending_bounty_ticks.get(&(sys_a, victim_id)).copied(),
@@ -1891,22 +1928,26 @@ fn flush_merges_dirty_extended_state_with_prior_in_snap_commit_without_clobberin
         decoded.clone_soldier_cooldown_until.get(&sys_b).copied(),
         Some(250)
     );
+    assert!(decoded.ci_sentry_deployed_systems.contains(&sys_a));
     assert!(decoded.self_destruct_countdowns.contains_key(&ship_id));
 }
 
 #[test]
 fn crimewatch_states_epoch_bump_preserves_unpersisted_core_mutation_in_combat_ephemeral() {
-    let (ctx, _session, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let (ctx, _session, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
     let victim_id = char_id + 20;
+    let unpersisted_sys = sys_id + 57;
 
     with_combat_runtime(&ctx, |_| {});
     let cw_ep0 = ctx.db.combat_state_epoch();
     let rt_ep0 = ctx.db.combat_runtime_epoch();
 
-    // Unpersisted core-field mutation in RAM (`disapproval_flags`).
+    // Unpersisted mutation in RAM (`clone_soldier_cooldown_until`).
     {
         let mut guard = ctx.combat_ephemeral.write().unwrap();
-        guard.disapproval_flags.insert(victim_id, 777_000);
+        guard
+            .clone_soldier_cooldown_until
+            .insert(unpersisted_sys, 777_000);
     }
 
     // Unrelated commits to `crimewatch_states` and `crimewatch_aggressions` bump `combat_state_epoch`,
@@ -1936,10 +1977,10 @@ fn crimewatch_states_epoch_bump_preserves_unpersisted_core_mutation_in_combat_ep
     assert!(ctx.db.combat_state_epoch() > cw_ep0);
     assert_eq!(ctx.db.combat_runtime_epoch(), rt_ep0);
 
-    // Reading via `with_combat_runtime` or flushing must NOT drop the unpersisted core edits.
+    // Reading via `with_combat_runtime` or flushing must NOT drop the unpersisted edits.
     with_combat_runtime(&ctx, |rt| {
         assert_eq!(
-            rt.disapproval_flags.get(&victim_id).copied(),
+            rt.clone_soldier_cooldown_until.get(&unpersisted_sys).copied(),
             Some(777_000)
         );
     });
@@ -1948,19 +1989,21 @@ fn crimewatch_states_epoch_bump_preserves_unpersisted_core_mutation_in_combat_ep
 
     with_combat_runtime(&ctx, |rt| {
         assert_eq!(
-            rt.disapproval_flags.get(&victim_id).copied(),
+            rt.clone_soldier_cooldown_until.get(&unpersisted_sys).copied(),
             Some(777_000)
         );
     });
+    let mut restored = CombatRuntimeState::default();
     ctx.db.with_snapshot(|s| {
-        assert_eq!(
-            s.combat_crimewatch_state
-                .disapproval_flags
-                .get(&victim_id)
-                .copied(),
-            Some(777_000)
-        );
+        restored.sync_from_persisted(&s.combat_crimewatch_state);
     });
+    assert_eq!(
+        restored
+            .clone_soldier_cooldown_until
+            .get(&unpersisted_sys)
+            .copied(),
+        Some(777_000)
+    );
 }
 
 

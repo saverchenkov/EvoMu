@@ -334,6 +334,67 @@ pub fn trigger_npc_timer(ctx: &ServerContext, char_id: i64, now_unix: u64) {
     });
 }
 
+/// Returns a character's persisted disapproval expiration (`unix_secs`) from SQLite snapshot storage, if set.
+#[inline]
+pub fn char_disapproval_flag_until(ctx: &ServerContext, char_id: i64) -> Option<u64> {
+    ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .disapproval_flags
+            .get(&char_id)
+            .copied()
+    })
+}
+
+/// Returns `true` when `char_id` has an active disapproval flag (`now_unix < exp`) in DB state.
+#[inline]
+pub fn is_disapproval_flag_active(ctx: &ServerContext, char_id: i64, now_unix: u64) -> bool {
+    char_disapproval_flag_until(ctx, char_id).is_some_and(|exp| now_unix < exp)
+}
+
+/// Sets `char_id`'s disapproval expiration (`expires_unix`) directly in SQLite snapshot storage.
+#[inline]
+pub fn set_char_disapproval_flag(ctx: &ServerContext, char_id: i64, expires_unix: u64) {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .disapproval_flags
+            .insert(char_id, expires_unix);
+    });
+}
+
+/// Updates `char_id`'s `security_status` to `tx.new_sec` and records `tx` in
+/// `snap.combat_crimewatch_state` within the same snapshot mutation.
+#[inline]
+pub fn record_sec_status_change_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    tx: SecStatusTransaction,
+) {
+    if let Some(ch) = snap.characters.get_mut(&char_id) {
+        ch.security_status = tx.new_sec;
+    }
+    snap.combat_crimewatch_state
+        .as_inner_mut()
+        .sec_status_transactions
+        .entry(char_id)
+        .or_default()
+        .push(tx);
+}
+
+/// Returns a character's persisted [`SecStatusTransaction`] log entries from SQLite snapshot storage.
+#[inline]
+pub fn char_sec_status_transactions(
+    ctx: &ServerContext,
+    char_id: i64,
+) -> Vec<SecStatusTransaction> {
+    ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .sec_status_transactions
+            .get(&char_id)
+            .cloned()
+            .unwrap_or_default()
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExtendedNpcEntity {
     pub ball_id: i64,
@@ -396,8 +457,6 @@ pub struct CombatRuntimeState {
     pub container_lifetimes: HashMap<i64, ContainerLifetimeEntry>,
     pub self_destruct_countdowns: HashMap<i64, SelfDestructCountdown>,
     pub self_destruct_generations: HashMap<i64, u64>,
-    pub sec_status_transactions: HashMap<i64, Vec<SecStatusTransaction>>,
-    pub disapproval_flags: HashMap<i64, u64>,
     pub sentry_gun_aggression: HashMap<(u32, i64), SentryAggressionState>,
     pub npc_entities: HashMap<i64, ExtendedNpcEntity>,
     pub encounter_waves: HashMap<u32, EncounterWaveDirector>,
@@ -591,10 +650,8 @@ impl CombatRuntimeState {
         next
     }
 
-    pub fn sync_core_from_persisted(&mut self, p: &eve_db::PersistedCombatCrimewatchState) {
-        self.sec_status_transactions = p.sec_status_transactions.clone();
-        self.disapproval_flags = p.disapproval_flags.clone();
-    }
+    /// Core persisted crimewatch fields live directly on `WorldStateSnapshot`; no-op hook kept for incremental sync.
+    pub fn sync_core_from_persisted(&mut self, _p: &eve_db::PersistedCombatCrimewatchState) {}
 
     pub fn sync_from_persisted(&mut self, p: &eve_db::PersistedCombatCrimewatchState) {
         self.sync_core_from_persisted(p);
@@ -707,8 +764,6 @@ impl CombatRuntimeState {
 
     /// Writes only fields still owned by `CombatRuntimeState` onto `dst`, preserving DB-owned fields.
     pub fn apply_runtime_fields_to_persisted(&self, dst: &mut eve_db::PersistedCombatCrimewatchState) {
-        dst.sec_status_transactions = self.sec_status_transactions.clone();
-        dst.disapproval_flags = self.disapproval_flags.clone();
         dst.extended_runtime_json =
             self.encode_extended_runtime_json_preserving(&dst.extended_runtime_json);
     }
@@ -957,7 +1012,7 @@ fn merge_persisted_3way(
     };
 
     eve_db::PersistedCombatCrimewatchState {
-        sec_status_transactions: merge_map_3way(&base.sec_status_transactions, &db.sec_status_transactions, &ram.sec_status_transactions),
+        sec_status_transactions: db.sec_status_transactions.clone(),
         safety_levels: db.safety_levels.clone(),
         drone_settings: db.drone_settings.clone(),
         limited_engagements: db.limited_engagements.clone(),
@@ -965,7 +1020,7 @@ fn merge_persisted_3way(
         crimewatch_timer_states: db.crimewatch_timer_states.clone(),
         crimewatch_timer_triggered_at: db.crimewatch_timer_triggered_at.clone(),
         npc_sec_gain_intervals: db.npc_sec_gain_intervals.clone(),
-        disapproval_flags: merge_map_3way(&base.disapproval_flags, &db.disapproval_flags, &ram.disapproval_flags),
+        disapproval_flags: db.disapproval_flags.clone(),
         duel_challenges: db.duel_challenges.clone(),
         corp_aggression_settings: db.corp_aggression_settings.clone(),
         player_bounty_pool: db.player_bounty_pool.clone(),

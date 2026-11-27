@@ -1220,3 +1220,97 @@ fn crimewatch_mut_helpers_preserve_cow_arcs_and_roll_back_pending_despawns_on_er
         assert_eq!(dir.pending_concord_despawns, vec![(sys_id, 777_001, 1_120)]);
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concord_does_not_apply_sec_status_loss_twice_within_30_seconds() {
+    let ctx = test_ctx();
+    let t0 = 1_750_000_000_u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0)));
+    let sys_id = 30_000_142;
+    let crim = 90_000_001;
+    let victim = 90_000_002;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&crim) {
+            ch.security_status = 2.0;
+        }
+        if let Some(vch) = snap.characters.get_mut(&victim) {
+            vch.security_status = 0.0;
+        }
+    });
+
+    let ship_1 = 100_230_001;
+    spawn_ship(&ctx, sys_id, ship_1, crim, 587, DVec3::new(900.0, 0.0, 0.0));
+    let mut dir = CrimeWatchDirector::new();
+    dir.states.insert(
+        crim,
+        CharacterCrimeWatchState {
+            character_id: crim,
+            criminal_flag_until_unix: t0 + 900,
+            pending_concord_arrival: Some((sys_id, t0, ship_1, victim)),
+            ..Default::default()
+        },
+    );
+    let rep1 = dir.step_concord(&ctx, t0, 1).await;
+    assert_eq!(rep1.len(), 1);
+    let sec_after_1 = ctx.db.with_snapshot(|s| s.characters[&crim].security_status);
+    assert!(
+        sec_after_1 < 2.0,
+        "first CONCORD execution must apply illegal PvP security status loss"
+    );
+    let txs1 = crate::combat::crimewatch_tail_test_helpers::sec_status_txs(&ctx, crim);
+    assert_eq!(txs1.len(), 1);
+    assert!(txs1[0].delta < 0.0);
+    assert_eq!(txs1[0].solar_system_id, sys_id);
+
+    // Second CONCORD execution within 30s (at +20s) must NOT apply a second sec-status penalty.
+    ctx.clock().advance_secs(20);
+    let t1 = t0 + 20;
+    let ship_2 = 100_230_002;
+    spawn_ship(&ctx, sys_id, ship_2, crim, 587, DVec3::new(1_000.0, 0.0, 0.0));
+    dir.states.insert(
+        crim,
+        CharacterCrimeWatchState {
+            character_id: crim,
+            criminal_flag_until_unix: t1 + 900,
+            pending_concord_arrival: Some((sys_id, t1, ship_2, victim)),
+            ..Default::default()
+        },
+    );
+    let rep2 = dir.step_concord(&ctx, t1, 2).await;
+    assert_eq!(rep2.len(), 1);
+    let sec_after_2 = ctx.db.with_snapshot(|s| s.characters[&crim].security_status);
+    assert!(
+        (sec_after_2 - sec_after_1).abs() < 1e-12,
+        "CONCORD must not apply sec-status loss twice within 30s (before={sec_after_1}, after={sec_after_2})"
+    );
+    assert_eq!(
+        crate::combat::crimewatch_tail_test_helpers::sec_status_txs(&ctx, crim).len(),
+        1
+    );
+
+    // Once > 30s have elapsed (at +31s), a new CONCORD execution applies sec-status loss again.
+    ctx.clock().advance_secs(11);
+    let t2 = t0 + 31;
+    let ship_3 = 100_230_003;
+    spawn_ship(&ctx, sys_id, ship_3, crim, 587, DVec3::new(1_100.0, 0.0, 0.0));
+    dir.states.insert(
+        crim,
+        CharacterCrimeWatchState {
+            character_id: crim,
+            criminal_flag_until_unix: t2 + 900,
+            pending_concord_arrival: Some((sys_id, t2, ship_3, victim)),
+            ..Default::default()
+        },
+    );
+    let rep3 = dir.step_concord(&ctx, t2, 3).await;
+    assert_eq!(rep3.len(), 1);
+    let sec_after_3 = ctx.db.with_snapshot(|s| s.characters[&crim].security_status);
+    assert!(
+        sec_after_3 < sec_after_1,
+        "CONCORD after >30s window must apply sec-status loss again"
+    );
+    assert_eq!(
+        crate::combat::crimewatch_tail_test_helpers::sec_status_txs(&ctx, crim).len(),
+        2
+    );
+}

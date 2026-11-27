@@ -498,18 +498,18 @@ fn get_structures_directory_info_standing_gates_and_fulcrum_timers() {
     assert!(check_station_service_standing(&ctx, char_id, 60_003_760, 1, 1, 999_999_999, None).is_ok());
     assert_eq!(effective_standing_with_skills(0.0, 3, 3), 0.0);
 
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.insert(char_id, 1_800_000_500);
-    });
+    crate::combat::crimewatch_tail_test_helpers::set_disapproval_flag(
+        &ctx,
+        char_id,
+        1_800_000_500,
+    );
     assert_eq!(
         validate_npc_station_docking_gate(&ctx, char_id, 60_015_187)
             .unwrap_err()
             .code,
         "FulcrumRefusesTimerActive"
     );
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.remove(&char_id);
-    });
+    crate::combat::crimewatch_tail_test_helpers::clear_disapproval_flag(&ctx, char_id);
 
     // StationNotFound and StationServiceUnavailable on evaluate_station_service_standing_gate
     assert_eq!(

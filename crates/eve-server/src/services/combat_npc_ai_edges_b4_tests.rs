@@ -432,10 +432,12 @@ async fn step_ai_all_archetypes_target_pruning_disapproval_and_ewar_effects() {
             .await;
     }
 
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        // Pilot has disapproval flag so ZarzakhGateGun triggers ECM jam + attacks
-        rt.disapproval_flags.insert(char_id, 1_700_000_600);
-    });
+    // Pilot has disapproval flag so ZarzakhGateGun triggers ECM jam + attacks
+    crate::combat::crimewatch_tail_test_helpers::set_disapproval_flag(
+        &ctx,
+        char_id,
+        1_700_000_600,
+    );
     for (bid, arch) in archetypes {
         let mut ent = make_test_npc_entity(bid, 606, sys_id, arch);
         ent.optimal_range = 100_000.0;

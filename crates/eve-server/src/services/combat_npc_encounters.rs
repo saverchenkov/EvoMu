@@ -439,13 +439,10 @@ async fn handle_npc_destroyed_in_space_inner(
                             crate::combat::npc_ai::compute_sec_status_gain(old_sec, base_bounty)
                                 * supp_mult;
                         let new_sec = (old_sec + gain).min(5.0).clamp(-10.0, 10.0);
-                        if let Some(ch) = snap.characters.get_mut(&killer) {
-                            ch.security_status = new_sec;
-                        }
-                        rt.sec_status_transactions
-                            .entry(killer)
-                            .or_default()
-                            .push(crate::services::combat_crimewatch::SecStatusTransaction {
+                        crate::services::combat_crimewatch::record_sec_status_change_in_snap(
+                            snap,
+                            killer,
+                            crate::services::combat_crimewatch::SecStatusTransaction {
                                 timestamp_unix: now,
                                 old_sec,
                                 new_sec,
@@ -455,7 +452,8 @@ async fn handle_npc_destroyed_in_space_inner(
                                 event_type_id: crate::services::combat_crimewatch::crimewatch_timers::EVENT_SEC_STATUS_KILL_PIRATE_NPC,
                                 other_owner_id: None,
                                 other_type_id: Some(npc_type_id),
-                            });
+                            },
+                        );
                     }
                 }
                 rt.destroyed_npc_cache.insert(killed_ball_id, npc);

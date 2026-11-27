@@ -15,7 +15,7 @@ use crate::router::notify_registry::{
 };
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::{
-    with_mut_combat_runtime, with_mut_combat_runtime_tx_locks, EntropicSpoolState,
+    with_mut_combat_runtime_tx_locks, EntropicSpoolState,
 };
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::InvType;
@@ -771,12 +771,9 @@ pub async fn handle_ship_or_npc_destruction(
                 let gain = crate::combat::npc_ai::compute_sec_status_gain(old_sec, bounty) * supp_mult;
                 let new_sec = (old_sec + gain).min(5.0).clamp(-10.0, 10.0);
                 ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(ch) = snap.characters.get_mut(&attacker_char_id) {
-                        ch.security_status = new_sec;
-                    }
-                });
-                with_mut_combat_runtime(ctx, |rt| {
-                    rt.sec_status_transactions.entry(attacker_char_id).or_default().push(
+                    crate::services::combat_crimewatch::record_sec_status_change_in_snap(
+                        snap,
+                        attacker_char_id,
                         crate::services::combat_crimewatch::SecStatusTransaction {
                             timestamp_unix: now_unix, old_sec, new_sec, delta: new_sec - old_sec,
                             reason: "NPC Pirate Bounty".into(), solar_system_id: sys_id,

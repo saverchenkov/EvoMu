@@ -142,12 +142,9 @@ async fn test_batch5_station_damage_crimewatch_shutdown_scanners() {
         },
     );
     ctx.db.with_mut_snapshot(|snap| {
-        snap.combat_crimewatch_state
-            .npc_timers
-            .insert(P1, now + 30);
-    });
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.insert(P1, now + 120);
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.npc_timers.insert(P1, now + 30);
+        cw.disapproval_flags.insert(P1, now + 120);
     });
     eve_server::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(&ctx, P1, now);
 

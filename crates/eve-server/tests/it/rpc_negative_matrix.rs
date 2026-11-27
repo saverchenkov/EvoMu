@@ -1177,6 +1177,8 @@ fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
         npc_timer,
         timer_states,
         timer_triggered,
+        disapproval_flag,
+        sec_txs_len,
     ) = fix.ctx.db.with_snapshot(|snap| {
         let cw = &snap.combat_crimewatch_state;
         let detailed_killmail_ids = cw
@@ -1225,6 +1227,8 @@ fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
             cw.npc_timers.get(&CHAR_B_ID).copied(),
             cw.crimewatch_timer_states.get(&CHAR_B_ID).copied(),
             cw.crimewatch_timer_triggered_at.get(&CHAR_B_ID).copied(),
+            cw.disapproval_flags.get(&CHAR_B_ID).copied(),
+            cw.sec_status_transactions.get(&CHAR_B_ID).map_or(0, Vec::len),
         )
     });
     let drone_miners_count = fix
@@ -1241,13 +1245,13 @@ fn capture_combat_runtime_b(fix: &MatrixFixture) -> CombatRuntimeBSig {
     eve_server::services::combat_crimewatch::with_combat_runtime(&fix.ctx, |rt| CombatRuntimeBSig {
         duel_challenges,
         corp_aggression,
-        disapproval_flag: rt.disapproval_flags.get(&CHAR_B_ID).copied(),
+        disapproval_flag,
         safety_level,
         limited_engagements,
         npc_timer,
         timer_states,
         timer_triggered,
-        sec_txs_len: rt.sec_status_transactions.get(&CHAR_B_ID).map_or(0, Vec::len),
+        sec_txs_len,
         detailed_killmail_ids,
         bounty_pools,
         bounty_claims,

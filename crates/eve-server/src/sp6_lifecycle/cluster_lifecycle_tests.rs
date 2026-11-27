@@ -6,7 +6,6 @@ use super::{
 };
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
-use crate::services::combat_crimewatch::with_combat_runtime;
 use crate::services::drone_test_helpers;
 use crate::sp6_lifecycle::{
     record_anchor_meta_in_snap, record_wreck_or_container_meta_in_snap, with_mut_sp6_state,
@@ -916,12 +915,10 @@ async fn on_advance_secs_internal_sweeps_crimewatch_timers_abyssal_traces_and_ti
         );
     });
 
-    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.insert(p_dis, now);
-        rt.disapproval_flags.insert(p_alive, now + 1);
-    });
     ctx.db.with_mut_snapshot(|snap| {
         let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.disapproval_flags.insert(p_dis, now);
+        cw.disapproval_flags.insert(p_alive, now + 1);
         cw.npc_timers.insert(p_npc, now);
         cw.npc_timers.insert(p_alive, now + 1);
         cw.duel_challenges.insert((p_weap, p_pvp), now);
@@ -976,14 +973,12 @@ async fn on_advance_secs_internal_sweeps_crimewatch_timers_abyssal_traces_and_ti
         assert!(!cw.aggression_mgr.records.contains_key(&(p_weap, p_pvp)));
         assert!(cw.aggression_mgr.records.contains_key(&(p_alive, p_pvp)));
     });
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.disapproval_flags.contains_key(&p_dis));
-        assert!(rt.disapproval_flags.contains_key(&p_alive));
-    });
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.kill_rights.contains_key(&77_001));
         assert!(snap.kill_rights.contains_key(&77_002));
         let cw = &snap.combat_crimewatch_state;
+        assert!(!cw.disapproval_flags.contains_key(&p_dis));
+        assert!(cw.disapproval_flags.contains_key(&p_alive));
         assert!(!cw.npc_timers.contains_key(&p_npc));
         assert!(cw.npc_timers.contains_key(&p_alive));
         assert!(!cw.duel_challenges.contains_key(&(p_weap, p_pvp)));

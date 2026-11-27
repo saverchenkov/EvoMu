@@ -588,12 +588,10 @@ fn on_advance_secs_internal_sweeps_expired_crimewatch_and_runtime_maps() {
         let st_live = cw.get_or_create(active_char_id);
         st_live.suspect_flag_until_unix = now + 300;
     }
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.insert(char_id, now + 10);
-        rt.disapproval_flags.insert(active_char_id, now + 300);
-    });
     ctx.db.with_mut_snapshot(|snap| {
         let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.disapproval_flags.insert(char_id, now + 10);
+        cw.disapproval_flags.insert(active_char_id, now + 300);
         cw.npc_timers.insert(char_id, now + 10);
         cw.duel_challenges.insert((char_id, target_id), now + 10);
         cw.limited_engagements
@@ -617,12 +615,10 @@ fn on_advance_secs_internal_sweeps_expired_crimewatch_and_runtime_maps() {
             "unexpired pilot CrimeWatch state must remain"
         );
     }
-    with_combat_runtime(&ctx, |rt| {
-        assert!(!rt.disapproval_flags.contains_key(&char_id));
-        assert!(rt.disapproval_flags.contains_key(&active_char_id));
-    });
     ctx.db.with_snapshot(|snap| {
         let cw = &snap.combat_crimewatch_state;
+        assert!(!cw.disapproval_flags.contains_key(&char_id));
+        assert!(cw.disapproval_flags.contains_key(&active_char_id));
         assert!(!cw.npc_timers.contains_key(&char_id));
         assert!(!cw.duel_challenges.contains_key(&(char_id, target_id)));
         assert!(!cw.limited_engagements.contains_key(&char_id));

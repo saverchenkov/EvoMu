@@ -162,9 +162,9 @@ async fn crimewatch_timer_notifications_action_restrictions_and_sentry_grid() {
         snap.combat_crimewatch_state
             .npc_timers
             .insert(char_id, now + 300);
-    });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.insert(char_id, now + 900);
+        snap.combat_crimewatch_state
+            .disapproval_flags
+            .insert(char_id, now + 900);
     });
     emit_crimewatch_timer_notifications(&ctx, char_id, now);
     emit_crimewatch_timer_notifications(&ctx, char_id, now + 10);
@@ -178,9 +178,10 @@ async fn crimewatch_timer_notifications_action_restrictions_and_sentry_grid() {
     ctx.crimewatch.write().unwrap().states.clear();
     ctx.db.with_mut_snapshot(|snap| {
         snap.combat_crimewatch_state.as_inner_mut().npc_timers.clear();
-    });
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.clear();
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .disapproval_flags
+            .clear();
     });
     emit_crimewatch_timer_notifications(&ctx, char_id, now + 1_000);
 
@@ -362,7 +363,13 @@ async fn handle_crimewatch_kill_rights_aggression_mgr_duels_and_pvp_branches() {
     });
 
     // Seed SecStatusTransactions with event_type_id == 0 to exercise reason-string fallback mapping
-    with_mut_combat_runtime(&ctx, |rt| {
+    ctx.db.with_mut_snapshot(|snap| {
+        let list = snap
+            .combat_crimewatch_state
+            .as_inner_mut()
+            .sec_status_transactions
+            .entry(char_id)
+            .or_default();
         for reason in [
             "CONCORD kill penalty",
             "Illegal Capsule Destruction",
@@ -370,20 +377,17 @@ async fn handle_crimewatch_kill_rights_aggression_mgr_duels_and_pvp_branches() {
             "Pirate NPC Bounty",
             "Other Security Change",
         ] {
-            rt.sec_status_transactions
-                .entry(char_id)
-                .or_default()
-                .push(SecStatusTransaction {
-                    timestamp_unix: now,
-                    old_sec: 0.0,
-                    new_sec: -0.1,
-                    delta: -0.1,
-                    reason: reason.into(),
-                    solar_system_id: sys_id,
-                    event_type_id: 0,
-                    other_owner_id: None,
-                    other_type_id: None,
-                });
+            list.push(SecStatusTransaction {
+                timestamp_unix: now,
+                old_sec: 0.0,
+                new_sec: -0.1,
+                delta: -0.1,
+                reason: reason.into(),
+                solar_system_id: sys_id,
+                event_type_id: 0,
+                other_owner_id: None,
+                other_type_id: None,
+            });
         }
     });
 
@@ -488,9 +492,9 @@ async fn handle_crimewatch_kill_rights_aggression_mgr_duels_and_pvp_branches() {
     ctx.crimewatch.write().unwrap().states.clear();
     evaluate_and_record_pvp_aggression(&ctx, char_id, ship_id, 32_000_001, victim_id, false).unwrap();
     evaluate_and_record_pvp_aggression(&ctx, char_id, ship_id, 30_100_000, victim_id, false).unwrap();
-    assert!(with_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.contains_key(&char_id)
-    }));
+    assert!(crate::combat::crimewatch_tail_test_helpers::has_disapproval_flag(
+        &ctx, char_id
+    ));
 
     // Clear LEs & flags, set Yellow safety -> attacking pod in lowsec is Criminal, so blocked by Yellow safety
     set_char_safety_level(&ctx, char_id, SafetyLevel::Yellow);
