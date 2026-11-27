@@ -1220,7 +1220,7 @@ async fn fw_initial_offer_target_sys_courier_origin_sys_and_epic_arc_v24_briefin
     .expect("courier GetMissionBriefingInfo handled")
     .expect("courier GetMissionBriefingInfo succeeded");
     let courier_brief = courier_info
-        .dict_get("briefing")
+        .dict_get("Mission Briefing ID")
         .and_then(PyRep::as_str)
         .unwrap_or("");
     assert!(
@@ -4048,8 +4048,8 @@ async fn archived_encounter_non_completed_reports_zero_completion_and_nonzero_sy
                 .await
                 .unwrap()
                 .expect("archived GetMissionBriefingInfo");
-            assert_eq!(br.dict_get("completionStatus").and_then(|v| v.as_i64()), Some(0), "{label} briefing completionStatus");
-            assert_eq!(br.dict_get("solarsystemID").and_then(|v| v.as_i64()), Some(i64::from(expected_sys)), "{label} briefing solarsystemID");
+            assert_eq!(br.dict_get("ContentID").and_then(|v| v.as_i64()), Some(mid as i64), "{label} briefing ContentID");
+            assert!(!br.dict_get("Mission Briefing ID").and_then(PyRep::as_str).unwrap_or("").is_empty(), "{label} Mission Briefing ID must be non-empty");
         }
     };
 

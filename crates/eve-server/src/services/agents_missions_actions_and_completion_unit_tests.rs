@@ -523,8 +523,9 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
     );
 
     // 5. Issues #791 & #979: Calling GetMissionBriefingInfo / GetMissionObjectiveInfo on a different
-    //    agent when an active mission exists for `ag.agent_id` returns MissionNotActive instead of
-    //    leaking `ag.agent_id`'s mission into another agent's dialogue window.
+    //    agent when an active mission exists for `ag.agent_id` returns Ok(PyRep::None) instead of
+    //    leaking `ag.agent_id`'s mission into another agent's dialogue window (while GetMissionJournalInfo
+    //    still returns MissionNotActive).
     let other_agent_id = ctx
         .sde
         .agents
@@ -537,6 +538,18 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
             &ctx,
             &mut remote_sess,
             "GetMissionBriefingInfo",
+            &[PyRep::Integer(other_agent_id)],
+            &kw,
+        )
+        .await
+        .expect("unbound GetMissionBriefingInfo returns None when not active"),
+        PyRep::None
+    );
+    assert_eq!(
+        call_agent_mgr(
+            &ctx,
+            &mut remote_sess,
+            "GetMissionJournalInfo",
             &[PyRep::Integer(other_agent_id)],
             &kw,
         )
@@ -586,10 +599,9 @@ async fn unbound_briefing_and_objective_info_reject_completed_and_declined_missi
                 &kw,
             )
             .await
-            .unwrap_err()
-            .code,
-            "MissionNotActive",
-            "unbound GetMissionBriefingInfo(agent_id) must reject {state} missions"
+            .expect("unbound GetMissionBriefingInfo returns None for completed/declined"),
+            PyRep::None,
+            "unbound GetMissionBriefingInfo(agent_id) must return None for {state} missions"
         );
         assert_eq!(
             call_agent_mgr(
@@ -613,10 +625,9 @@ async fn unbound_briefing_and_objective_info_reject_completed_and_declined_missi
                 &kw,
             )
             .await
-            .unwrap_err()
-            .code,
-            "MissionNotActive",
-            "unbound GetMissionBriefingInfo() with no args must reject {state} missions"
+            .expect("unbound GetMissionBriefingInfo() returns None for completed/declined"),
+            PyRep::None,
+            "unbound GetMissionBriefingInfo() with no args must return None for {state} missions"
         );
     }
 
@@ -639,15 +650,18 @@ async fn unbound_briefing_and_objective_info_reject_completed_and_declined_missi
             make_plain_mission(10_203, char_id, ag.agent_id, sys_id, "Offered", None),
         );
     });
-    assert!(call_agent_mgr(
-        &ctx,
-        &mut sess,
-        "GetMissionBriefingInfo",
-        &[PyRep::Integer(ag.agent_id)],
-        &kw,
-    )
-    .await
-    .is_ok());
+    assert_ne!(
+        call_agent_mgr(
+            &ctx,
+            &mut sess,
+            "GetMissionBriefingInfo",
+            &[PyRep::Integer(ag.agent_id)],
+            &kw,
+        )
+        .await
+        .expect("co-located GetMissionBriefingInfo"),
+        PyRep::None
+    );
 
     let mut remote_sess = char_session(char_id, Some(sys_id + 1), None);
     assert_eq!(
@@ -659,9 +673,20 @@ async fn unbound_briefing_and_objective_info_reject_completed_and_declined_missi
             &kw,
         )
         .await
-        .unwrap_err()
-        .code,
-        "MissionNotActive"
+        .expect("remote Offered GetMissionBriefingInfo returns None"),
+        PyRep::None
+    );
+    assert_eq!(
+        call_agent_mgr(
+            &ctx,
+            &mut remote_sess,
+            "GetMissionObjectiveInfo",
+            &[PyRep::Integer(ag.agent_id)],
+            &kw,
+        )
+        .await
+        .expect("remote Offered GetMissionObjectiveInfo returns None"),
+        PyRep::None
     );
 }
 
@@ -1581,7 +1606,7 @@ async fn get_mission_briefing_info_uses_mission_specific_text_instead_of_fixed_t
     )
     .await
     .expect("combat briefing");
-    let combat_str = combat_rep.dict_get("briefing").and_then(|v| v.as_str()).unwrap();
+    let combat_str = combat_rep.dict_get("Mission Briefing ID").and_then(|v| v.as_str()).unwrap();
     assert!(!combat_str.contains("Execute objectives in system"));
     assert!(combat_str.contains(&combat_enc.dungeon_name));
     assert!(combat_str.contains(&combat_tmpl.title));
@@ -1595,7 +1620,7 @@ async fn get_mission_briefing_info_uses_mission_specific_text_instead_of_fixed_t
     )
     .await
     .expect("courier briefing");
-    let courier_str = courier_rep.dict_get("briefing").and_then(|v| v.as_str()).unwrap();
+    let courier_str = courier_rep.dict_get("Mission Briefing ID").and_then(|v| v.as_str()).unwrap();
     assert!(!courier_str.contains("Execute objectives in system"));
     assert!(courier_str.contains(&courier_tmpl.title));
     if let Some(cargo_name) = ctx.sde.types.get(&courier_details.cargo_type_id).map(|t| t.name.as_str()) {
@@ -1614,7 +1639,7 @@ async fn get_mission_briefing_info_uses_mission_specific_text_instead_of_fixed_t
     )
     .await
     .expect("mining briefing");
-    let mining_str = mining_rep.dict_get("briefing").and_then(|v| v.as_str()).unwrap();
+    let mining_str = mining_rep.dict_get("Mission Briefing ID").and_then(|v| v.as_str()).unwrap();
     assert!(!mining_str.contains("Execute objectives in system"));
     assert!(mining_str.contains(&mining_tmpl.title));
     assert!(mining_str.contains(&mining_details.required_units.to_string()));
@@ -1628,7 +1653,7 @@ async fn get_mission_briefing_info_uses_mission_specific_text_instead_of_fixed_t
     )
     .await
     .expect("trade briefing");
-    let trade_str = trade_rep.dict_get("briefing").and_then(|v| v.as_str()).unwrap();
+    let trade_str = trade_rep.dict_get("Mission Briefing ID").and_then(|v| v.as_str()).unwrap();
     assert!(!trade_str.contains("Execute objectives in system"));
     assert!(trade_str.contains(&trade_tmpl.title));
 
@@ -1641,7 +1666,7 @@ async fn get_mission_briefing_info_uses_mission_specific_text_instead_of_fixed_t
     )
     .await
     .expect("custom prose briefing");
-    let custom_str = custom_rep.dict_get("briefing").and_then(|v| v.as_str()).unwrap();
+    let custom_str = custom_rep.dict_get("Mission Briefing ID").and_then(|v| v.as_str()).unwrap();
     assert!(custom_str.contains(custom_prose), "custom prose must be returned: {custom_str}");
 
     // Distinct missions produce distinct briefings.
@@ -1670,11 +1695,12 @@ async fn get_mission_briefing_info_uses_mission_specific_text_instead_of_fixed_t
     assert_eq!(reoffer_briefing, combat_str);
     assert!(!reoffer_briefing.contains("assignment:"));
 
-    // Negative path: unseeded mission/agent ID fails cleanly with MissionNotActive once cleared.
+    // Negative path: unseeded mission/agent ID returns Ok(PyRep::None) on GetMissionBriefingInfo
+    // and fails cleanly with MissionNotActive on GetMissionJournalInfo once cleared.
     ctx.db.with_mut_snapshot(|snap| {
         mission_fixture::clear_character(snap, char_id);
     });
-    let missing_err = call_agent_mgr(
+    let missing_brief = call_agent_mgr(
         &ctx,
         &mut sess,
         "GetMissionBriefingInfo",
@@ -1682,7 +1708,17 @@ async fn get_mission_briefing_info_uses_mission_specific_text_instead_of_fixed_t
         &kw,
     )
     .await
-    .expect_err("unknown mission must fail");
+    .expect("unknown mission briefing returns None");
+    assert_eq!(missing_brief, PyRep::None);
+    let missing_err = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionJournalInfo",
+        &[PyRep::Integer(999_888_777)],
+        &kw,
+    )
+    .await
+    .expect_err("unknown mission journal must fail");
     assert_eq!(missing_err.code, "MissionNotActive");
 }
 
@@ -1750,7 +1786,7 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     )
     .await
     .expect("Data Center GetMissionBriefingInfo");
-    assert_eq!(dc_info.dict_get("briefing").and_then(|v| v.as_str()), Some(dc_offer_brief.as_str()));
+    assert_eq!(dc_info.dict_get("Mission Briefing ID").and_then(|v| v.as_str()), Some(dc_offer_brief.as_str()));
 
     ctx.db.with_mut_snapshot(|snap| {
         mission_fixture::insert(
@@ -1770,7 +1806,7 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     )
     .await
     .expect("Data Center BasicKill template briefing");
-    let dc_kill_str = dc_kill_info.dict_get("briefing").and_then(|v| v.as_str()).unwrap();
+    let dc_kill_str = dc_kill_info.dict_get("Mission Briefing ID").and_then(|v| v.as_str()).unwrap();
     assert!(dc_kill_str.contains("Data Center commission"), "Data Center must not fall back to combat: {dc_kill_str}");
     assert!(dc_kill_str.contains(dc_tag_name), "expected {dc_tag_name} in {dc_kill_str}");
 
@@ -1808,7 +1844,7 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     )
     .await
     .expect("COSMOS GetMissionBriefingInfo");
-    let cosmos_str = cosmos_info.dict_get("briefing").and_then(|v| v.as_str()).unwrap();
+    let cosmos_str = cosmos_info.dict_get("Mission Briefing ID").and_then(|v| v.as_str()).unwrap();
     assert!(!cosmos_str.contains("Data Center"), "COSMOS must not use Data Center copy: {cosmos_str}");
     assert!(!cosmos_str.contains(dc_tag_name));
     assert!(cosmos_str.contains(&cosmos_enc.dungeon_name));
@@ -1869,7 +1905,7 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     )
     .await
     .expect("div23 generic mining briefing")
-    .dict_get("briefing")
+    .dict_get("Mission Briefing ID")
     .and_then(|v| v.as_str())
     .unwrap()
     .to_string();
@@ -1884,7 +1920,7 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     )
     .await
     .expect("div23 BasicKill briefing")
-    .dict_get("briefing")
+    .dict_get("Mission Briefing ID")
     .and_then(|v| v.as_str())
     .unwrap()
     .to_string();
@@ -1932,7 +1968,7 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     )
     .await
     .expect("Heraldry GetMissionBriefingInfo");
-    assert_eq!(her_info.dict_get("briefing").and_then(|v| v.as_str()), Some(her_brief.as_str()));
+    assert_eq!(her_info.dict_get("Mission Briefing ID").and_then(|v| v.as_str()), Some(her_brief.as_str()));
 
     let dist_ag = ctx
         .sde
@@ -1974,7 +2010,7 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     )
     .await
     .expect("Distribution GetMissionBriefingInfo");
-    assert_eq!(dist_info.dict_get("briefing").and_then(|v| v.as_str()), Some(dist_brief.as_str()));
+    assert_eq!(dist_info.dict_get("Mission Briefing ID").and_then(|v| v.as_str()), Some(dist_brief.as_str()));
 
     let rnd_ag = ctx
         .sde
@@ -2028,7 +2064,7 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     )
     .await
     .expect("R&D GetMissionBriefingInfo");
-    assert_eq!(rnd_info.dict_get("briefing").and_then(|v| v.as_str()), Some(rnd_brief.as_str()));
+    assert_eq!(rnd_info.dict_get("Mission Briefing ID").and_then(|v| v.as_str()), Some(rnd_brief.as_str()));
 }
 
 // Regression coverage for #1367 (V24 dungeon bookmark locations and Telecom dialogue).
@@ -2206,8 +2242,8 @@ async fn v24_dungeon_bookmark_locations_and_telecom_dialogue_are_warpable_and_hu
     let expected_ft = (now as i64 + 11_644_473_600) * 10_000_000;
     assert_eq!(bms[0].dict_get("created"), Some(&PyRep::Integer(expected_ft)));
 
-    // GetMissionObjectiveInfo and GetMissionBriefingInfo expose warpable dungeon location + coords.
-    for method in ["GetMissionObjectiveInfo", "GetMissionBriefingInfo"] {
+    // GetMissionObjectiveInfo and GetMissionJournalInfo expose warpable dungeon location + coords.
+    for method in ["GetMissionObjectiveInfo", "GetMissionJournalInfo"] {
         let info = call_agent_mgr(
             &ctx,
             &mut sess,

@@ -2754,7 +2754,8 @@ async fn test_e5_agent_finder_and_conversation_lifecycle() {
         .dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "GetMissionBriefingInfo", &[], &kw, None)
         .await
         .expect("agentMgr.GetMissionBriefingInfo");
-    assert_eq!(briefing_info.dict_get("missionID").and_then(|v| v.as_i64()), Some(mission_id as i64));
+    assert_eq!(briefing_info.dict_get("ContentID").and_then(|v| v.as_i64()), Some(mission_id as i64));
+    assert!(briefing_info.dict_get("Mission Briefing ID").and_then(PyRep::as_str).is_some_and(|s| !s.is_empty()));
 
     // 4. Mission Quit via DoAction(11) (feat:pve.mission-quit)
     let (initial_agent_st, initial_corp_st) = ctx.db.with_snapshot(|snap| {

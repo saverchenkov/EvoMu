@@ -1002,54 +1002,6 @@ fn issue_766_agent_mgr_v24_dialogue_briefing_objective_and_location_normalizatio
     .unwrap();
     let PyRep::Tuple(c_outer) = completed else { panic!("tuple") };
     assert_eq!(c_outer[1].dict_get("missionCompleted"), Some(&PyRep::Bool(true)));
-
-    // 2. GetAgentLocationWrap -> Dict with solarsystemID, locationID, typeID
-    let loc = normalize_macho_rpc_reply(
-        "agentMgr",
-        "GetAgentLocationWrap",
-        Ok(PyRep::keyval([
-            ("agentID", PyRep::Integer(3_018_910)),
-            ("solarSystemID", PyRep::Integer(30_000_142)),
-            ("stationID", PyRep::Integer(60_003_760)),
-        ])),
-    )
-    .unwrap();
-    assert!(matches!(loc, PyRep::Dict(_)));
-    assert_eq!(loc.dict_get("solarsystemID"), Some(&PyRep::Integer(30_000_142)));
-    assert_eq!(loc.dict_get("locationID"), Some(&PyRep::Integer(60_003_760)));
-    assert_eq!(loc.dict_get("typeID"), Some(&PyRep::Integer(5)));
-
-    // 3. GetMissionBriefingInfo -> Dict keys + MissionNotActive -> None
-    let no_briefing = normalize_macho_rpc_reply(
-        "agentMgr",
-        "GetMissionBriefingInfo",
-        Err(eve_proto::BridgeRpcError {
-            code: "MissionNotActive".into(),
-            message: "none".into(),
-            client_error: None,
-        }),
-    )
-    .unwrap();
-    assert_eq!(no_briefing, PyRep::None);
-
-    let briefing = normalize_macho_rpc_reply(
-        "agentMgr",
-        "GetMissionBriefingInfo",
-        Ok(PyRep::keyval([
-            ("missionID", PyRep::Integer(501)),
-            ("title", PyRep::String("Eliminate Pirates".into())),
-            ("briefing", PyRep::String("Go there.".into())),
-        ])),
-    )
-    .unwrap();
-    assert!(matches!(briefing, PyRep::Dict(_)));
-    assert_eq!(
-        briefing.dict_get("Mission Title ID"),
-        Some(&PyRep::String("Eliminate Pirates".into()))
-    );
-    assert_eq!(briefing.dict_get("ContentID"), Some(&PyRep::Integer(501)));
-    assert_eq!(briefing.dict_get("Decline Time"), Some(&PyRep::Integer(-1)));
-    assert!(matches!(briefing.dict_get("Mission Keywords"), Some(PyRep::Dict(_))));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1477,4 +1429,243 @@ async fn arch_933_t6_migrated_rpc_families_emit_native_v24_without_compat() {
         .expect("wire GetStructureInfo");
     assert_eq!(info_d, info_w);
     assert_eq!(info_d.dict_get("state"), Some(&PyRep::Integer(expected_state)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_933_t7a_agent_location_and_briefing_emit_native_v24_without_compat() {
+    use crate::services::mission_fixture::{self, MissionFixture};
+    use eve_db::{VirtualServerClock, WorldRepository};
+    use eve_machonet::{service_roles, SessionState};
+    use std::sync::{Arc, OnceLock};
+
+    static SDE: OnceLock<Arc<eve_sde::SdeRegistry>> = OnceLock::new();
+    let shared_sde = || -> Arc<eve_sde::SdeRegistry> {
+        if let Some(sde) = SDE.get() {
+            Arc::clone(sde)
+        } else {
+            let ctx = crate::router::ServerContext::new();
+            let _ = SDE.set(Arc::clone(&ctx.sde));
+            ctx.sde
+        }
+    };
+
+    let now_unix = 1_800_000_000_u64;
+    let char_id = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let mut sde = (*shared_sde()).clone();
+
+    let station_agent = sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 2 && a.level == 1 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .expect("station agent in SDE")
+        .clone();
+    let mut space_agent = station_agent.clone();
+    space_agent.agent_id = 3_999_933;
+    space_agent.station_id = None;
+    sde.agents.insert(space_agent.agent_id, space_agent.clone());
+    let sde = Arc::new(sde);
+    let mission_tmpl = sde
+        .missions
+        .values()
+        .min_by_key(|m| m.mission_id)
+        .expect("mission template in SDE")
+        .clone();
+
+    let ag_sys = station_agent.solar_system_id.unwrap();
+    let ag_st = station_agent.station_id.unwrap();
+    let expected_station_type_id = sde
+        .stations
+        .get(&ag_st)
+        .map_or(5_i64, |st| st.station_type_id as i64);
+
+    let setup_world = || -> (crate::router::ServerContext, SessionState) {
+        let ctx = crate::router::ServerContext::with_sde_and_repository(
+            Arc::clone(&sde),
+            Arc::new(WorldRepository::with_demo_seed()),
+        )
+        .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+        ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix)));
+        ctx.db.with_mut_snapshot(|snap| {
+            mission_fixture::clear_character(snap, char_id);
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.corporation_id = corp_id;
+                ch.station_id = Some(ag_st);
+                ch.structure_id = None;
+                ch.solar_system_id = ag_sys;
+                ch.active_ship_id = ship_id;
+            }
+        });
+        let sess = SessionState {
+            session_id: 77_701,
+            user_id: Some(1),
+            character_id: Some(char_id),
+            corporation_id: Some(corp_id),
+            solar_system_id: Some(ag_sys),
+            station_id: Some(ag_st),
+            ship_id: Some(ship_id),
+            role: service_roles::ROLE_PLAYER,
+            ..Default::default()
+        };
+        (ctx, sess)
+    };
+
+    let (ctx_direct, mut sess_direct) = setup_world();
+    let (ctx_wire, mut sess_wire) = setup_world();
+    let kw = HashMap::new();
+
+    // Test 1: GetAgentLocationWrap returns native 5-key PyRep::Dict directly (station & space agents).
+    for (aid, exp_sys, exp_loc, exp_type, exp_st) in [
+        (
+            station_agent.agent_id,
+            PyRep::Integer(i64::from(ag_sys)),
+            PyRep::Integer(ag_st),
+            PyRep::Integer(expected_station_type_id),
+            PyRep::Integer(ag_st),
+        ),
+        (
+            space_agent.agent_id,
+            PyRep::Integer(i64::from(space_agent.solar_system_id.unwrap())),
+            PyRep::Integer(i64::from(space_agent.solar_system_id.unwrap())),
+            PyRep::Integer(5),
+            PyRep::None,
+        ),
+    ] {
+        let d = ctx_direct
+            .dispatch_rpc(&mut sess_direct, "agentMgr", None, "GetAgentLocationWrap", &[PyRep::Integer(aid)], &kw, None)
+            .await
+            .expect("direct GetAgentLocationWrap");
+        let w = ctx_wire
+            .dispatch_rpc(&mut sess_wire, "agentMgr", None, "GetAgentLocationWrap", &[PyRep::Integer(aid)], &kw, Some("machoNet:26000"))
+            .await
+            .expect("wire GetAgentLocationWrap");
+        assert_eq!(d, w, "GetAgentLocationWrap direct must equal wire for agent {aid}");
+        assert_eq!(
+            d,
+            PyRep::Dict(vec![
+                (PyRep::String("agentID".into()), PyRep::Integer(aid)),
+                (PyRep::String("solarsystemID".into()), exp_sys),
+                (PyRep::String("locationID".into()), exp_loc),
+                (PyRep::String("typeID".into()), exp_type),
+                (PyRep::String("stationID".into()), exp_st),
+            ])
+        );
+    }
+
+    // Test 2a: Inactive GetMissionBriefingInfo returns Ok(PyRep::None) natively (while Journal stays Err).
+    let no_brief_d = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "agentMgr", None, "GetMissionBriefingInfo", &[PyRep::Integer(station_agent.agent_id)], &kw, None)
+        .await
+        .expect("direct inactive GetMissionBriefingInfo");
+    let no_brief_w = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "agentMgr", None, "GetMissionBriefingInfo", &[PyRep::Integer(station_agent.agent_id)], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire inactive GetMissionBriefingInfo");
+    assert_eq!(no_brief_d, PyRep::None);
+    assert_eq!(no_brief_d, no_brief_w);
+
+    // Test 3 (inactive regression): GetMissionObjectiveInfo -> Ok(None); GetMissionJournalInfo -> Err(MissionNotActive).
+    assert_eq!(
+        ctx_direct
+            .dispatch_rpc(&mut sess_direct, "agentMgr", None, "GetMissionObjectiveInfo", &[PyRep::Integer(station_agent.agent_id)], &kw, None)
+            .await
+            .expect("inactive GetMissionObjectiveInfo"),
+        PyRep::None
+    );
+    assert_eq!(
+        ctx_direct
+            .dispatch_rpc(&mut sess_direct, "agentMgr", None, "GetMissionJournalInfo", &[PyRep::Integer(station_agent.agent_id)], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "MissionNotActive"
+    );
+
+    // Seed an active mission on both contexts.
+    for ctx_pair in [&ctx_direct, &ctx_wire] {
+        ctx_pair.db.with_mut_snapshot(|snap| {
+            mission_fixture::insert(
+                snap,
+                MissionFixture::accepted(char_id, mission_tmpl.mission_id, station_agent.agent_id, ag_sys)
+                    .origin_station_id(Some(ag_st))
+                    .offered_at_unix(now_unix - 60)
+                    .offer_expiry_unix(now_unix + 3600)
+                    .accepted_at_unix(Some(now_unix - 30))
+                    .accept_expiry_unix(Some(now_unix + 7200)),
+            );
+        });
+    }
+
+    // Test 2b: Active GetMissionBriefingInfo returns exact native 7-key PyRep::Dict directly.
+    let brief_d = ctx_direct
+        .dispatch_rpc(
+            &mut sess_direct,
+            "agentMgr",
+            None,
+            "GetMissionBriefingInfo",
+            &[PyRep::Integer(station_agent.agent_id), PyRep::Integer(i64::from(mission_tmpl.mission_id))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("direct active GetMissionBriefingInfo");
+    let brief_w = ctx_wire
+        .dispatch_rpc(
+            &mut sess_wire,
+            "agentMgr",
+            None,
+            "GetMissionBriefingInfo",
+            &[PyRep::Integer(station_agent.agent_id), PyRep::Integer(i64::from(mission_tmpl.mission_id))],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("wire active GetMissionBriefingInfo");
+    assert_eq!(brief_d, brief_w);
+    let PyRep::Dict(ref brief_entries) = brief_d else {
+        panic!("expected PyRep::Dict from GetMissionBriefingInfo, got {brief_d:?}");
+    };
+    assert_eq!(brief_entries.len(), 7);
+    assert_eq!(brief_d.dict_get("Mission Title ID"), Some(&PyRep::String(mission_tmpl.title.clone())));
+    assert_eq!(brief_d.dict_get("ContentID"), Some(&PyRep::Integer(i64::from(mission_tmpl.mission_id))));
+    assert!(brief_d.dict_get("Mission Briefing ID").and_then(PyRep::as_str).is_some_and(|s| !s.is_empty()));
+    assert_eq!(brief_d.dict_get("Decline Time"), Some(&PyRep::Integer(-1)));
+    assert_eq!(brief_d.dict_get("Expiration Time"), Some(&PyRep::None));
+    assert_eq!(brief_d.dict_get("Mission Image"), Some(&PyRep::String(String::new())));
+    assert_eq!(brief_d.dict_get("Mission Keywords"), Some(&PyRep::Dict(Vec::new())));
+
+    // Test 3 (active regression): GetMissionJournalInfo returns KeyVal; GetMissionObjectiveInfo returns Dict.
+    let journal_d = ctx_direct
+        .dispatch_rpc(
+            &mut sess_direct,
+            "agentMgr",
+            None,
+            "GetMissionJournalInfo",
+            &[PyRep::Integer(station_agent.agent_id), PyRep::Integer(i64::from(mission_tmpl.mission_id))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("active GetMissionJournalInfo");
+    assert!(matches!(journal_d, PyRep::KeyVal(_)));
+    assert_eq!(journal_d.dict_get("missionID"), Some(&PyRep::Integer(i64::from(mission_tmpl.mission_id))));
+    assert!(journal_d.dict_get("briefing").and_then(PyRep::as_str).is_some_and(|s| !s.is_empty()));
+
+    let obj_d = ctx_direct
+        .dispatch_rpc(
+            &mut sess_direct,
+            "agentMgr",
+            None,
+            "GetMissionObjectiveInfo",
+            &[PyRep::Integer(station_agent.agent_id), PyRep::Integer(i64::from(mission_tmpl.mission_id))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("active GetMissionObjectiveInfo");
+    assert!(matches!(obj_d, PyRep::Dict(_)));
+    assert_eq!(obj_d.dict_get("contentID"), Some(&PyRep::Integer(i64::from(mission_tmpl.mission_id))));
+    assert!(matches!(obj_d.dict_get("objectives"), Some(PyRep::List(_))));
 }

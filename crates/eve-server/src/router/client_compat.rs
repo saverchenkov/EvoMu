@@ -277,16 +277,6 @@ pub fn normalize_macho_rpc_reply_at(
         if let Ok(rep) = rpc_res {
             return Ok(normalize_agent_do_action_rep(rep));
         }
-    } else if service == "agentMgr" && method == "GetAgentLocationWrap" {
-        if let Ok(rep) = rpc_res {
-            return Ok(normalize_agent_location_wrap_rep(rep));
-        }
-    } else if service == "agentMgr" && method == "GetMissionBriefingInfo" {
-        match rpc_res {
-            Err(ref e) if e.code == "MissionNotActive" => return Ok(PyRep::None),
-            Ok(rep) => return Ok(normalize_agent_mission_briefing_rep(rep)),
-            Err(e) => return Err(e),
-        }
     } else if service == "entity"
         && matches!(
             method,
@@ -403,85 +393,6 @@ fn normalize_agent_do_action_rep(rep: PyRep) -> PyRep {
         PyRep::Dict(info_entries),
     ])
 }
-
-fn normalize_agent_location_wrap_rep(rep: PyRep) -> PyRep {
-    if !matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
-        return rep;
-    }
-    let sys_id = rep
-        .dict_get("solarsystemID")
-        .or_else(|| rep.dict_get("solarSystemID"))
-        .cloned()
-        .unwrap_or(PyRep::None);
-    let station_id = rep.dict_get("stationID").cloned().unwrap_or(PyRep::None);
-    let loc_id = rep
-        .dict_get("locationID")
-        .cloned()
-        .unwrap_or_else(|| match &station_id {
-            PyRep::None => sys_id.clone(),
-            other => other.clone(),
-        });
-    let type_id = rep
-        .dict_get("typeID")
-        .cloned()
-        .unwrap_or(PyRep::Integer(5));
-    let agent_id = rep.dict_get("agentID").cloned().unwrap_or(PyRep::None);
-    PyRep::Dict(vec![
-        (PyRep::String("agentID".into()), agent_id),
-        (PyRep::String("solarsystemID".into()), sys_id),
-        (PyRep::String("locationID".into()), loc_id),
-        (PyRep::String("typeID".into()), type_id),
-        (PyRep::String("stationID".into()), station_id),
-    ])
-}
-
-fn normalize_agent_mission_briefing_rep(rep: PyRep) -> PyRep {
-    if !matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
-        return rep;
-    }
-    let title = rep
-        .dict_get("Mission Title ID")
-        .or_else(|| rep.dict_get("title"))
-        .cloned()
-        .unwrap_or_else(|| PyRep::String("Agent Mission".into()));
-    let content_id = rep
-        .dict_get("ContentID")
-        .or_else(|| rep.dict_get("contentID"))
-        .or_else(|| rep.dict_get("missionID"))
-        .cloned()
-        .unwrap_or(PyRep::Integer(0));
-    let briefing = rep
-        .dict_get("Mission Briefing ID")
-        .or_else(|| rep.dict_get("briefing"))
-        .cloned()
-        .unwrap_or_else(|| PyRep::String(String::new()));
-    let decline_time = rep
-        .dict_get("Decline Time")
-        .cloned()
-        .unwrap_or(PyRep::Integer(-1));
-    let expiration_time = rep
-        .dict_get("Expiration Time")
-        .cloned()
-        .unwrap_or(PyRep::None);
-    let image = rep
-        .dict_get("Mission Image")
-        .cloned()
-        .unwrap_or_else(|| PyRep::String(String::new()));
-    let keywords = rep
-        .dict_get("Mission Keywords")
-        .cloned()
-        .unwrap_or_else(|| PyRep::Dict(Vec::new()));
-    PyRep::Dict(vec![
-        (PyRep::String("Mission Title ID".into()), title),
-        (PyRep::String("ContentID".into()), content_id),
-        (PyRep::String("Mission Briefing ID".into()), briefing),
-        (PyRep::String("Decline Time".into()), decline_time),
-        (PyRep::String("Expiration Time".into()), expiration_time),
-        (PyRep::String("Mission Image".into()), image),
-        (PyRep::String("Mission Keywords".into()), keywords),
-    ])
-}
-
 
 fn normalize_damage_message_dict(rep: PyRep) -> PyRep {
     let mut entries: Vec<(PyRep, PyRep)> = match rep {

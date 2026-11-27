@@ -2043,6 +2043,12 @@ async fn test_agent_mail_calendar_petition_discovery_season_map_report_and_tourn
     assert_eq!(
         rpc(&ctx, &mut s1, "agentMgr", "GetMissionBriefingInfo", &[PyRep::Integer(999_999)])
             .await
+            .expect("inactive GetMissionBriefingInfo returns None"),
+        PyRep::None
+    );
+    assert_eq!(
+        rpc(&ctx, &mut s1, "agentMgr", "GetMissionJournalInfo", &[PyRep::Integer(999_999)])
+            .await
             .unwrap_err()
             .code,
         "MissionNotActive"

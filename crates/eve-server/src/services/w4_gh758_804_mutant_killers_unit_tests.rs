@@ -1857,13 +1857,46 @@ async fn agent_mgr_implicit_greeting_vs_explicit_offer_and_client_compat_states(
         assert_eq!(outer[1].dict_get("missionQuit"), Some(&PyRep::Bool(exp_quit)));
     }
 
-    let loc_space = normalize_macho_rpc_reply("agentMgr", "GetAgentLocationWrap", Ok(PyRep::keyval([("agentID", PyRep::Integer(3_018_910)), ("solarSystemID", PyRep::Integer(30_000_142))]))).unwrap();
-    assert_eq!(loc_space.dict_get("locationID"), Some(&PyRep::Integer(30_000_142)));
-
-    // 2. `handle_with_bound("agentMgr", "DoAction", &[])` (`is_implicit_greeting == true`) vs explicit `DoAction([2])` (`#796`, `#797`):
-    let ctx = ServerContext::new().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+    // 2. `handle_with_bound("agentMgr", "DoAction", &[])` (`is_implicit_greeting == true`) vs explicit `DoAction([2])` (`#796`, `#797`), plus native space GetAgentLocationWrap:
+    let mut ctx = ServerContext::new().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
     let char_id = 90_000_001_i64;
     let kw = HashMap::new();
+
+    if let Some(mut space_ag) = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+    {
+        space_ag.agent_id = 3_999_934;
+        space_ag.station_id = None;
+        std::sync::Arc::make_mut(&mut ctx.sde)
+            .agents
+            .insert(space_ag.agent_id, space_ag.clone());
+        let mut space_sess = SessionState::new(7959);
+        space_sess.user_id = Some(1);
+        space_sess.character_id = Some(char_id);
+        space_sess.solar_system_id = space_ag.solar_system_id;
+        let loc_space = handle_with_bound(
+            &ctx,
+            &mut space_sess,
+            None,
+            "agentMgr",
+            "GetAgentLocationWrap",
+            &[PyRep::Integer(space_ag.agent_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            loc_space.dict_get("locationID"),
+            Some(&PyRep::Integer(i64::from(space_ag.solar_system_id.unwrap())))
+        );
+        assert_eq!(loc_space.dict_get("typeID"), Some(&PyRep::Integer(5)));
+    }
 
     let l2_ag = ctx
         .sde

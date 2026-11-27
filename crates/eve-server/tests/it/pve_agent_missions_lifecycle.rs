@@ -375,13 +375,14 @@ async fn test_pve_agent_finder_and_conversation() {
     assert!(offer_kv["bonusReward"].as_i64().unwrap_or(0) > 0);
     assert!(offer_kv["expiryUnix"].as_i64().unwrap_or(0) > 0);
 
-    // 2c. GetMissionBriefingInfo
+    // 2c. GetMissionBriefingInfo (native V24 Dict without client_compat)
     let briefing_info = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "GetMissionBriefingInfo", &[], &kw, None).await.expect("GetMissionBriefingInfo");
-    assert_eq!(briefing_info.dict_get("missionID").and_then(|v| v.as_i64()), Some(mission_id));
-    let raw_briefing = briefing_info.dict_get("briefing").and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(briefing_info.dict_get("ContentID").and_then(|v| v.as_i64()), Some(mission_id));
+    let raw_briefing = briefing_info.dict_get("Mission Briefing ID").and_then(|v| v.as_str()).unwrap_or("");
     assert!(!raw_briefing.is_empty());
     assert!(!raw_briefing.contains("Execute objectives in system"), "GetMissionBriefingInfo must not emit fixed template: {raw_briefing}");
     if let Some(title) = ctx.sde.missions.get(&(mission_id as u32)).map(|m| m.title.as_str()).filter(|s| !s.is_empty()) {
+        assert_eq!(briefing_info.dict_get("Mission Title ID").and_then(|v| v.as_str()), Some(title));
         assert!(raw_briefing.contains(title), "GetMissionBriefingInfo must include mission title {title:?}: {raw_briefing}");
     }
 }
