@@ -830,10 +830,17 @@ mod tests {
 
         let corp_id = ctx.db.with_mut_snapshot(|snap| {
             let corp_id = snap.characters[&cid].corporation_id;
-            if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-                corp.ensure_wallet_divisions();
-                corp.set_division_balance(1, IskCents::from_isk(1_000_000));
-            }
+            let corp = snap.corporations.entry(corp_id).or_insert_with(|| {
+                eve_db::CorporationRecord {
+                    corporation_id: corp_id,
+                    name: "Test Corp".into(),
+                    ticker: "TSTC".into(),
+                    ceo_id: cid,
+                    ..Default::default()
+                }
+            });
+            corp.ensure_wallet_divisions();
+            corp.set_division_balance(1, IskCents::from_isk(1_000_000));
             corp_id
         });
         let (pid, _) = create_canonical_project(
