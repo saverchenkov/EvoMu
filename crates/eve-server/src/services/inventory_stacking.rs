@@ -1148,19 +1148,23 @@ async fn handle_multi_add_auto_fit(
 
     let mut fitted_ids = Vec::with_capacity(committed.len());
     let mut despawn_set = HashSet::new();
-    for (plan, updated, old_loc) in committed {
-        let target_flag_enum = InventoryFlag::from_u16(plan.target_flag);
-        if old_loc != ship_id {
+    for (_, updated, old_loc) in &committed {
+        if *old_loc != ship_id {
             crate::services::pve_dungeon_runtime::on_dungeon_container_cargo_changed(
                 ctx,
                 char_id,
                 session.solar_system_id,
-                old_loc,
+                *old_loc,
                 ship_id,
                 updated.type_id,
                 i64::from(updated.quantity),
             )
             .await;
+        }
+    }
+    for (plan, updated, old_loc) in committed {
+        let target_flag_enum = InventoryFlag::from_u16(plan.target_flag);
+        if old_loc != ship_id {
             crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
                 ctx,
                 char_id,

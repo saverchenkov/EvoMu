@@ -752,19 +752,9 @@ fn translate_trigger_kind_inner(
             })
         }
         "cargo_delivered" | "on_cargo_delivered" | "oncargodelivered" | "deliver_cargo" => {
-            let want_tag = trimmed_opt(tr.target_tag.as_deref())
-                .or_else(|| trimmed_opt(tr.trigger_ship_tag.as_deref()));
-            let target_object_index = tr.target_object_index.or_else(|| {
-                want_tag
-                    .as_deref()
-                    .and_then(|tag| {
-                        objects.iter().position(|o| {
-                            o.is_container
-                                && o.tag.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(tag))
-                        })
-                    })
-                    .or_else(|| objects.iter().position(|o| o.is_container))
-            });
+            let target_object_index = tr
+                .target_object_index
+                .or_else(|| objects.iter().position(|o| o.is_container));
             let required_quantity = tr.required_quantity.unwrap_or(1).max(1);
             Ok(DungeonTriggerKind::OnCargoDelivered {
                 container_ball_id: None,
