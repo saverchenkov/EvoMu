@@ -1448,6 +1448,7 @@ pub(crate) async fn handle_invbroker_add(
             enum AddTxOutcome {
                 Merged {
                     merged_item: eve_db::InventoryItemRecord,
+                    old_loc_id: i64,
                     moved_tid: u32,
                     moved_qty: i32,
                     dst_ship_bay_foreign_owner: Option<i64>,
@@ -1897,6 +1898,7 @@ pub(crate) async fn handle_invbroker_add(
                                 )?;
                                 return Ok(AddTxOutcome::Merged {
                                     merged_item: merged_snapshot,
+                                    old_loc_id: orig_item.location_id,
                                     moved_tid: active_src_record.type_id,
                                     moved_qty: active_src_record.quantity,
                                     dst_ship_bay_foreign_owner,
@@ -2072,6 +2074,7 @@ pub(crate) async fn handle_invbroker_add(
             match tx_res {
                 Ok(AddTxOutcome::Merged {
                     merged_item,
+                    old_loc_id,
                     moved_tid,
                     moved_qty,
                     dst_ship_bay_foreign_owner,
@@ -2084,12 +2087,12 @@ pub(crate) async fn handle_invbroker_add(
                     if pending_alsc_take.is_none() && orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
                         crate::services::pve_dungeon_runtime::on_dungeon_item_looted(ctx, char_id, session.solar_system_id, orig_source_loc_id, moved_tid).await;
                     }
-                    if orig_source_loc_id != new_loc {
+                    if old_loc_id != new_loc {
                         crate::services::pve_dungeon_runtime::on_dungeon_container_cargo_changed(
                             ctx,
                             char_id,
                             session.solar_system_id,
-                            orig_source_loc_id,
+                            old_loc_id,
                             new_loc,
                             moved_tid,
                             i64::try_from(moved_qty).unwrap_or(i64::MAX),
@@ -2208,12 +2211,12 @@ pub(crate) async fn handle_invbroker_add(
                             );
                         }
                     }
-                    if orig_source_loc_id != updated.location_id {
+                    if old_loc_id != updated.location_id {
                         crate::services::pve_dungeon_runtime::on_dungeon_container_cargo_changed(
                             ctx,
                             char_id,
                             session.solar_system_id,
-                            orig_source_loc_id,
+                            old_loc_id,
                             updated.location_id,
                             updated.type_id,
                             i64::from(updated.quantity),

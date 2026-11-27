@@ -216,11 +216,18 @@ pub(crate) fn apply_finish_dungeon_instance_snap(
                 let keep_for_loot =
                     has_loot && obj.is_container && obj.spawned && !obj.destroyed;
                 if !keep_for_loot && obj.ball_id > 0 {
-                    if obj.is_container {
-                        container_cleanup_ids.push(obj.ball_id);
+                    if obj.spawned {
+                        if obj.is_container {
+                            container_cleanup_ids.push(obj.ball_id);
+                        }
+                        non_npc_balls_to_remove.push(obj.ball_id);
                     }
-                    non_npc_balls_to_remove.push(obj.ball_id);
-                    obj.ball_id = 0;
+                    // Preserve `obj.ball_id` when `obj.destroyed` so post-`npc_death_hook`
+                    // combat handlers still settle the structure once after `CompleteDungeon`
+                    // or `FailDungeon` (`OWN-01`).
+                    if !obj.destroyed {
+                        obj.ball_id = 0;
+                    }
                     obj.spawned = false;
                 }
             }

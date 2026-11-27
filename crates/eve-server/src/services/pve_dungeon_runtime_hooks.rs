@@ -79,9 +79,9 @@ pub fn is_destructible_dungeon_object(
         .with_snapshot(|snap| is_destructible_dungeon_object_in_snap(snap, sys_id, ball_id))
 }
 
-/// Returns `true` if `ball_id` belongs to a spawned destructible dungeon object in `sys_id`
-/// regardless of whether `o.destroyed` or instance completion/despawn already transitioned
-/// (`BF-1` post-`npc_death_hook` combat-handler guard).
+/// Returns `true` if `ball_id` belongs to a spawned or destroyed destructible dungeon object in
+/// `sys_id` regardless of whether `o.destroyed` or instance completion/despawn already transitioned
+/// (`BF-1` / `OWN-01` post-`npc_death_hook` combat-handler guard).
 pub fn is_owned_destructible_dungeon_object_in_snap(
     snap: &WorldStateSnapshot,
     sys_id: SolarSystemId,
@@ -92,10 +92,11 @@ pub fn is_owned_destructible_dungeon_object_in_snap(
     }
     snap.dungeon_runtime.instances.values().any(|inst| {
         inst.solar_system_id == sys_id
-            && inst
-                .rooms
-                .iter()
-                .any(|r| r.objects.iter().any(|o| o.ball_id == ball_id && o.spawned && o.destructible))
+            && inst.rooms.iter().any(|r| {
+                r.objects
+                    .iter()
+                    .any(|o| o.ball_id == ball_id && o.destructible && (o.spawned || o.destroyed))
+            })
     })
 }
 
@@ -245,7 +246,7 @@ pub async fn on_dungeon_container_cargo_changed(
                         &mut ie,
                     );
                 }
-                if has_dst {
+                if has_dst && ie.fail_reason.is_none() && !ie.complete_now {
                     let key = format!("{dst_loc_id}:{item_type_id}");
                     let cur = inst.rooms[r_idx]
                         .cargo_delivered_net

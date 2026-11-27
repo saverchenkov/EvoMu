@@ -754,6 +754,9 @@ fn evaluate_trigger_with_occurrence_latch(
                 let sub_path = format!("{path}.{ci}");
                 let key = format!("__and:{room_vec_idx}:{trig_idx}:{sub_path}");
                 let was_latched = armed_timers.contains_key(&key);
+                if was_latched && !contains_cargo_delivered_clause(clause) {
+                    continue;
+                }
                 let ok_now = evaluate_trigger_with_occurrence_latch(
                     clause,
                     inst,
@@ -787,6 +790,10 @@ fn evaluate_trigger_with_occurrence_latch(
                 let sub_path = format!("{path}.{ci}");
                 let or_key = format!("__or:{room_vec_idx}:{trig_idx}:{sub_path}");
                 let branch_latched = already_satisfied && armed_timers.contains_key(&or_key);
+                if branch_latched && !contains_cargo_delivered_clause(c) {
+                    any_ok = true;
+                    continue;
+                }
                 let ok = evaluate_trigger_with_occurrence_latch(
                     c,
                     inst,
@@ -822,7 +829,10 @@ fn evaluate_trigger_with_occurrence_latch(
                     return ok;
                 } else if matches!(
                     leaf,
-                    DungeonTriggerKind::OnTimer { .. }
+                    DungeonTriggerKind::OnKill { .. }
+                        | DungeonTriggerKind::OnApproach { .. }
+                        | DungeonTriggerKind::OnNpcDamaged { .. }
+                        | DungeonTriggerKind::OnTimer { .. }
                         | DungeonTriggerKind::OnKillTagged { .. }
                         | DungeonTriggerKind::OnKillCount { .. }
                         | DungeonTriggerKind::OnRoomEntered { .. }
@@ -1255,7 +1265,7 @@ fn prepare_on_dungeon_room_entered_in_snap(
                     object_type_id,
                 };
                 let _ = evaluate_room_triggers_in_inst(
-                    snap, sys_id, &mut inst, deps.sde, room_vec_idx, &ev, char_id, now_unix, true, true, &mut effects,
+                    snap, sys_id, &mut inst, deps.sde, room_vec_idx, &ev, char_id, now_unix, false, false, &mut effects,
                 );
             }
         }
