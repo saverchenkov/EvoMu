@@ -126,16 +126,10 @@ pub(super) async fn handle_mission_complete_action(
             (cleanup, changes)
         });
         notify_standing_changes(ctx, char_id, &st_changes);
-        if clean_sys > 0 && (!ball_ids.is_empty() || ast_id.is_some()) {
-            if let Some(handle) = ctx.systems.get_handle(clean_sys) {
-                for bid in ball_ids {
-                    let _ = handle.remove_ball(bid).await;
-                }
-                if let Some(aid) = ast_id {
-                    let _ = handle.remove_ball(aid).await;
-                }
-            }
-        }
+        super::agents_missions_dungeon::despawn_mission_cleanup_balls(
+            ctx, clean_sys, ast_id, &ball_ids,
+        )
+        .await;
         ctx.emit_typed(
             NotificationTarget::Character(char_id),
             OnAgentMissionObjectivesFailed {
@@ -541,16 +535,13 @@ pub(super) async fn handle_mission_complete_action(
     match res {
         Ok((new_standing, tally, storyline_offered, bonus_paid, st_changes, item_reward, credited_lp, completed_agent_id, is_courier, is_mining_mission, is_kill, arc_completed_now, (clean_sys, clean_ast_id, clean_ball_ids))) => {
             notify_standing_changes(ctx, char_id, &st_changes);
-            if clean_sys > 0 && (!clean_ball_ids.is_empty() || clean_ast_id.is_some()) {
-                if let Some(handle) = ctx.systems.get_handle(clean_sys) {
-                    for bid in clean_ball_ids {
-                        let _ = handle.remove_ball(bid).await;
-                    }
-                    if let Some(aid) = clean_ast_id {
-                        let _ = handle.remove_ball(aid).await;
-                    }
-                }
-            }
+            super::agents_missions_dungeon::despawn_mission_cleanup_balls(
+                ctx,
+                clean_sys,
+                clean_ast_id,
+                &clean_ball_ids,
+            )
+            .await;
             let mission_title_career = ctx.sde.missions.get(&mission_id).map(|m| m.title.as_str()).unwrap_or("");
             let is_fw_mission_agent = ctx.sde.agents.get(&completed_agent_id).is_some_and(is_fw_agent);
             crate::quasar_gateway::isolate_side_effect("agents_missions.career_mission_complete", || {

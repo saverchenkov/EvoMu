@@ -2,113 +2,64 @@
 
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::with_mut_combat_runtime;
-use eve_destiny::SlimItemMeta;
 use glam::DVec3;
 
 /// Daily downtime maintenance: purges stale NPC wrecks (`feat:lifecycle.wreck-downtime`)
-/// and resets uncompleted (`MissionState::Accepted`) missions by despawning remaining NPCs and restoring
-/// initial room/NPC state (`feat:lifecycle.mission-downtime-respawn`).
+/// and preserves uncompleted (`MissionState::Accepted`) mission kill progress across downtime
+/// while despawning active ballpark NPCs for pocket re-materialization (`PVE-019`).
 // parity: feat:lifecycle.wreck-downtime, feat:lifecycle.mission-downtime-respawn
 pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) -> (usize, usize) {
-    let mut removed_wreck_balls: Vec<(u32, i64)> = Vec::new();
-    let mut removed_mission_npcs: Vec<(u32, i64)> = Vec::new();
-    let mut missions_reset_count: usize = 0;
-
-    ctx.db.with_mut_snapshot(|snap| {
-        {
-            let npc_wreck_ids: Vec<(i64, u32)> = snap
-                .items
-                .values()
-                .filter(|i| {
-                    let is_wreck = i.type_id == 26557
-                        || ctx
-                            .sde
-                            .types
-                            .get(&i.type_id)
-                            .is_some_and(|t| t.group_id == 186);
-                    let is_npc_wreck = snap
-                        .sp6_lifecycle
-                        .space_object_meta
-                        .get(&i.item_id)
-                        .is_some_and(|m| m.is_npc_wreck);
-                    is_wreck
-                        && is_npc_wreck
-                        && (30_000_000..=34_000_000).contains(&i.location_id)
-                        && !crate::services::pve_homefront_runtime::is_active_homefront_space_object_in_snap(
-                            snap,
-                            i.item_id,
-                        )
-                })
-                .map(|i| (i.item_id, i.location_id as u32))
-                .collect();
-
-            for (wid, sys_id) in npc_wreck_ids {
-                snap.items.remove(&wid);
-                snap.item_positions.remove(&wid);
-                {
-                    let st = snap.sp6_lifecycle.as_inner_mut();
-                    st.space_object_meta.remove(&wid);
-                    st.ship_combat_hp.remove(&wid);
-                }
-                snap.items.retain(|_, child| child.location_id != wid);
-                removed_wreck_balls.push((sys_id, wid));
-            }
-        }
-
-        // Despawn surviving mission NPCs, reset uncompleted accepted combat missions
-        // (`feat:lifecycle.mission-downtime-respawn`), and clear stale wave metadata from
-        // non-accepted missions.
-        let downtime_ids: Vec<eve_db::MissionInstanceId> = snap
-            .missions
-            .iter()
-            .filter(|m| {
-                m.state == eve_db::MissionState::Accepted
-                    || m.encounter().is_some_and(|enc| {
-                        enc.initial_wave_count.is_some()
-                            || !enc.initial_wave_types.is_empty()
-                            || enc.awaiting_downtime_respawn
+    let (removed_wreck_balls, removed_mission_npcs, missions_reset_count) =
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut removed_wreck_balls: Vec<(u32, i64)> = Vec::new();
+            let mut removed_mission_npcs: Vec<(u32, i64)> = Vec::new();
+            {
+                let npc_wreck_ids: Vec<(i64, u32)> = snap
+                    .items
+                    .values()
+                    .filter(|i| {
+                        let is_wreck = i.type_id == 26557
+                            || ctx
+                                .sde
+                                .types
+                                .get(&i.type_id)
+                                .is_some_and(|t| t.group_id == 186);
+                        let is_npc_wreck = snap
+                            .sp6_lifecycle
+                            .space_object_meta
+                            .get(&i.item_id)
+                            .is_some_and(|m| m.is_npc_wreck);
+                        is_wreck
+                            && is_npc_wreck
+                            && (30_000_000..=34_000_000).contains(&i.location_id)
+                            && !crate::services::pve_homefront_runtime::is_active_homefront_space_object_in_snap(
+                                snap,
+                                i.item_id,
+                            )
                     })
-            })
-            .map(|m| m.instance_id)
-            .collect();
-        for iid in downtime_ids {
-            let _ = snap.missions.update(iid, |mission| {
-                if mission.state != eve_db::MissionState::Accepted {
-                    if let Some(enc) = mission.encounter_mut() {
-                        enc.initial_wave_count = None;
-                        enc.initial_wave_types.clear();
-                        enc.awaiting_downtime_respawn = false;
+                    .map(|i| (i.item_id, i.location_id as u32))
+                    .collect();
+
+                for (wid, sys_id) in npc_wreck_ids {
+                    snap.items.remove(&wid);
+                    snap.item_positions.remove(&wid);
+                    {
+                        let st = snap.sp6_lifecycle.as_inner_mut();
+                        st.space_object_meta.remove(&wid);
+                        st.ship_combat_hp.remove(&wid);
                     }
-                    return;
+                    snap.items.retain(|_, child| child.location_id != wid);
+                    removed_wreck_balls.push((sys_id, wid));
                 }
-                let sys_id = mission.solar_system_id;
-                mission.current_room_id = 1;
-                let Some(enc) = mission.encounter_mut() else {
-                    return;
-                };
-                let initial_count = enc.initial_wave_count.unwrap_or(0);
-                let old_spawned_len = enc.spawned_npc_ball_ids.len() as u32;
-                let has_combat_wave =
-                    initial_count > 0 || old_spawned_len > 0 || enc.npcs_remaining > 0;
-                for &old_bid in &enc.spawned_npc_ball_ids {
-                    removed_mission_npcs.push((sys_id, old_bid));
-                }
-                enc.spawned_npc_ball_ids.clear();
-                if has_combat_wave {
-                    let target_count = if initial_count > 0 {
-                        initial_count
-                    } else {
-                        old_spawned_len.max(enc.npcs_remaining).max(4)
-                    };
-                    enc.npcs_remaining = target_count;
-                    enc.awaiting_downtime_respawn = true;
-                    missions_reset_count += 1;
-                } else {
-                    enc.npcs_remaining = 0;
-                }
-            });
-        }
-    });
+            }
+
+            let missions_reset_count =
+                crate::services::agents_missions::agents_missions_dungeon::reset_missions_on_downtime_in_snap(
+                    snap,
+                    &mut removed_mission_npcs,
+                );
+            (removed_wreck_balls, removed_mission_npcs, missions_reset_count)
+        });
 
     let wrecks_removed_count = removed_wreck_balls.len();
     if !removed_wreck_balls.is_empty() || !removed_mission_npcs.is_empty() {
@@ -398,173 +349,13 @@ pub fn spawn_mission_wave_on_pocket_entry_for_mission_if_needed(
     pocket_origin: DVec3,
     target_mission_id: Option<u32>,
 ) -> usize {
-    if !pocket_origin.is_finite() {
-        return 0;
-    }
-    let now_unix = ctx.now_unix();
-    let default_npc_tid =
-        crate::services::agents_missions::agents_missions_helpers::resolve_mission_npc_type(ctx)
-            .max(10_019);
-    let mut spawned_npcs: Vec<(u32, i64, u32, DVec3)> = Vec::new();
-
-    ctx.db.with_mut_snapshot(|snap| {
-        let candidate_ids: Vec<eve_db::MissionInstanceId> = snap
-            .missions
-            .iter_by_character(char_id)
-            .map(|m| m.instance_id)
-            .collect();
-        for iid in candidate_ids {
-            let Some((wave_count, wave_types)) = snap.missions.get(iid).and_then(|mission| {
-                let enc = mission.encounter()?;
-                let matches_target = match target_mission_id {
-                    Some(mid) => {
-                        mission.template_id == mid
-                            && crate::services::agents_missions::agents_missions_warp::resolve_mission_pocket_origin_in_snap(
-                                ctx,
-                                snap,
-                                None,
-                                mission,
-                                solar_system_id,
-                                now_unix,
-                                false,
-                            )
-                            .is_ok()
-                    }
-                    None => {
-                        let Ok(known_origin) =
-                            crate::services::agents_missions::agents_missions_warp::resolve_mission_pocket_origin_in_snap(
-                                ctx,
-                                snap,
-                                None,
-                                mission,
-                                solar_system_id,
-                                now_unix,
-                                mission.site_origin_m.is_some() || mission.bookmark_id.is_some(),
-                            )
-                        else {
-                            return None;
-                        };
-                        known_origin
-                            .is_none_or(|pos| pos.is_finite() && pocket_origin.distance(pos) <= 200_000.0)
-                    }
-                };
-                let needs_respawn = enc.awaiting_downtime_respawn
-                    || (enc.spawned_npc_ball_ids.is_empty() && enc.npcs_remaining > 0);
-                if mission.state != eve_db::MissionState::Accepted
-                    || mission.solar_system_id != solar_system_id
-                    || !matches_target
-                    || !needs_respawn
-                {
-                    return None;
-                }
-                let initial_count = enc.initial_wave_count.unwrap_or(0);
-                let wave_count = if initial_count > 0 {
-                    initial_count
-                } else {
-                    enc.npcs_remaining
-                };
-                Some((wave_count, enc.initial_wave_types.clone()))
-            }) else {
-                continue;
-            };
-            if wave_count == 0 {
-                let _ = snap.missions.update(iid, |mission| {
-                    if let Some(enc) = mission.encounter_mut() {
-                        enc.awaiting_downtime_respawn = false;
-                    }
-                });
-                continue;
-            }
-            let new_bids: Vec<i64> = (0..wave_count).map(|_| snap.alloc_entity_id()).collect();
-            let _ = snap.missions.update(iid, |mission| {
-                mission.current_room_id = 1;
-                if let Some(enc) = mission.encounter_mut() {
-                    enc.npcs_remaining = wave_count;
-                    enc.awaiting_downtime_respawn = false;
-                    enc.spawned_npc_ball_ids.clear();
-                    for (idx, &npc_bid) in new_bids.iter().enumerate() {
-                        let npc_tid = wave_types
-                            .get(idx % wave_types.len().max(1))
-                            .copied()
-                            .unwrap_or(default_npc_tid);
-                        enc.spawned_npc_ball_ids.push(npc_bid);
-                        let angle = (idx as f64) * std::f64::consts::TAU / (wave_count as f64);
-                        let pos = pocket_origin
-                            + DVec3::new(angle.cos() * 4_500.0, 0.0, angle.sin() * 4_500.0);
-                        spawned_npcs.push((solar_system_id, npc_bid, npc_tid, pos));
-                    }
-                }
-            });
-        }
-    });
-
-    let count = spawned_npcs.len();
-    for (sys_id, npc_bid, npc_type_id, pos) in spawned_npcs {
-        let handle = ctx.systems.get_or_spawn(sys_id);
-        let sde_type = ctx.sde.types.get(&npc_type_id);
-        let (mut ball, cs, mut entity) =
-            crate::services::wormhole_pve_seeding::build_specialized_npc_components(
-                ctx,
-                sys_id,
-                npc_bid,
-                npc_type_id,
-                "Pirate",
-                1,
-                pos,
-            );
-        if sde_type.is_none() {
-            ball.max_velocity = 320.0;
-            ball.mass = 1_200_000.0;
-            ball.radius = 45.0;
-            ball.inertia = 2.0;
-            entity.faction_id = 500_010;
-            entity.bounty_isk = 25_000.0;
-            entity.optimal_range = 10_000.0;
-            entity.orbit_range = 6_000.0;
-            entity.damage_vector = eve_destiny::DamageVector::new(12.0, 15.0, 15.0, 12.0);
-        } else {
-            entity.bounty_isk = entity.bounty_isk.max(10_000.0);
-        }
-        let owner_faction_id = if entity.faction_id > 0 {
-            entity.faction_id
-        } else {
-            500_010
-        };
-        let owner_id = i64::from(owner_faction_id);
-        let npc_corp_id =
-            crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_faction(
-                ctx, owner_id,
-            );
-        let (group_id, category_id, name) = sde_type
-            .map(|t| {
-                (
-                    t.group_id,
-                    t.category_id,
-                    (!t.name.is_empty()).then(|| t.name.clone()),
-                )
-            })
-            .unwrap_or((546, 11, None));
-        handle.try_spawn_ball_with_meta(
-            ball,
-            cs,
-            SlimItemMeta {
-                group_id,
-                category_id,
-                owner_id,
-                char_id: None,
-                corp_id: npc_corp_id,
-                alliance_id: -1,
-                security_status: -5.0,
-                is_cloaked: false,
-                name,
-                ..Default::default()
-            },
-        );
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.npc_entities.insert(npc_bid, entity);
-        });
-    }
-    count
+    crate::services::agents_missions::agents_missions_dungeon::materialize_or_reconcile_mission_dungeon_sync(
+        ctx,
+        char_id,
+        solar_system_id,
+        target_mission_id,
+        pocket_origin,
+    )
 }
 
 /// Clears any stored safe-logoff state for `char_id` on login, undock, ship board, or action.

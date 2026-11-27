@@ -1183,7 +1183,7 @@ async fn test_npc_navy_police_hauler_convoy_and_serverops_downtime() {
         (s.items.contains_key(&expired_wreck_id), m.current_room_id, m.npcs_remaining)
     });
     assert!(!wreck_in_items && !wreck_in_meta, "11:00 UTC downtime must delete NPC wreck");
-    assert_eq!((mission_room, mission_npcs), (1, 4), "11:00 UTC downtime must reset accepted mission waves");
+    assert_eq!((mission_room, mission_npcs), (1, 1), "11:00 UTC downtime must preserve remaining NPC kill progress");
 }
 
 #[tokio::test]

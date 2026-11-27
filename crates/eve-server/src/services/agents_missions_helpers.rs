@@ -1324,7 +1324,8 @@ pub async fn abandon_or_decline_mission(
             let m_agent_id = existing.agent_id;
             let m_bmid = existing.bookmark_id;
             let m_ast_id = existing.asteroid_entity_id;
-            let ball_ids = existing.spawned_npc_ball_ids().to_vec();
+            let mut m_dungeon_inst_id = existing.dungeon_instance_id;
+            let mut ball_ids = existing.spawned_npc_ball_ids().to_vec();
             let next_state = if was_accepted {
                 MissionState::Quit
             } else {
@@ -1337,12 +1338,23 @@ pub async fn abandon_or_decline_mission(
 
             // Reclaim granted courier cargo and remove persisted mission asteroid while active.
             reclaim_courier_cargo(snap, char_id, mission_id);
-            if let Some(aid) = m_ast_id {
-                snap.asteroids.remove(&aid);
+            if m_ast_id.is_some() || m_dungeon_inst_id.is_some() {
                 let _ = snap.missions.update_by_character_template(char_id, mission_id, |m| {
                     m.asteroid_entity_id = None;
+                    m.dungeon_instance_id = None;
                 });
             }
+            if let Some(aid) = m_ast_id {
+                snap.asteroids.remove(&aid);
+            }
+            super::agents_missions_dungeon::finish_mission_dungeon_in_snap(
+                snap,
+                m_dungeon_inst_id.take(),
+                char_id,
+                true,
+                now,
+                &mut ball_ids,
+            );
             let corp_id = ctx
                 .sde
                 .agents
@@ -1438,16 +1450,10 @@ pub async fn abandon_or_decline_mission(
 
     super::notify_standing_changes(ctx, char_id, &st_changes);
 
-    if m_sys_id > 0 && (!ball_ids.is_empty() || ast_id.is_some()) {
-        if let Some(handle) = ctx.systems.get_handle(m_sys_id) {
-            for bid in ball_ids {
-                let _ = handle.remove_ball(bid).await;
-            }
-            if let Some(aid) = ast_id {
-                let _ = handle.remove_ball(aid).await;
-            }
-        }
-    }
+    super::agents_missions_dungeon::despawn_mission_cleanup_balls(
+        ctx, m_sys_id, ast_id, &ball_ids,
+    )
+    .await;
 
     Ok((new_state, penalty_applied, was_accepted))
 }
@@ -2210,17 +2216,7 @@ pub fn on_mission_npc_destroyed_core(
     npc_id: i64,
     _killer_char_id: Option<i64>,
 ) {
-    let should_update = db.with_snapshot(|snap| {
-        snap.missions
-            .get_by_npc_ball(npc_id)
-            .is_some_and(|m| m.state == MissionState::Accepted && m.solar_system_id == sys_id)
-    });
-    if !should_update {
-        return;
-    }
-    db.with_mut_snapshot(|snap| {
-        snap.missions.on_npc_destroyed(sys_id, npc_id);
-    });
+    super::agents_missions_dungeon::on_mission_npc_destroyed_sync(db, sys_id, npc_id);
 }
 
 /// Collects sorted, deduplicated positive `agent_id`s across a character's active and archived missions.

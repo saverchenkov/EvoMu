@@ -674,7 +674,7 @@ async fn test_sp7_downtime_cleans_npc_wrecks_and_respawns_accepted_mission_waves
     });
 
     // Advance across 11:00 UTC (`10:59:55 -> 11:00:05 UTC`) so downtime cleans NPC wrecks,
-    // despawns surviving pre-downtime mission NPCs, and resets mission npcs_remaining to 4
+    // despawns surviving pre-downtime mission NPCs, and preserves remaining npcs_remaining=1 (`PVE-019`)
     tick_background_cluster(&ctx).await;
     ctx.advance_secs(10);
     tick_background_cluster(&ctx).await;
@@ -684,11 +684,11 @@ async fn test_sp7_downtime_cleans_npc_wrecks_and_respawns_accepted_mission_waves
         assert!(!snap.items.contains_key(&npc_wreck_id));
         assert!(snap.items.contains_key(&player_wreck_id));
         let mission = mission_fixture::get(snap, 90_000_001, 500_001).expect("mission preserved");
-        assert_eq!(mission.npcs_remaining, 4);
+        assert_eq!(mission.npcs_remaining, 1);
         assert!(mission.spawned_npc_ball_ids.is_empty());
     });
 
-    // Pilot reconnects after downtime and warps back to the mission pocket -> initial 4-NPC wave spawns on pocket entry
+    // Pilot reconnects after downtime and warps back to the mission pocket -> surviving 1-NPC spawns on pocket entry
     ctx.advance_secs(905); // Advance past 11:00–11:15 UTC downtime window before warping
     tick_background_cluster(&ctx).await;
     let mut sess = eve_machonet::SessionState::default();
@@ -723,7 +723,7 @@ async fn test_sp7_downtime_cleans_npc_wrecks_and_respawns_accepted_mission_waves
             .expect("mission preserved")
             .spawned_npc_ball_ids
     });
-    assert_eq!(mission_ball_ids.len(), 4);
+    assert_eq!(mission_ball_ids.len(), 1);
     for bid in mission_ball_ids {
         assert!(
             respawned_balls.iter().any(|b| b.id == bid),

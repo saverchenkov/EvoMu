@@ -1005,28 +1005,25 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
         .sde
         .agents
         .values()
-        .filter(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == 1 && a.station_id == Some(JITA_STATION_ID))
+        .filter(|a| {
+            a.agent_type_id == 2
+                && a.division_id == 24
+                && a.level == 2
+                && a.station_id.is_some()
+                && a.solar_system_id.is_some_and(|s| {
+                    ctx.sde
+                        .solar_systems
+                        .get(&s)
+                        .is_some_and(|sys| sys.security_status >= 0.45)
+                })
+        })
         .min_by_key(|a| a.agent_id)
         .cloned()
         .or_else(|| {
             ctx.sde
                 .agents
                 .values()
-                .filter(|a| {
-                    a.agent_type_id == 2
-                        && a.division_id == 24
-                        && a.level == 1
-                        && a.station_id.is_some()
-                        && a.solar_system_id == Some(JITA_SYSTEM_ID)
-                })
-                .min_by_key(|a| a.agent_id)
-                .cloned()
-        })
-        .or_else(|| {
-            ctx.sde
-                .agents
-                .values()
-                .filter(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == 1 && a.station_id.is_some())
+                .filter(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == 2 && a.station_id.is_some())
                 .min_by_key(|a| a.agent_id)
                 .cloned()
         })
@@ -1179,21 +1176,25 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
         if ag_space.get_ball_snapshot(first_npc).await.unwrap().is_none() { break; }
         ag_space.step_manual(1.0).await.unwrap();
     }
+    assert!(initial_npcs >= 2, "L2 mission wave must have >= 2 NPCs for partial kill persistence (got {initial_npcs})");
     assert!(ag_space.get_ball_snapshot(first_npc).await.unwrap().is_none(), "first_npc destroyed before downtime");
     ctx.db.with_snapshot(|s| assert_eq!(eve_server::services::mission_fixture::get(s, P1, m_id).unwrap().npcs_remaining, initial_npcs - 1));
     ctx.advance_secs(10);
     run_daily_downtime_and_jobs(&ctx);
-    ctx.db.with_snapshot(|s| assert_eq!(eve_server::services::mission_fixture::get(s, P1, m_id).unwrap().npcs_remaining, initial_npcs));
+    ctx.db.with_snapshot(|s| assert_eq!(eve_server::services::mission_fixture::get(s, P1, m_id).unwrap().npcs_remaining, initial_npcs - 1));
+    assert!(ag_space.set_ball_position(ship_id, npc_pos + DVec3::new(300_000.0, 0.0, 0.0)).await);
+    ag_space.step_manual(0.1).await.unwrap();
     let ag_beyonce = ctx.bind_object(&sess, "beyonce", i64::from(m_sys)).unwrap();
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdWarpToStuff", &[PyRep::String("mission".into()), PyRep::Integer(i64::from(m_id))], &HashMap::new(), None).await.unwrap();
     let respawned_ids = ctx.db.with_snapshot(|s| eve_server::services::mission_fixture::get(s, P1, m_id).unwrap().spawned_npc_ball_ids);
-    assert_eq!(respawned_ids.len() as u32, initial_npcs);
-    assert!(respawned_ids.iter().all(|&id| id > 200_000_000 && !initial_npc_ids.contains(&id)));
+    assert_eq!(respawned_ids.len() as u32, initial_npcs - 1);
+    assert!(!respawned_ids.contains(&first_npc), "killed NPC must never resurrect after downtime");
+    assert_eq!(respawned_ids, initial_npc_ids[1..]);
     let mut respawned_types = Vec::with_capacity(respawned_ids.len());
     for nid in &respawned_ids {
         respawned_types.push(ag_space.get_ball_snapshot(*nid).await.unwrap().unwrap().1.type_id);
     }
-    assert_eq!(respawned_types, initial_types);
+    assert_eq!(respawned_types, initial_types[1..]);
     assert!(with_combat_runtime(&ctx, |rt| respawned_ids.iter().all(|id| rt.npc_entities.contains_key(id))));
 
     // 4. `mobile_warp_disruptor-lifecycle`: Anchor completion from anchor_start_unix, bubble re-created after restart, removed after 2 days

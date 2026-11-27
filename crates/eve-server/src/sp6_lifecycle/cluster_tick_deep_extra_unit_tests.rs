@@ -168,7 +168,7 @@ async fn deep_downtime_npc_wreck_purge_and_mission_wave_respawn() {
         assert!(snap.items.contains_key(&player_wreck_id));
         let m = mission_fixture::get(snap, char_id, 701).expect("accepted mission retained");
         assert_eq!(m.current_room_id, 1);
-        assert_eq!(m.npcs_remaining, 3);
+        assert_eq!(m.npcs_remaining, 1);
         assert!(m.spawned_npc_ball_ids.is_empty());
         assert!(mission_fixture::get(snap, char_id, 702)
             .unwrap()
@@ -187,14 +187,14 @@ async fn deep_downtime_npc_wreck_purge_and_mission_wave_respawn() {
         0
     );
 
-    // Matching pocket entry spawns 3 pirate NPCs and clears pending respawn marker
+    // Matching pocket entry spawns only surviving 1 pirate NPC and clears pending respawn marker (`PVE-019`)
     let spawned = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
         &ctx,
         char_id,
         sys_id,
         DVec3::new(50_000.0, 0.0, 0.0),
     );
-    assert_eq!(spawned, 3);
+    assert_eq!(spawned, 1);
     assert_eq!(
         crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
             &ctx,

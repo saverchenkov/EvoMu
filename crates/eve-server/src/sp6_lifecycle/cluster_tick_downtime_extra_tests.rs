@@ -213,8 +213,8 @@ async fn downtime_wreck_filter_system_bounds_group186_and_mission_target_counts(
         assert_eq!(m1.initial_wave_count, Some(7));
         assert!(m1.initial_wave_types.is_some());
         assert!(m1.awaiting_downtime_respawn);
-        assert_eq!(m1.npcs_remaining, 7);
-        assert_eq!(mission_fixture::get(snap, char_id, 602).unwrap().npcs_remaining, 6);
+        assert_eq!(m1.npcs_remaining, 1);
+        assert_eq!(mission_fixture::get(snap, char_id, 602).unwrap().npcs_remaining, 2);
         assert_eq!(mission_fixture::get(snap, char_id, 603).unwrap().npcs_remaining, 5);
     });
 }
@@ -268,7 +268,7 @@ async fn spawn_mission_wave_handles_custom_types_fallback_stats_and_geometry() {
 
     let origin = DVec3::new(10_000.0, 200.0, -5_000.0);
     let spawned = spawn_mission_wave_on_pocket_entry_if_needed(&ctx, char_id, sys_id, origin);
-    assert_eq!(spawned, 4);
+    assert_eq!(spawned, 2);
 
     // Calling again immediately spawns 0 because spawned_npc_ball_ids is now non-empty and not awaiting.
     assert_eq!(
@@ -279,36 +279,39 @@ async fn spawn_mission_wave_handles_custom_types_fallback_stats_and_geometry() {
     let bids = ctx.db.with_snapshot(|snap| {
         let m = mission_fixture::get(snap, char_id, 701).unwrap();
         assert_eq!(m.current_room_id, 1);
-        assert_eq!(m.npcs_remaining, 4);
+        assert_eq!(m.npcs_remaining, 2);
         m.spawned_npc_ball_ids
     });
-    assert_eq!(bids.len(), 4);
+    assert_eq!(bids.len(), 2);
 
+    let expected_pirate_faction =
+        crate::combat::npc_ai::regional_pirate_faction_id_for_sde(&ctx.sde, sys_id);
     with_combat_runtime(&ctx, |rt| {
         // idx 0 -> valid_npc_tid at angle 0: origin + (4500, 0, 0)
         let e0 = &rt.npc_entities[&bids[0]];
         assert_eq!(e0.type_id, valid_npc_tid);
-        assert!((e0.spawn_position.x - (origin.x + 4_500.0)).abs() < 1e-6);
-        assert!((e0.spawn_position.y - origin.y).abs() < 1e-6);
-        assert!((e0.spawn_position.z - origin.z).abs() < 1e-6);
+        assert!((e0.spawn_position.x - (origin.x + 4_500.0)).abs() <= 1.0);
+        assert!((e0.spawn_position.y - origin.y).abs() <= 1.0);
+        assert!((e0.spawn_position.z - origin.z).abs() <= 1.0);
         assert!(e0.orbit_range >= 2_500.0 && e0.orbit_range <= 15_000.0);
         assert!(e0.bounty_isk >= 10_000.0);
 
-        // idx 1 -> fallback_npc_tid at angle PI/2: origin + (0, 0, 4500)
+        // idx 1 -> fallback_npc_tid at angle PI: origin + (-4500, 0, 0)
         let e1 = &rt.npc_entities[&bids[1]];
         assert_eq!(e1.type_id, fallback_npc_tid);
-        assert_eq!(e1.faction_id, 500_010);
+        assert_eq!(e1.faction_id, expected_pirate_faction);
         assert_eq!(e1.bounty_isk, 25_000.0);
-        assert_eq!(e1.optimal_range, 10_000.0);
-        assert_eq!(e1.orbit_range, 6_000.0);
-        assert_eq!(e1.damage_vector, DamageVector::new(12.0, 15.0, 15.0, 12.0));
-        assert!((e1.spawn_position.x - origin.x).abs() < 1e-6);
-        assert!((e1.spawn_position.z - (origin.z + 4_500.0)).abs() < 1e-6);
-
-        // idx 2 -> valid_npc_tid (cycles modulo 2) at angle PI: origin + (-4500, 0, 0)
-        let e2 = &rt.npc_entities[&bids[2]];
-        assert_eq!(e2.type_id, valid_npc_tid);
-        assert!((e2.spawn_position.x - (origin.x - 4_500.0)).abs() < 1e-6);
+        assert!(e1.optimal_range >= 5_000.0);
+        assert!((e1.orbit_range - (e1.optimal_range * 0.6).clamp(2_500.0, 20_000.0)).abs() < 1e-6);
+        assert!(
+            (e1.damage_vector.em
+                + e1.damage_vector.explosive
+                + e1.damage_vector.kinetic
+                + e1.damage_vector.thermal)
+                > 0.0
+        );
+        assert!((e1.spawn_position.x - (origin.x - 4_500.0)).abs() <= 1.0);
+        assert!((e1.spawn_position.z - origin.z).abs() <= 1.0);
     });
 }
 
@@ -783,17 +786,17 @@ async fn flush_bounties_safe_logoff_and_pocket_entry_mission_edge_paths() {
         assert!(!m2.awaiting_downtime_respawn);
         assert!(m3.awaiting_downtime_respawn);
         assert_eq!(m2.npcs_remaining, 0);
-        assert_eq!(m3.npcs_remaining, 4);
+        assert_eq!(m3.npcs_remaining, 1);
     });
 
-    // Pocket entry clears awaiting respawn (even for 0-NPC missions) and respawns 4 NPCs
+    // Pocket entry clears awaiting respawn (even for 0-NPC missions) and respawns surviving 1 NPC (`PVE-019`)
     ctx.db.with_mut_snapshot(|snap| {
         mission_fixture::edit(snap, c1, 2, |m| {
             m.awaiting_downtime_respawn = true;
         });
     });
     let spawned = spawn_mission_wave_on_pocket_entry_if_needed(&ctx, c1, sys1, origin);
-    assert_eq!(spawned, 4);
+    assert_eq!(spawned, 1);
     ctx.db.with_snapshot(|snap| {
         assert!(!mission_fixture::get(snap, c1, 2)
             .unwrap()

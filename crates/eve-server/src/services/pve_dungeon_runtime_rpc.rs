@@ -7,7 +7,7 @@ use crate::router::ServerContext;
 use crate::services::notify_emitters_space_dungeons::emit_dungeon_progression_notifications;
 use crate::services::pve_dungeon_runtime::{
     actions::DungeonRuntimeDeps, instance_is_finished, materialize_dungeon_room_entities,
-    on_dungeon_room_entered, prune_stale_despawned_instances, read_dungeon_runtime_store,
+    on_dungeon_room_entered, prune_stale_despawned_instances_in_snap, read_dungeon_runtime_store,
     record_dungeon_actor, resolve_runtime_gate_in_snap, triggers, unix_to_filetime_ticks,
     with_dungeon_runtime_store, DungeonGateLink, DungeonInstanceId, DungeonNpcGroup,
     DungeonNpcSpawnEntry, DungeonObjective, DungeonObjectiveStatus, DungeonRuntimeInstance,
@@ -235,6 +235,10 @@ pub async fn try_activate_dungeon_runtime_gate(
     let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.item_positions.insert(ship_id, dest_pos);
+        crate::services::agents_missions::agents_missions_dungeon::sync_mission_from_dungeon_in_snap(
+            snap,
+            instance_id,
+        );
     });
 
     let expiry_ft = unix_to_filetime_ticks(created_unix.saturating_add(86_400));
@@ -1318,7 +1322,7 @@ pub async fn spawn_sde_dungeon_runtime_instance(
     let init_obj_id = select_active_objective_id(&objectives, first_room_index, fallback_obj_id);
     let inst_id = ctx.db.with_mut_snapshot(|snap| {
         let id = DungeonInstanceId::new(snap.alloc_entity_id()).as_i64();
-        prune_stale_despawned_instances(&mut snap.dungeon_runtime, now);
+        prune_stale_despawned_instances_in_snap(snap, now);
         let entry_gate_pos = has_entry_gate.then_some(base_pos);
         snap.dungeon_runtime.insert_instance(DungeonRuntimeInstance {
             instance_id: id,
@@ -1415,7 +1419,7 @@ pub async fn spawn_dungeon_instance(
     let init_obj_id = select_active_objective_id(&objectives, first_room_index, fallback_obj_id);
     let inst_id = ctx.db.with_mut_snapshot(|snap| {
         let id = DungeonInstanceId::new(snap.alloc_entity_id()).as_i64();
-        prune_stale_despawned_instances(&mut snap.dungeon_runtime, now);
+        prune_stale_despawned_instances_in_snap(snap, now);
         let entry_gate_pos = has_entry_gate.then_some([
             base_pos[0] - 25_000.0,
             base_pos[1],
@@ -1819,7 +1823,7 @@ pub fn register_sde_operation_dungeon_instance(
     let init_obj_id = select_active_objective_id(&objectives, first_room_index, 0);
     let inst_id = ctx.db.with_mut_snapshot(|snap| {
         let id = DungeonInstanceId::new(snap.alloc_entity_id()).as_i64();
-        prune_stale_despawned_instances(&mut snap.dungeon_runtime, now);
+        prune_stale_despawned_instances_in_snap(snap, now);
         snap.dungeon_runtime.insert_instance(DungeonRuntimeInstance {
             instance_id: id,
             dungeon_id,

@@ -5,12 +5,14 @@
 
 use super::{
     insert_container_and_loot_in_snap, instance_is_finished, plan_npc_group_spawns_in_snap,
-    resolve_room_recipient, spawn_gate_ball, spawn_object_ball, wake_dungeon_system_handle,
-    NpcSpawnOrder, DEFAULT_CONTAINER_TYPE_ID,
+    resolve_room_recipient, spawn_gate_ball, spawn_gate_ball_sync, spawn_object_ball,
+    spawn_object_ball_sync, wake_dungeon_system_handle, NpcSpawnOrder, DEFAULT_CONTAINER_TYPE_ID,
 };
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_npc_ai::build_specialized_npc_spawn_item;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime_with_locks, CombatRuntimeState};
+use crate::services::combat_crimewatch::{
+    with_mut_combat_runtime_with_locks, CombatRuntimeState, ExtendedNpcEntity,
+};
 use crate::services::pve_expeditions::{create_escalation_expedition_with_options_core, expedition_sig_id};
 use eve_db::lock_rank::AnyRwLock;
 use eve_db::service_domains::pve_sites::{
@@ -83,7 +85,7 @@ pub(crate) struct TriggerTxEffects {
     pub(crate) spawn_npcs: Vec<NpcSpawnOrder>,
     pub(crate) notify_actions: Vec<(i64, u32, Vec<i64>, Vec<DungeonTriggerAction>)>,
     pub(crate) progression_notices: Vec<ProgressionNotice>,
-    pub(crate) completed_sites: Vec<(i64, u32, i64)>,
+    pub(crate) completed_sites: Vec<(i64, u32, i64, bool)>,
     pub(crate) failed_notices: Vec<(i64, u32, i64)>,
     pub(crate) escalation_requests: Vec<(i64, u32, Option<u32>, u16, Option<String>, [f64; 3], i64)>,
     pub(crate) locked_rooms: HashSet<usize>,
@@ -112,25 +114,94 @@ fn deterministic_roll_bps(seed_a: i64, seed_b: u64) -> u16 {
     ((x ^ (x >> 31)) % 10_000) as u16
 }
 
+fn build_dungeon_npc_spawn_tuple(
+    sde: &eve_sde::SdeRegistry,
+    sys_id: SolarSystemId,
+    order: NpcSpawnOrder,
+) -> (
+    eve_destiny::Ball,
+    eve_destiny::CombatState,
+    eve_destiny::SlimItemMeta,
+    ExtendedNpcEntity,
+) {
+    let seed = order.ball_id.unsigned_abs() ^ (u64::from(order.type_id) << 16);
+    let (ball, mut cs, mut meta, mut entity) = build_specialized_npc_spawn_item(
+        sde,
+        sys_id,
+        order.ball_id,
+        order.type_id,
+        "",
+        u32::from(order.group_id),
+        DVec3::from_array(order.pos),
+        seed,
+        &mut |_| {},
+    );
+    if !order.destructible {
+        cs.is_tethered = true;
+    }
+    if let Some(name) = order.custom_name {
+        meta.name = Some(name);
+    }
+    if let Some(bounty_isk) = order.bounty_isk_override {
+        entity.bounty_isk = bounty_isk.max(0) as f64;
+    }
+    (ball, cs, meta, entity)
+}
+
+fn record_spawned_dungeon_npc_entities(
+    deps: DungeonRuntimeDeps<'_>,
+    entities: Vec<(i64, ExtendedNpcEntity)>,
+) {
+    if let (Some(combat_eph), false) = (deps.combat_ephemeral, entities.is_empty()) {
+        with_mut_combat_runtime_with_locks(deps.db, combat_eph, |rt| {
+            for (bid, ent) in entities {
+                rt.npc_entities.insert(bid, ent);
+            }
+        });
+    }
+}
+
 pub(crate) async fn spawn_dungeon_npc_orders(
-    deps: DungeonRuntimeDeps<'_>, sys_id: SolarSystemId, sys_handle: &crate::system_actor::SystemHandle, orders: Vec<NpcSpawnOrder>,
+    deps: DungeonRuntimeDeps<'_>,
+    sys_id: SolarSystemId,
+    sys_handle: &crate::system_actor::SystemHandle,
+    orders: Vec<NpcSpawnOrder>,
 ) {
     let Some(sde) = deps.sde else { return };
     let mut entities = Vec::with_capacity(orders.len());
     for order in orders {
-        let seed = order.ball_id.unsigned_abs() ^ (u64::from(order.type_id) << 16);
-        let (ball, mut cs, mut meta, entity) = build_specialized_npc_spawn_item(
-            sde, sys_id, order.ball_id, order.type_id, "", u32::from(order.group_id),
-            DVec3::from_array(order.pos), seed, &mut |_| {},
-        );
-        if !order.destructible { cs.is_tethered = true; }
-        if let Some(name) = order.custom_name { meta.name = Some(name); }
+        let ball_id = order.ball_id;
+        let (ball, cs, meta, entity) = build_dungeon_npc_spawn_tuple(sde, sys_id, order);
         let _ = sys_handle.spawn_ball_with_meta(ball, cs, meta).await;
-        entities.push((order.ball_id, entity));
+        entities.push((ball_id, entity));
     }
-    if let (Some(combat_eph), false) = (deps.combat_ephemeral, entities.is_empty()) {
+    record_spawned_dungeon_npc_entities(deps, entities);
+}
+
+pub(crate) fn spawn_dungeon_npc_orders_sync(
+    deps: DungeonRuntimeDeps<'_>,
+    sys_id: SolarSystemId,
+    sys_handle: &crate::system_actor::SystemHandle,
+    orders: Vec<NpcSpawnOrder>,
+) {
+    let Some(sde) = deps.sde else { return };
+    let mut entities = Vec::with_capacity(orders.len());
+    for order in orders {
+        let ball_id = order.ball_id;
+        let (ball, cs, meta, entity) = build_dungeon_npc_spawn_tuple(sde, sys_id, order);
+        if sys_handle.spawn_ball_with_meta_sync(ball, cs, meta).is_ok() {
+            entities.push((ball_id, entity));
+        }
+    }
+    record_spawned_dungeon_npc_entities(deps, entities);
+}
+
+fn remove_despawned_dungeon_npc_entities(deps: DungeonRuntimeDeps<'_>, npc_ids: &[i64]) {
+    if let (Some(combat_eph), false) = (deps.combat_ephemeral, npc_ids.is_empty()) {
         with_mut_combat_runtime_with_locks(deps.db, combat_eph, |rt| {
-            for (bid, ent) in entities { rt.npc_entities.insert(bid, ent); }
+            for bid in npc_ids {
+                rt.npc_entities.remove(bid);
+            }
         });
     }
 }
@@ -140,9 +211,15 @@ pub(crate) async fn despawn_dungeon_npc_ids(
 ) {
     if npc_ids.is_empty() { return; }
     if let Some(sh) = sys_handle_opt { for &bid in npc_ids { let _ = sh.remove_ball(bid).await; } }
-    if let Some(combat_eph) = deps.combat_ephemeral {
-        with_mut_combat_runtime_with_locks(deps.db, combat_eph, |rt| { for bid in npc_ids { rt.npc_entities.remove(bid); } });
-    }
+    remove_despawned_dungeon_npc_entities(deps, npc_ids);
+}
+
+pub(crate) fn despawn_dungeon_npc_ids_sync(
+    deps: DungeonRuntimeDeps<'_>, sys_handle_opt: Option<&crate::system_actor::SystemHandle>, npc_ids: &[i64],
+) {
+    if npc_ids.is_empty() { return; }
+    if let Some(sh) = sys_handle_opt { for &bid in npc_ids { let _ = sh.remove_ball_sync(bid); } }
+    remove_despawned_dungeon_npc_entities(deps, npc_ids);
 }
 
 pub(crate) fn finish_instance_entities_in_snap(
@@ -157,7 +234,10 @@ pub(crate) fn finish_instance_entities_in_snap(
     if done.emit_failed {
         effects.failed_notices.push((done.recipient_char_id, done.dungeon_id, instance_id));
     } else if done.emit_completed {
-        effects.completed_sites.push((instance_id, done.dungeon_id, done.recipient_char_id));
+        effects.completed_sites.push((instance_id, done.dungeon_id, done.recipient_char_id, !done.is_mission));
+        if done.is_mission {
+            crate::services::agents_missions::agents_missions_dungeon::sync_mission_from_dungeon_in_snap(snap, instance_id);
+        }
     }
 }
 
@@ -504,6 +584,7 @@ pub(crate) fn finalize_terminal_in_snap(
     } else if effects.complete_now {
         finish_instance_entities_in_snap(snap, inst_id, actor, now_unix, false, false, effects);
     }
+    crate::services::agents_missions::agents_missions_dungeon::sync_mission_from_dungeon_in_snap(snap, inst_id);
     effects.cancel_dead_spawns();
 }
 
@@ -549,25 +630,20 @@ pub(crate) fn merge_effects(dst: &mut TriggerTxEffects, mut src: TriggerTxEffect
     dst.cancel_dead_spawns();
 }
 
-pub(crate) async fn flush_trigger_effects(deps: DungeonRuntimeDeps<'_>, sys_id: SolarSystemId, mut effects: TriggerTxEffects) {
-    effects.cancel_dead_spawns();
-    let sys_handle_opt = deps.systems.get_handle(sys_id);
-    despawn_dungeon_npc_ids(deps, sys_handle_opt.as_ref(), &effects.despawn_npc_ids).await;
-    if let Some(sh) = sys_handle_opt.as_ref() { for bid in &effects.despawn_other_balls { let _ = sh.remove_ball(*bid).await; } }
-    if !effects.spawn_gates.is_empty() || !effects.spawn_objects.is_empty() || !effects.spawn_npcs.is_empty() {
-        let sh = wake_dungeon_system_handle(deps.systems, sys_id);
-        for (gid, gpos, tid) in effects.spawn_gates { spawn_gate_ball(&sh, gid, gpos, tid).await; }
-        if let Some(sde) = deps.sde {
-            for obj in effects.spawn_objects { spawn_object_ball(&sh, sde, obj.ball_id, obj.type_id, obj.position, obj.radius, obj.destructible).await; }
-        }
-        if !effects.spawn_npcs.is_empty() { spawn_dungeon_npc_orders(deps, sys_id, &sh, effects.spawn_npcs).await; }
-    }
-    for (recip, did, obj_ids, acts) in effects.notify_actions {
+fn flush_trigger_notifications_and_completion_sync(
+    deps: DungeonRuntimeDeps<'_>,
+    sys_id: SolarSystemId,
+    notify_actions: Vec<(i64, u32, Vec<i64>, Vec<DungeonTriggerAction>)>,
+    progression_notices: Vec<ProgressionNotice>,
+    failed_notices: Vec<(i64, u32, i64)>,
+    completed_sites: Vec<(i64, u32, i64, bool)>,
+) {
+    for (recip, did, obj_ids, acts) in notify_actions {
         if recip > 0 && !acts.is_empty() {
             crate::services::notify_emitters_channel_events::dispatch_dungeon_trigger_notify_actions(deps.db, deps.pending_notifications, deps.notify_tx, recip, i64::from(did), &obj_ids, acts);
         }
     }
-    for notice in effects.progression_notices {
+    for notice in progression_notices {
         match notice {
             ProgressionNotice::TaskEvents(recip, evs) => {
                 if recip > 0 && !evs.is_empty() {
@@ -581,15 +657,51 @@ pub(crate) async fn flush_trigger_effects(deps: DungeonRuntimeDeps<'_>, sys_id: 
             }
         }
     }
-    for (cid, did, iid) in effects.failed_notices {
+    for (cid, did, iid) in failed_notices {
         if cid > 0 {
             crate::router::notify_registry::emit_typed_char_with_db(deps.db, deps.pending_notifications, deps.notify_tx, cid, crate::router::notify_registry::OnDungeonExited { dungeon_id: i64::from(did), instance_id: iid });
         }
     }
     let now_unix = deps.db.clock().now_unix_secs();
-    for (_, did, recip) in effects.completed_sites {
-        super::ops::finalize_completed_dungeon_effects_sync(deps.db, deps.pending_notifications, deps.notify_tx, sys_id, did, recip, true, now_unix);
+    for (_, did, recip, clear_exploration) in completed_sites {
+        super::ops::finalize_completed_dungeon_effects_sync(deps.db, deps.pending_notifications, deps.notify_tx, sys_id, did, recip, true, clear_exploration, now_unix);
     }
+}
+
+pub(crate) fn flush_trigger_effects_sync(deps: DungeonRuntimeDeps<'_>, sys_id: SolarSystemId, mut effects: TriggerTxEffects) {
+    effects.cancel_dead_spawns();
+    let sys_handle_opt = deps.systems.get_handle(sys_id);
+    despawn_dungeon_npc_ids_sync(deps, sys_handle_opt.as_ref(), &effects.despawn_npc_ids);
+    if let Some(sh) = sys_handle_opt.as_ref() { for bid in &effects.despawn_other_balls { let _ = sh.remove_ball_sync(*bid); } }
+    if !effects.spawn_gates.is_empty() || !effects.spawn_objects.is_empty() || !effects.spawn_npcs.is_empty() {
+        let sh = wake_dungeon_system_handle(deps.systems, sys_id);
+        for (gid, gpos, tid) in effects.spawn_gates { spawn_gate_ball_sync(&sh, gid, gpos, tid); }
+        if let Some(sde) = deps.sde {
+            for obj in effects.spawn_objects { spawn_object_ball_sync(&sh, sde, obj.ball_id, obj.type_id, obj.position, obj.radius, obj.destructible); }
+        }
+        if !effects.spawn_npcs.is_empty() { spawn_dungeon_npc_orders_sync(deps, sys_id, &sh, effects.spawn_npcs); }
+    }
+    flush_trigger_notifications_and_completion_sync(
+        deps, sys_id, effects.notify_actions, effects.progression_notices, effects.failed_notices, effects.completed_sites,
+    );
+}
+
+pub(crate) async fn flush_trigger_effects(deps: DungeonRuntimeDeps<'_>, sys_id: SolarSystemId, mut effects: TriggerTxEffects) {
+    effects.cancel_dead_spawns();
+    let sys_handle_opt = deps.systems.get_handle(sys_id);
+    despawn_dungeon_npc_ids(deps, sys_handle_opt.as_ref(), &effects.despawn_npc_ids).await;
+    if let Some(sh) = sys_handle_opt.as_ref() { for bid in &effects.despawn_other_balls { let _ = sh.remove_ball(*bid).await; } }
+    if !effects.spawn_gates.is_empty() || !effects.spawn_objects.is_empty() || !effects.spawn_npcs.is_empty() {
+        let sh = wake_dungeon_system_handle(deps.systems, sys_id);
+        for (gid, gpos, tid) in effects.spawn_gates { spawn_gate_ball(&sh, gid, gpos, tid).await; }
+        if let Some(sde) = deps.sde {
+            for obj in effects.spawn_objects { spawn_object_ball(&sh, sde, obj.ball_id, obj.type_id, obj.position, obj.radius, obj.destructible).await; }
+        }
+        if !effects.spawn_npcs.is_empty() { spawn_dungeon_npc_orders(deps, sys_id, &sh, effects.spawn_npcs).await; }
+    }
+    flush_trigger_notifications_and_completion_sync(
+        deps, sys_id, effects.notify_actions, effects.progression_notices, effects.failed_notices, effects.completed_sites,
+    );
     if let Some(sde_arc) = deps.sde_arc {
         for (cid, src_did, target_did, chance_bps, target_title, pos, inst_id) in effects.escalation_requests {
             if cid <= 0 || chance_bps == 0 || (chance_bps < 10_000 && deterministic_roll_bps(inst_id ^ cid, (u64::from(src_did) << 16) ^ u64::from(chance_bps)) >= chance_bps) { continue; }

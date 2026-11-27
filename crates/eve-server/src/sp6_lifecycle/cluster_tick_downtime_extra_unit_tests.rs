@@ -242,7 +242,7 @@ async fn downtime_purges_npc_wreck_children_container_lifetimes_and_preserves_pl
         assert!(snap.items.contains_key(&player_wreck_loot_id));
 
         let m_acc = mission_fixture::get(snap, char_id, 801).unwrap();
-        assert_eq!(m_acc.npcs_remaining, 4);
+        assert_eq!(m_acc.npcs_remaining, 1);
         assert_eq!(m_acc.current_room_id, 1);
         assert!(m_acc.spawned_npc_ball_ids.is_empty());
         assert!(m_acc.awaiting_downtime_respawn);
@@ -259,7 +259,7 @@ async fn downtime_purges_npc_wreck_children_container_lifetimes_and_preserves_pl
     });
     let spawned =
         spawn_mission_wave_on_pocket_entry_if_needed(&ctx, char_id, sys_id, DVec3::ZERO);
-    assert_eq!(spawned, 4);
+    assert_eq!(spawned, 1);
     ctx.db.with_snapshot(|snap| {
         assert!(!mission_fixture::get(snap, char_id, 801)
             .unwrap()

@@ -5,8 +5,8 @@
 
 use super::actions::{
     complete_and_flush_instance, finalize_terminal_in_snap, finish_instance_entities_in_snap,
-    finish_room_clear_checks_in_inst, flush_trigger_effects, merge_effects, run_trigger_batch_in_inst,
-    DungeonRuntimeDeps, TriggerBatch, TriggerTxEffects,
+    finish_room_clear_checks_in_inst, flush_trigger_effects, flush_trigger_effects_sync,
+    merge_effects, run_trigger_batch_in_inst, DungeonRuntimeDeps, TriggerBatch, TriggerTxEffects,
 };
 use super::{
     dist3, has_dungeon_runtime_store_db, has_unlooted_containers_in_snap, instance_is_finished,
@@ -782,6 +782,16 @@ pub(crate) async fn on_dungeon_npc_killed_impl(
                 continue;
             }
             for r in &inst.rooms {
+                let has_mission_kill = r.armed_timers.keys().any(|k| {
+                    k.starts_with("__mission_kill:")
+                        && k.split(':')
+                            .nth(2)
+                            .and_then(|s| s.parse::<i64>().ok())
+                            == Some(npc_ball_id)
+                });
+                if has_mission_kill {
+                    ids.push(inst.instance_id);
+                }
                 for g in &r.npc_groups {
                     if g.npc_ball_ids.contains(&npc_ball_id) {
                         ids.push(inst.instance_id);
@@ -856,6 +866,19 @@ pub(crate) async fn on_dungeon_npc_killed_impl(
                             break;
                         }
                     }
+                    if hit_ev.is_none() {
+                        let mk_prefix = format!("__mission_kill:{r_idx}:{npc_ball_id}:");
+                        if let Some(mk_key) = room.armed_timers.keys().find(|k| k.starts_with(&mk_prefix)).cloned() {
+                            room.armed_timers.remove(&mk_key);
+                            let parts: Vec<&str> = mk_key.splitn(6, ':').collect();
+                            if parts.len() == 6 {
+                                let gid_opt = parts[3].parse::<u8>().ok();
+                                let tid = parts[4].parse::<u32>().unwrap_or(0);
+                                let tag_opt = (!parts[5].is_empty()).then(|| parts[5].to_string());
+                                hit_ev = Some((gid_opt, tag_opt, tid));
+                            }
+                        }
+                    }
                     room_is_entered(room)
                 };
                 let Some((gid_opt, tag_opt, tid)) = hit_ev else { continue };
@@ -887,13 +910,13 @@ pub(crate) async fn on_dungeon_npc_killed_impl(
     flush_trigger_effects(deps, sys_id, effects).await;
 }
 
-pub(crate) async fn on_dungeon_room_entered_impl(
+fn prepare_on_dungeon_room_entered_in_snap(
     deps: DungeonRuntimeDeps<'_>,
     sys_id: SolarSystemId,
     instance_id: i64,
     room_vec_idx: usize,
     char_id: i64,
-) {
+) -> Option<TriggerTxEffects> {
     let now_unix = deps.db.clock().now_unix_secs();
     let needs = deps.db.with_snapshot(|snap| {
         snap.dungeon_runtime.instances.get(&instance_id).is_some_and(|i| {
@@ -905,7 +928,7 @@ pub(crate) async fn on_dungeon_room_entered_impl(
         })
     });
     if !needs {
-        return;
+        return None;
     }
     let mut effects = TriggerTxEffects::default();
     deps.db.with_mut_snapshot(|snap| {
@@ -985,7 +1008,35 @@ pub(crate) async fn on_dungeon_room_entered_impl(
         }
         finalize_terminal_in_snap(snap, inst, char_id, now_unix, &mut effects);
     });
-    flush_trigger_effects(deps, sys_id, effects).await;
+    Some(effects)
+}
+
+pub(crate) async fn on_dungeon_room_entered_impl(
+    deps: DungeonRuntimeDeps<'_>,
+    sys_id: SolarSystemId,
+    instance_id: i64,
+    room_vec_idx: usize,
+    char_id: i64,
+) {
+    if let Some(effects) =
+        prepare_on_dungeon_room_entered_in_snap(deps, sys_id, instance_id, room_vec_idx, char_id)
+    {
+        flush_trigger_effects(deps, sys_id, effects).await;
+    }
+}
+
+pub(crate) fn on_dungeon_room_entered_sync_impl(
+    deps: DungeonRuntimeDeps<'_>,
+    sys_id: SolarSystemId,
+    instance_id: i64,
+    room_vec_idx: usize,
+    char_id: i64,
+) {
+    if let Some(effects) =
+        prepare_on_dungeon_room_entered_in_snap(deps, sys_id, instance_id, room_vec_idx, char_id)
+    {
+        flush_trigger_effects_sync(deps, sys_id, effects);
+    }
 }
 
 /// Read-pure `OnApproach` evaluation (`OWN-R5-01`, `PVE-212`); keys latches per ship/char and opens a

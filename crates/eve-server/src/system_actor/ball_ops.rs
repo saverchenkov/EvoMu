@@ -1995,11 +1995,42 @@ impl SystemHandle {
     }
 }
 
-fn spawn_ball_with_meta_in_actor(
+fn spawn_ball_in_actor(ctx: &mut BallOpsCtx<'_>, ball: Ball) -> Result<u64, String> {
+    let ball_id = ball.id;
+    if let Some(tokens) = ctx.ball_spawn_tokens.as_deref_mut() {
+        tokens.remove(&ball_id);
+    }
+    let was_warping = matches!(
+        ctx.ballpark.balls.get(&ball_id).map(|b| &b.mode),
+        Some(MovementMode::Warp { .. })
+    );
+    let is_warp = matches!(ball.mode, MovementMode::Warp { .. });
+    let existing_meta = ctx.ballpark.ball_slim_meta.get(&ball_id).cloned();
+    if ctx.ballpark.balls.contains_key(&ball_id) {
+        let _ = ctx.ballpark.remove_ball(ball_id);
+    }
+    if let Some(meta) = existing_meta {
+        ctx.ballpark.set_ball_slim_meta(ball_id, meta);
+    } else {
+        super::belts::ensure_default_slim_meta(ctx.ballpark, &ball, &ctx.actor_st.sde_opt);
+    }
+    if super::belts::should_pin_stationary_ball(&ball, ctx.ballpark.ball_slim_meta.get(&ball_id)) {
+        ctx.ballpark.mark_ball_non_free(ball_id, false);
+    }
+    ctx.ballpark.add_ball(ball);
+    if was_warping && !is_warp {
+        ctx.actor_st.warp_state.clear_ball(ball_id, true);
+    }
+    protection::sync_ball_protection_in_actor(ctx.ballpark, ctx.actor_st, ball_id);
+    ctx.sync_positions();
+    Ok(ctx.ballpark.current_tick)
+}
+
+fn spawn_ball_with_combat_meta_in_actor(
     ctx: &mut BallOpsCtx<'_>,
     ball: Ball,
     combat_state: CombatState,
-    slim_meta: SlimItemMeta,
+    slim_meta: Option<SlimItemMeta>,
 ) -> Result<u64, String> {
     let ball_id = ball.id;
     if let Some(tokens) = ctx.ball_spawn_tokens.as_deref_mut() {
@@ -2022,7 +2053,7 @@ fn spawn_ball_with_meta_in_actor(
         deact_guard.as_ref(),
         ball,
         combat_state,
-        Some(slim_meta),
+        slim_meta,
         ctx.post_unlock_ops,
     );
     if was_warping && !is_warp {
@@ -2034,6 +2065,40 @@ fn spawn_ball_with_meta_in_actor(
 }
 
 impl SystemHandle {
+    /// Synchronously spawns a non-combat `ball` through the bounded actor mailbox (`#1496`).
+    pub fn spawn_ball_sync(&self, ball: Ball) -> Result<u64, String> {
+        dispatch_actor_sync_with_deadline(
+            self,
+            "SpawnBall",
+            ACTOR_CMD_TIMEOUT,
+            ball,
+            |ball, reply| SystemCommand::SpawnBall { ball, reply },
+            spawn_ball_in_actor,
+        )
+    }
+
+    /// Synchronously spawns `ball` with `combat_state` through the bounded actor mailbox (`#1496`).
+    pub fn spawn_ball_with_combat_sync(
+        &self,
+        ball: Ball,
+        combat_state: CombatState,
+    ) -> Result<u64, String> {
+        dispatch_actor_sync_with_deadline(
+            self,
+            "SpawnBallWithCombat",
+            ACTOR_CMD_TIMEOUT,
+            (ball, combat_state),
+            |(ball, combat_state), reply| SystemCommand::SpawnBallWithCombat {
+                ball,
+                combat_state,
+                reply,
+            },
+            |ctx, (ball, combat_state)| {
+                spawn_ball_with_combat_meta_in_actor(ctx, ball, combat_state, None)
+            },
+        )
+    }
+
     /// Synchronously spawns `ball` with `combat_state` and `slim_meta` through the bounded actor
     /// mailbox (`#1342`).
     pub fn spawn_ball_with_meta_sync(
@@ -2054,7 +2119,7 @@ impl SystemHandle {
                 reply,
             },
             |ctx, (ball, combat_state, slim_meta)| {
-                spawn_ball_with_meta_in_actor(ctx, ball, combat_state, slim_meta)
+                spawn_ball_with_combat_meta_in_actor(ctx, ball, combat_state, Some(slim_meta))
             },
         )
     }

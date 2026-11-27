@@ -7,6 +7,7 @@
 pub(crate) mod actions;
 #[path = "pve_dungeon_runtime_ops.rs"]
 mod ops;
+pub(crate) use ops::apply_finish_dungeon_instance_snap;
 #[path = "pve_dungeon_runtime_triggers.rs"]
 pub(crate) mod triggers;
 
@@ -246,9 +247,13 @@ pub async fn tick_dungeon_runtime_system_step(ctx: &ServerContext, sys_id: Solar
     triggers::tick_dungeon_runtime_system_step_impl(actions::DungeonRuntimeDeps::from_ctx(ctx), sys_id).await;
 }
 
-pub(crate) fn prune_stale_despawned_instances(store: &mut DungeonRuntimeStore, now_unix: u64) {
-    store.instances.retain(|_, inst| {
-        if !inst.despawned {
+fn prune_stale_despawned_instances_except(
+    store: &mut DungeonRuntimeStore,
+    now_unix: u64,
+    keep_ids: &HashSet<i64>,
+) {
+    store.instances.retain(|id, inst| {
+        if !inst.despawned || keep_ids.contains(id) {
             return true;
         }
         let anchor = inst
@@ -257,6 +262,24 @@ pub(crate) fn prune_stale_despawned_instances(store: &mut DungeonRuntimeStore, n
             .unwrap_or(inst.created_unix);
         now_unix < anchor.saturating_add(COMPLETED_INSTANCE_RETENTION_SECS)
     });
+}
+
+pub(crate) fn prune_stale_despawned_instances_in_snap(
+    snap: &mut WorldStateSnapshot,
+    now_unix: u64,
+) {
+    let keep_ids: HashSet<i64> = snap
+        .missions
+        .iter()
+        .filter(|m| {
+            matches!(
+                m.state,
+                eve_db::MissionState::Accepted | eve_db::MissionState::Offered
+            )
+        })
+        .filter_map(|m| m.dungeon_instance_id)
+        .collect();
+    prune_stale_despawned_instances_except(&mut snap.dungeon_runtime, now_unix, &keep_ids);
 }
 
 fn is_pocket_mwd_disallowed(
@@ -1161,6 +1184,7 @@ pub(crate) struct NpcSpawnOrder {
     pub(crate) pos: [f64; 3],
     pub(crate) custom_name: Option<String>,
     pub(crate) destructible: bool,
+    pub(crate) bounty_isk_override: Option<i64>,
 }
 
 pub(crate) fn npc_spawn_position(
@@ -1256,6 +1280,7 @@ pub(crate) fn plan_npc_group_spawns_in_snap(
                     pos,
                     custom_name: entry.custom_name.clone(),
                     destructible,
+                    bounty_isk_override: entry.bounty_isk_override,
                 });
             }
         }
@@ -1264,6 +1289,22 @@ pub(crate) fn plan_npc_group_spawns_in_snap(
         room.cleared = false;
         triggers::clear_latches_for_spawned_group(room, spawned_gid);
     }
+}
+
+fn build_object_ball(
+    ball_id: i64,
+    type_id: u32,
+    pos: [f64; 3],
+    radius: f64,
+) -> (eve_destiny::Ball, u32) {
+    let tid = if type_id > 0 {
+        type_id
+    } else {
+        DEFAULT_CONTAINER_TYPE_ID
+    };
+    let mut ball = make_site_npc_ball(ball_id, tid, DVec3::from_array(pos));
+    ball.radius = radius.max(100.0);
+    (ball, tid)
 }
 
 pub(crate) async fn spawn_object_ball(
@@ -1275,13 +1316,7 @@ pub(crate) async fn spawn_object_ball(
     radius: f64,
     destructible: bool,
 ) {
-    let tid = if type_id > 0 {
-        type_id
-    } else {
-        DEFAULT_CONTAINER_TYPE_ID
-    };
-    let mut ball = make_site_npc_ball(ball_id, tid, DVec3::from_array(pos));
-    ball.radius = radius.max(100.0);
+    let (ball, tid) = build_object_ball(ball_id, type_id, pos, radius);
     if destructible {
         let cs = build_type_combat_state_from_sde(sde, tid);
         let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
@@ -1290,18 +1325,55 @@ pub(crate) async fn spawn_object_ball(
     }
 }
 
+pub(crate) fn spawn_object_ball_sync(
+    sys_handle: &crate::system_actor::SystemHandle,
+    sde: &eve_sde::SdeRegistry,
+    ball_id: i64,
+    type_id: u32,
+    pos: [f64; 3],
+    radius: f64,
+    destructible: bool,
+) {
+    let (ball, tid) = build_object_ball(ball_id, type_id, pos, radius);
+    if destructible {
+        let cs = build_type_combat_state_from_sde(sde, tid);
+        let _ = sys_handle.spawn_ball_with_combat_sync(ball, cs);
+    } else {
+        let _ = sys_handle.spawn_ball_sync(ball);
+    }
+}
+
+fn build_gate_ball(
+    ball_id: i64,
+    pos: [f64; 3],
+    gate_type_id: Option<u32>,
+) -> eve_destiny::Ball {
+    let tid = gate_type_id
+        .filter(|&id| id > 0)
+        .unwrap_or(ACCELERATION_GATE_TYPE_ID);
+    let mut ball = make_site_npc_ball(ball_id, tid, DVec3::from_array(pos));
+    ball.radius = 1_500.0;
+    ball
+}
+
 pub(crate) async fn spawn_gate_ball(
     sys_handle: &crate::system_actor::SystemHandle,
     ball_id: i64,
     pos: [f64; 3],
     gate_type_id: Option<u32>,
 ) {
-    let tid = gate_type_id
-        .filter(|&id| id > 0)
-        .unwrap_or(ACCELERATION_GATE_TYPE_ID);
-    let mut ball = make_site_npc_ball(ball_id, tid, DVec3::from_array(pos));
-    ball.radius = 1_500.0;
+    let ball = build_gate_ball(ball_id, pos, gate_type_id);
     let _ = sys_handle.spawn_ball(ball).await;
+}
+
+pub(crate) fn spawn_gate_ball_sync(
+    sys_handle: &crate::system_actor::SystemHandle,
+    ball_id: i64,
+    pos: [f64; 3],
+    gate_type_id: Option<u32>,
+) {
+    let ball = build_gate_ball(ball_id, pos, gate_type_id);
+    let _ = sys_handle.spawn_ball_sync(ball);
 }
 
 pub(crate) fn insert_container_and_loot_in_snap(
@@ -1407,13 +1479,22 @@ pub(crate) fn collect_all_room_gate_ids(room: &DungeonRuntimeRoom) -> Vec<i64> {
 }
 
 /// Materializes a room's objects, acceleration gate, and immediate NPC groups into the system ballpark.
-/// Leaves `room.entered = false` (`I1`) until `on_dungeon_room_entered` marks pilot arrival.
-pub(crate) async fn materialize_dungeon_room_entities(
+struct PreparedRoomMaterialization {
+    gate_plans: Vec<(i64, [f64; 3], Option<u32>)>,
+    obj_plans: Vec<(i64, u32, [f64; 3], f64, bool)>,
+    npc_plans: Vec<NpcSpawnOrder>,
+    obj_ids: Vec<i64>,
+    npc_ids: Vec<i64>,
+    gate_id_opt: Option<i64>,
+    already_spawned: bool,
+}
+
+fn prepare_materialize_dungeon_room_entities(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
     instance_id: i64,
     room_vec_idx: usize,
-) -> Result<MaterializedDungeonRoomEntities, BridgeRpcError> {
+) -> Result<PreparedRoomMaterialization, BridgeRpcError> {
     let now_unix = ctx.now_unix();
     let (gate_plans, obj_plans, npc_plans, obj_ids, npc_ids, gate_id_opt, already_spawned) =
         ctx.db.try_with_mut_snapshot(|snap| {
@@ -1573,6 +1654,10 @@ pub(crate) async fn materialize_dungeon_room_entities(
                 .or_else(|| room.gate_links.first().and_then(|gl| gl.gate_ball_id));
 
             snap.dungeon_runtime.instances.insert(instance_id, inst);
+            crate::services::agents_missions::agents_missions_dungeon::sync_mission_from_dungeon_in_snap(
+                snap,
+                instance_id,
+            );
 
             Ok((
                 gate_plans,
@@ -1585,30 +1670,82 @@ pub(crate) async fn materialize_dungeon_room_entities(
             ))
         })?;
 
+    Ok(PreparedRoomMaterialization {
+        gate_plans,
+        obj_plans,
+        npc_plans,
+        obj_ids,
+        npc_ids,
+        gate_id_opt,
+        already_spawned,
+    })
+}
+
+/// Leaves `room.entered = false` (`I1`) until `on_dungeon_room_entered` marks pilot arrival.
+pub(crate) async fn materialize_dungeon_room_entities(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    instance_id: i64,
+    room_vec_idx: usize,
+) -> Result<MaterializedDungeonRoomEntities, BridgeRpcError> {
+    let prep = prepare_materialize_dungeon_room_entities(ctx, sys_id, instance_id, room_vec_idx)?;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for (ball_id, pos, gate_type_id) in gate_plans {
+    for (ball_id, pos, gate_type_id) in prep.gate_plans {
         spawn_gate_ball(&sys_handle, ball_id, pos, gate_type_id).await;
     }
-    for (ball_id, type_id, pos, radius, destructible) in obj_plans {
+    for (ball_id, type_id, pos, radius, destructible) in prep.obj_plans {
         spawn_object_ball(&sys_handle, &ctx.sde, ball_id, type_id, pos, radius, destructible).await;
     }
-    if !npc_plans.is_empty() {
+    if !prep.npc_plans.is_empty() {
         actions::spawn_dungeon_npc_orders(
             actions::DungeonRuntimeDeps::from_ctx(ctx),
             sys_id,
             &sys_handle,
-            npc_plans,
+            prep.npc_plans,
         )
         .await;
     }
-    if already_spawned {
+    if prep.already_spawned {
         let _ = reconcile_and_rematerialize_dungeon_instance(ctx, sys_id, instance_id).await;
     }
 
     Ok(MaterializedDungeonRoomEntities {
-        object_ids: obj_ids,
-        npc_ids,
-        next_gate_id: gate_id_opt,
+        object_ids: prep.obj_ids,
+        npc_ids: prep.npc_ids,
+        next_gate_id: prep.gate_id_opt,
+    })
+}
+
+pub(crate) fn materialize_dungeon_room_entities_sync(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    instance_id: i64,
+    room_vec_idx: usize,
+) -> Result<MaterializedDungeonRoomEntities, BridgeRpcError> {
+    let prep = prepare_materialize_dungeon_room_entities(ctx, sys_id, instance_id, room_vec_idx)?;
+    let sys_handle = wake_dungeon_system_handle(&ctx.systems, sys_id);
+    for (ball_id, pos, gate_type_id) in prep.gate_plans {
+        spawn_gate_ball_sync(&sys_handle, ball_id, pos, gate_type_id);
+    }
+    for (ball_id, type_id, pos, radius, destructible) in prep.obj_plans {
+        spawn_object_ball_sync(&sys_handle, &ctx.sde, ball_id, type_id, pos, radius, destructible);
+    }
+    if !prep.npc_plans.is_empty() {
+        actions::spawn_dungeon_npc_orders_sync(
+            actions::DungeonRuntimeDeps::from_ctx(ctx),
+            sys_id,
+            &sys_handle,
+            prep.npc_plans,
+        );
+    }
+    if prep.already_spawned {
+        let _ = reconcile_and_rematerialize_dungeon_instance_sync(ctx, sys_id, instance_id);
+    }
+
+    Ok(MaterializedDungeonRoomEntities {
+        object_ids: prep.obj_ids,
+        npc_ids: prep.npc_ids,
+        next_gate_id: prep.gate_id_opt,
     })
 }
 
@@ -1631,27 +1768,51 @@ pub async fn on_dungeon_room_entered(
     .await;
 }
 
-/// Reconciles persisted `spawned` state with the live ballpark after restart or unload
-/// and re-materializes missing gates, containers/objects (at persisted `snap.item_positions`),
-/// and live NPCs without duplicating loot (`PVE-210`).
-pub async fn reconcile_and_rematerialize_dungeon_instance(
+pub(crate) fn on_dungeon_room_entered_sync(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
     instance_id: i64,
-) -> usize {
-    let active_in_sys = read_dungeon_runtime_store(ctx, |store| {
+    room_vec_idx: usize,
+    char_id: i64,
+) {
+    triggers::on_dungeon_room_entered_sync_impl(
+        actions::DungeonRuntimeDeps::from_ctx(ctx),
+        sys_id,
+        instance_id,
+        room_vec_idx,
+        char_id,
+    );
+}
+
+/// Reconciles persisted `spawned` state with the live ballpark after restart or unload
+/// and re-materializes missing gates, containers/objects (at persisted `snap.item_positions`),
+/// and live NPCs without duplicating loot (`PVE-210`).
+type PreparedDungeonReconcile = (
+    Vec<(i64, [f64; 3], Option<u32>)>,
+    Vec<(i64, u32, [f64; 3], f64, bool)>,
+    Vec<NpcSpawnOrder>,
+);
+
+fn is_active_reconcilable_instance(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    instance_id: i64,
+) -> bool {
+    read_dungeon_runtime_store(ctx, |store| {
         store.instances.get(&instance_id).is_some_and(|inst| {
             !inst.despawned && inst.solar_system_id == sys_id && inst.category != "Flashpoint"
         })
-    });
-    if !active_in_sys {
-        return 0;
-    }
+    })
+}
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+fn prepare_reconcile_dungeon_instance(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    sys_id: SolarSystemId,
+    instance_id: i64,
+) -> PreparedDungeonReconcile {
     let view = sys_handle.view();
-
-    let (gates_to_spawn, objects_to_spawn, npcs_to_spawn) = ctx.db.with_snapshot(|snap| {
+    ctx.db.with_snapshot(|snap| {
         let Some(inst) = snap.dungeon_runtime.instances.get(&instance_id) else {
             return (Vec::new(), Vec::new(), Vec::new());
         };
@@ -1748,14 +1909,28 @@ pub async fn reconcile_and_rematerialize_dungeon_instance(
                                 .cloned()
                                 .or_else(|| pair.and_then(|(e, _)| e.custom_name.clone())),
                             destructible,
+                            bounty_isk_override: g.npc_ball_bounties.get(&npc_id).copied(),
                         });
                     }
                 }
             }
         }
         (gates, objs, npcs)
-    });
-    drop(view);
+    })
+}
+
+pub async fn reconcile_and_rematerialize_dungeon_instance(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    instance_id: i64,
+) -> usize {
+    if !is_active_reconcilable_instance(ctx, sys_id, instance_id) {
+        return 0;
+    }
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let (gates_to_spawn, objects_to_spawn, npcs_to_spawn) =
+        prepare_reconcile_dungeon_instance(ctx, &sys_handle, sys_id, instance_id);
 
     let count = gates_to_spawn.len() + objects_to_spawn.len() + npcs_to_spawn.len();
     for (gid, gpos, gate_type_id) in gates_to_spawn {
@@ -1772,6 +1947,37 @@ pub async fn reconcile_and_rematerialize_dungeon_instance(
             npcs_to_spawn,
         )
         .await;
+    }
+    count
+}
+
+pub(crate) fn reconcile_and_rematerialize_dungeon_instance_sync(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    instance_id: i64,
+) -> usize {
+    if !is_active_reconcilable_instance(ctx, sys_id, instance_id) {
+        return 0;
+    }
+
+    let sys_handle = wake_dungeon_system_handle(&ctx.systems, sys_id);
+    let (gates_to_spawn, objects_to_spawn, npcs_to_spawn) =
+        prepare_reconcile_dungeon_instance(ctx, &sys_handle, sys_id, instance_id);
+
+    let count = gates_to_spawn.len() + objects_to_spawn.len() + npcs_to_spawn.len();
+    for (gid, gpos, gate_type_id) in gates_to_spawn {
+        spawn_gate_ball_sync(&sys_handle, gid, gpos, gate_type_id);
+    }
+    for (bid, tid, pos, radius, destructible) in objects_to_spawn {
+        spawn_object_ball_sync(&sys_handle, &ctx.sde, bid, tid, pos, radius, destructible);
+    }
+    if !npcs_to_spawn.is_empty() {
+        actions::spawn_dungeon_npc_orders_sync(
+            actions::DungeonRuntimeDeps::from_ctx(ctx),
+            sys_id,
+            &sys_handle,
+            npcs_to_spawn,
+        );
     }
     count
 }

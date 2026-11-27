@@ -1187,7 +1187,7 @@ async fn cmd_warp_to_stuff_range_truncation_legacy_none_and_post_eviction_respaw
             .spawned_npc_ball_ids
     });
     assert_eq!(respawned_bids.len(), 2);
-    assert_ne!(respawned_bids, first_bids);
+    assert_eq!(respawned_bids, first_bids);
     for &bid in &respawned_bids {
         assert!(handle.get_ball_snapshot(bid).await.unwrap().is_some());
     }
