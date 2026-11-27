@@ -241,38 +241,6 @@ pub fn normalize_macho_rpc_reply_at(
                 PyRep::List(target_ids),
             ]));
         }
-    } else if service == "reprocessingSvc" && method == "Reprocess" {
-        let items = match rpc_res {
-            Ok(PyRep::List(items)) => items,
-            Ok(rep @ (PyRep::KeyVal(_) | PyRep::Dict(_))) => vec![rep],
-            other => return other,
-        };
-        let mut input_ids = Vec::with_capacity(items.len());
-        let mut by_type: std::collections::BTreeMap<i64, i64> =
-            std::collections::BTreeMap::new();
-        for item in items {
-            if let Some(id) = item.dict_get("itemID").and_then(PyRep::as_i64) {
-                input_ids.push(PyRep::Integer(id));
-            }
-            if let Some(PyRep::List(outputs)) = item.dict_get("outputs") {
-                for out in outputs {
-                    if let (Some(tid), Some(qty)) = (
-                        out.dict_get("typeID").and_then(PyRep::as_i64),
-                        out.dict_get("quantity").and_then(PyRep::as_i64),
-                    ) {
-                        *by_type.entry(tid).or_insert(0) += qty;
-                    }
-                }
-            }
-        }
-        let dict_entries = by_type
-            .into_iter()
-            .map(|(tid, qty)| (PyRep::Integer(tid), PyRep::Integer(qty)))
-            .collect();
-        return Ok(PyRep::Tuple(vec![
-            PyRep::List(input_ids),
-            PyRep::Dict(dict_entries),
-        ]));
     } else if service == "agentMgr" && matches!(method, "DoAction" | "GetOffer") {
         if let Ok(rep) = rpc_res {
             return Ok(normalize_agent_do_action_rep(rep));

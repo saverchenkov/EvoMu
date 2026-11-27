@@ -896,7 +896,6 @@ pub use crate::services::mining_cycle::{
 struct ParsedReprocessArgs {
     item_ids: Vec<i64>,
     is_multi_arg: bool,
-    is_batch_call: bool,
     from_loc: Option<i64>,
     explicit_out_owner: Option<i64>,
     explicit_out_loc: Option<i64>,
@@ -934,8 +933,6 @@ struct PlannedReprocessItem {
     remainder: i32,
     dest: ResolvedReprocessDest,
     outputs: Vec<PlannedOutputMat>,
-    station_base_yield: f64,
-    yield_rate: f64,
     station_tax_rate: f64,
     tax_cents: IskCents,
 }
@@ -991,11 +988,6 @@ fn container_capacity_m3(item: &InventoryItemRecord, inv_type: &eve_sde::InvType
 /// Parses 1-arg, 2-arg, legacy Crucible, and V24 5-arg `reprocessingSvc.Reprocess` call shapes.
 fn parse_reprocess_args(args: &[PyRep]) -> Result<ParsedReprocessArgs, BridgeRpcError> {
     let is_multi_arg = args.len() >= 2;
-    let is_batch_call = is_multi_arg
-        || matches!(
-            args.first(),
-            Some(PyRep::List(_) | PyRep::Dict(_) | PyRep::Tuple(_))
-        );
     let item_ids: Vec<i64> = match args.first() {
         Some(PyRep::List(list)) | Some(PyRep::Tuple(list)) => {
             list.iter().filter_map(PyRep::as_i64).collect()
@@ -1029,7 +1021,6 @@ fn parse_reprocess_args(args: &[PyRep]) -> Result<ParsedReprocessArgs, BridgeRpc
         return Ok(ParsedReprocessArgs {
             item_ids,
             is_multi_arg,
-            is_batch_call,
             from_loc,
             explicit_out_owner: None,
             explicit_out_loc: None,
@@ -1046,7 +1037,6 @@ fn parse_reprocess_args(args: &[PyRep]) -> Result<ParsedReprocessArgs, BridgeRpc
         return Ok(ParsedReprocessArgs {
             item_ids,
             is_multi_arg,
-            is_batch_call,
             from_loc,
             explicit_out_owner: None,
             explicit_out_loc: None,
@@ -1117,7 +1107,6 @@ fn parse_reprocess_args(args: &[PyRep]) -> Result<ParsedReprocessArgs, BridgeRpc
     Ok(ParsedReprocessArgs {
         item_ids,
         is_multi_arg,
-        is_batch_call,
         from_loc,
         explicit_out_owner,
         explicit_out_loc,
@@ -1921,7 +1910,6 @@ pub async fn handle(
 
             let now_unix = ctx.now_unix();
             let char_skills = ctx.character_skill_levels(char_id);
-            let is_batch_call = parsed.is_batch_call;
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if station_id >= 1_000_000_000_000 {
                     crate::services::structure_profile_services::require_structure_service_access_in_snap(
@@ -2128,7 +2116,7 @@ pub async fn handle(
                         now_unix,
                     )?;
 
-                    let (station_base_yield, yield_rate, station_tax_rate) =
+                    let (_, yield_rate, station_tax_rate) =
                         compute_reprocessing_rates_for_item_at(
                             &ctx.sde,
                             snap,
@@ -2172,8 +2160,6 @@ pub async fn handle(
                         remainder,
                         dest,
                         outputs,
-                        station_base_yield,
-                        yield_rate,
                         station_tax_rate,
                         tax_cents,
                     });
@@ -2203,10 +2189,14 @@ pub async fn handle(
                 validate_planned_reprocess_capacities(&ctx.sde, snap, &planned)?;
 
                 // Phase 2: Commit validated input consumption, mineral minting, and tax deductions.
-                let mut batch_results = Vec::with_capacity(planned.len());
+                // V24 `reprocessingSvc.Reprocess` returns `(inputItemIDs, {outputTypeID: totalQty})` directly.
+                let mut input_ids = Vec::with_capacity(planned.len());
+                let mut by_type: std::collections::BTreeMap<i64, i64> =
+                    std::collections::BTreeMap::new();
                 let mut reprocessed_inputs: Vec<(TypeId, u64)> = Vec::with_capacity(planned.len());
                 for p in planned {
                     let item_id = p.source_item.item_id;
+                    input_ids.push(PyRep::Integer(item_id));
                     let old_qty = p.source_item.quantity;
                     let consumed_qty = u64::try_from(old_qty.saturating_sub(p.remainder)).unwrap_or(0);
                     if consumed_qty > 0 {
@@ -2221,7 +2211,6 @@ pub async fn handle(
                         snap.items.remove(&item_id);
                     }
 
-                    let mut outputs: Vec<(i64, TypeId, i32)> = Vec::with_capacity(p.outputs.len());
                     for mat in p.outputs {
                         snap.next_entity_id += 1;
                         let mid = snap.next_entity_id;
@@ -2237,10 +2226,10 @@ pub async fn handle(
                             ..Default::default()
                         };
                         snap.items.insert(mid, new_item);
-                        outputs.push((mid, mat.type_id, mat.quantity));
+                        *by_type.entry(i64::from(mat.type_id)).or_insert(0) +=
+                            i64::from(mat.quantity);
                     }
 
-                    let tax_isk = (p.tax_cents.0 as f64) / 100.0;
                     if p.tax_cents.0 > 0 {
                         let bal_after = if let Some(ch) = snap.characters.get_mut(&char_id) {
                             ch.balance = ch
@@ -2281,41 +2270,17 @@ pub async fn handle(
                             ),
                         );
                     }
-
-                    let (trit_id, _, trit_qty) = outputs
-                        .iter()
-                        .copied()
-                        .find(|&(_, tid, _)| tid == 34)
-                        .or_else(|| outputs.first().copied())
-                        .unwrap_or((0, 0, 0));
-                    let output_entries: Vec<PyRep> = outputs
-                        .into_iter()
-                        .map(|(iid, tid, qty)| {
-                            PyRep::keyval([
-                                ("itemID", PyRep::Integer(iid)),
-                                ("typeID", PyRep::Integer(tid as i64)),
-                                ("quantity", PyRep::Integer(qty as i64)),
-                            ])
-                        })
-                        .collect();
-                    batch_results.push(PyRep::keyval([
-                        ("itemID", PyRep::Integer(item_id)),
-                        ("stationBaseYield", PyRep::Real(p.station_base_yield)),
-                        ("yieldRate", PyRep::Real(p.yield_rate)),
-                        ("stationTaxRate", PyRep::Real(p.station_tax_rate)),
-                        ("reprocessingTaxISK", PyRep::Real(tax_isk)),
-                        ("remainderQuantity", PyRep::Integer(p.remainder as i64)),
-                        ("tritaniumItemID", PyRep::Integer(trit_id)),
-                        ("tritaniumQuantity", PyRep::Integer(trit_qty as i64)),
-                        ("outputs", PyRep::List(output_entries)),
-                    ]));
                 }
 
-                Ok((batch_results, reprocessed_inputs))
+                let by_type_entries: Vec<(PyRep, PyRep)> = by_type
+                    .into_iter()
+                    .map(|(tid, qty)| (PyRep::Integer(tid), PyRep::Integer(qty)))
+                    .collect();
+                Ok((input_ids, by_type_entries, reprocessed_inputs))
             });
 
             match res {
-                Ok((mut batch_results, reprocessed_inputs)) => {
+                Ok((input_ids, by_type_entries, reprocessed_inputs)) => {
                     crate::quasar_gateway::isolate_side_effect("space_entity_mining.reprocess_achievements", || {
                         for (tid, qty) in reprocessed_inputs {
                             let group_id = ctx.sde.types.get(&tid).map(|t| t.group_id);
@@ -2334,7 +2299,7 @@ pub async fn handle(
                         ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
                             char_id as u32,
                             &["refineOreCount", "finishedReprocessingCount", "reprocessingInput", "reprocessingOutput"],
-                            batch_results.len().max(1) as u64,
+                            input_ids.len().max(1) as u64,
                             ctx.now_unix(),
                             &ctx.quasar_gateway,
                         );
@@ -2344,11 +2309,10 @@ pub async fn handle(
                         crate::router::NotificationTarget::Character(char_id),
                         crate::router::notify_registry::OnReprocessingMaterialsChanged,
                     );
-                    if is_batch_call {
-                        Some(Ok(PyRep::List(batch_results)))
-                    } else {
-                        Some(Ok(batch_results.pop().unwrap_or(PyRep::None)))
-                    }
+                    Some(Ok(PyRep::Tuple(vec![
+                        PyRep::List(input_ids),
+                        PyRep::Dict(by_type_entries),
+                    ])))
                 }
                 Err(e) => Some(Err(e)),
             }

@@ -484,7 +484,12 @@ async fn reprocessing_svc_reprocess_and_get_quotes_error_and_success_paths() {
     assert!(matches!(q_tuple, PyRep::Tuple(ref t) if t.len() == 3 && matches!(t[2], PyRep::Dict(ref d) if d.len() == 1)));
 
     // 5. Reprocess 250 Veldspar (931_104) -> consumes 200 units, leaves 50 remainder, mints Tritanium, deducts tax
-    let bal_before = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+    let (bal_before, pre_item_ids) = ctx.db.with_snapshot(|s| {
+        (
+            s.characters.get(&char_id).unwrap().balance,
+            s.items.keys().copied().collect::<std::collections::HashSet<i64>>(),
+        )
+    });
     let rep_res = handle(
         &ctx,
         &mut sess,
@@ -496,12 +501,34 @@ async fn reprocessing_svc_reprocess_and_get_quotes_error_and_success_paths() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(rep_res.dict_get("remainderQuantity").and_then(|v| v.as_i64()), Some(50));
-    let trit_qty = rep_res.dict_get("tritaniumQuantity").and_then(|v| v.as_i64()).unwrap();
+    let PyRep::Tuple(rep_parts) = rep_res else {
+        panic!("expected V24 2-tuple from Reprocess, got {rep_res:?}");
+    };
+    assert_eq!(rep_parts.len(), 2);
+    assert_eq!(rep_parts[0], PyRep::List(vec![PyRep::Integer(931_104)]));
+    let PyRep::Dict(out_map) = &rep_parts[1] else {
+        panic!("expected outputByTypeID Dict, got {:?}", rep_parts[1]);
+    };
+    let trit_qty = out_map
+        .iter()
+        .find_map(|(k, v)| (k.as_i64() == Some(34)).then(|| v.as_i64()).flatten())
+        .unwrap();
     assert!(trit_qty > 0);
 
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items.get(&931_104).unwrap().quantity, 50);
+        let minted_trit: i64 = snap
+            .items
+            .values()
+            .filter(|i| {
+                !pre_item_ids.contains(&i.item_id)
+                    && i.owner_id == char_id
+                    && i.location_id == JITA_STATION_ID
+                    && i.type_id == 34
+            })
+            .map(|i| i64::from(i.quantity))
+            .sum();
+        assert_eq!(minted_trit, trit_qty);
         let bal_after = snap.characters.get(&char_id).unwrap().balance;
         assert!(bal_after < bal_before);
         assert!(snap

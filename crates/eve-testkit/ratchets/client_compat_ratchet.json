@@ -2,7 +2,7 @@
   "version": 2,
   "counters": {
     "rpc_rules": {
-      "crates/eve-server/src/router/client_compat.rs": 7
+      "crates/eve-server/src/router/client_compat.rs": 6
     },
     "suppress_rules": {
       "crates/eve-server/src/router/client_compat.rs": 5
@@ -14,7 +14,7 @@
       "crates/eve-server/src/router/client_compat.rs": 4
     },
     "production_lines": {
-      "crates/eve-server/src/router/client_compat.rs": 1367
+      "crates/eve-server/src/router/client_compat.rs": 1335
     },
     "sequencer_set_state_rewrites": {
       "crates/eve-server/src/outbound_sequencer.rs": 18
@@ -30,7 +30,7 @@
       "crates/eve-server/src/quasar_grpc_notifications_and_errors_unit_tests.rs": 35,
       "crates/eve-server/src/quasar_grpc_payload_and_jwt_unit_tests.rs": 16,
       "crates/eve-server/src/quasar_grpc_unit_tests.rs": 3,
-      "crates/eve-server/src/router/client_compat_cov_unit_tests.rs": 28,
+      "crates/eve-server/src/router/client_compat_cov_unit_tests.rs": 27,
       "crates/eve-server/src/router/client_compat_extra_tests.rs": 58,
       "crates/eve-server/src/router/notify_registry_tests.rs": 1,
       "crates/eve-server/src/server_core_cov_unit_tests.rs": 9,
@@ -38,7 +38,7 @@
       "crates/eve-server/src/services/industry_facilities_bps_unit_tests.rs": 1,
       "crates/eve-server/src/services/market_price_history_tests.rs": 1,
       "crates/eve-server/src/services/r6_t4_econ_security_tests.rs": 4,
-      "crates/eve-server/src/services/w4_gh758_804_mutant_killers_unit_tests.rs": 3,
+      "crates/eve-server/src/services/w4_gh758_804_mutant_killers_unit_tests.rs": 2,
       "crates/eve-server/tests/it/navigation_warp_tunnel_immobility.rs": 1,
       "crates/eve-server/tests/it/quasar_grpc_protobuf_edge_coverage.rs": 7,
       "crates/eve-server/tests/it/rpc_client_contracts.rs": 1
@@ -99,7 +99,6 @@
     "rpc:entity.CmdReturnAndOrbit",
     "rpc:entity.CmdReturnBay",
     "rpc:entity.CmdReturnHome",
-    "rpc:reprocessingSvc.Reprocess",
     "suppress:DoDestinyUpdate",
     "suppress:OnCombatMessage",
     "suppress:OnDamageStateChange",

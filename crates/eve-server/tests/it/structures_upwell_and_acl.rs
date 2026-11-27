@@ -4272,10 +4272,21 @@ async fn test_bf02_per_service_acl_bindings_preserve_docking_and_enforce_group_t
     assert_eq!(bal_both_0 - ctx.db.get_character(PILOT_BOTH).unwrap().balance.0, 1_015_000_00, "Multi-group pilot must receive lowest matching group rate (1% + 0.5% SCC)");
 
     // 3. Reprocessing per-ACL-group tax rate: VIP = 2%, STD = 8%!
+    let q_vip = rpc(&ctx, &mut sess_vip, "reprocessingSvc", "GetQuotes", &[PyRep::List(vec![PyRep::Integer(890_002_401)])]).await.expect("VIP GetQuotes");
+    let q_std = rpc(&ctx, &mut sess_std, "reprocessingSvc", "GetQuotes", &[PyRep::List(vec![PyRep::Integer(890_002_402)])]).await.expect("STD GetQuotes");
+    let PyRep::Tuple(ref qv_parts) = q_vip else { panic!("expected 3-tuple") };
+    let PyRep::Tuple(ref qs_parts) = q_std else { panic!("expected 3-tuple") };
+    assert_eq!(qv_parts[0], PyRep::Real(0.02));
+    assert_eq!(qs_parts[0], PyRep::Real(0.08));
+    let bal_reproc_vip_0 = ctx.db.get_character(PILOT_VIP).unwrap().balance.0;
+    let bal_reproc_std_0 = ctx.db.get_character(PILOT_STD).unwrap().balance.0;
     let rep_vip = rpc(&ctx, &mut sess_vip, "reprocessingSvc", "Reprocess", &[PyRep::Integer(890_002_401)]).await.expect("VIP Reprocess");
     let rep_std = rpc(&ctx, &mut sess_std, "reprocessingSvc", "Reprocess", &[PyRep::Integer(890_002_402)]).await.expect("STD Reprocess");
-    assert_eq!(rep_vip.dict_get("stationTaxRate"), Some(&PyRep::Real(0.02)));
-    assert_eq!(rep_std.dict_get("stationTaxRate"), Some(&PyRep::Real(0.08)));
+    assert!(matches!(rep_vip, PyRep::Tuple(ref t) if t.len() == 2 && t[0] == PyRep::List(vec![PyRep::Integer(890_002_401)])));
+    assert!(matches!(rep_std, PyRep::Tuple(ref t) if t.len() == 2 && t[0] == PyRep::List(vec![PyRep::Integer(890_002_402)])));
+    let tax_vip = bal_reproc_vip_0 - ctx.db.get_character(PILOT_VIP).unwrap().balance.0;
+    let tax_std = bal_reproc_std_0 - ctx.db.get_character(PILOT_STD).unwrap().balance.0;
+    assert!(tax_vip > 0 && tax_std == tax_vip * 4, "STD 8% reprocessing tax ({tax_std}) must be 4x VIP 2% tax ({tax_vip})");
 
     // 4. Clone Bay per-ACL-group flat ISK fee: VIP = 100,000 ISK, STD = 600,000 ISK!
     let cb_vip_0 = ctx.db.get_character(PILOT_VIP).unwrap().balance.0;

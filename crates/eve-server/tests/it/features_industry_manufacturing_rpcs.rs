@@ -936,12 +936,26 @@ async fn test_b33_moon_mining_and_reprocessing_curves() {
         p.ctx.db.with_mut_snapshot(|s| {
             if let Some(ch) = s.characters.get_mut(&CHAR_ID) { ch.station_id = None; ch.structure_id = Some(st_id); }
         });
-        let quote = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.unwrap();
+        let quote = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[PyRep::List(vec![PyRep::Integer(item_id)])], &kw, None).await.unwrap();
         let q_base = quote_base(&quote);
         assert!((q_base - exp_base).abs() < 1e-4, "GetQuotes stationBaseYield at {st_id} expected {exp_base}, got {q_base}");
+        let PyRep::Tuple(ref q_parts) = quote else { panic!() };
+        let PyRep::Dict(ref q_entries) = q_parts[2] else { panic!() };
+        let q_entry = q_entries.iter().find(|(k, _)| k.as_i64() == Some(item_id)).map(|(_, v)| v).unwrap();
+        let q_trit = dict_get(q_entry, "recoverables")
+            .and_then(PyRep::crowset_rows)
+            .and_then(|rows| rows.into_iter().find(|r| r.dbrow_get("typeID").and_then(|v| v.as_i64()) == Some(34)))
+            .and_then(|r| r.dbrow_get("client").and_then(|v| v.as_i64()))
+            .unwrap_or(0);
+        assert_eq!(q_trit, i64::from(exp_trit), "GetQuotes Tritanium at {st_id} expected {exp_trit}, got {q_trit}");
         let rep = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(item_id)], &kw, None).await.unwrap();
-        let r_yield = dict_get(&rep, "yieldRate").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        assert!((r_yield - exp_base).abs() < 1e-4, "Reprocess yieldRate at {st_id} expected {exp_base}, got {r_yield}");
+        assert_eq!(
+            rep,
+            PyRep::Tuple(vec![
+                PyRep::List(vec![PyRep::Integer(item_id)]),
+                PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(i64::from(exp_trit)))]),
+            ])
+        );
         let trit: i32 = p.ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.location_id == st_id && i.type_id == 34).map(|i| i.quantity).sum());
         assert_eq!(trit, exp_trit, "100 Veldspar at {st_id} must yield {exp_trit} Tritanium");
     }
@@ -1010,9 +1024,31 @@ async fn test_b33_moon_mining_and_reprocessing_curves() {
     assert!((tax_with_mission - 0.005).abs() < 1e-4, "Connections V must apply after >=1 completed corp mission, got {tax_with_mission}");
 
     // 5. Scrapmetal yield exclusions: ignores Upwell structure, rig, security-band, and implant bonuses (capped at 55%)
+    let mut expected_scrap_map = std::collections::BTreeMap::<i64, i64>::new();
+    for mat in &p.ctx.sde.type_materials[&MINER_I] {
+        let q = ((2 * mat.quantity) as f64 * 0.55).floor() as i64;
+        if q > 0 {
+            *expected_scrap_map.entry(i64::from(mat.material_type_id)).or_insert(0) += q;
+        }
+    }
+    let expected_scrap_dict: Vec<(PyRep, PyRep)> = expected_scrap_map
+        .into_iter()
+        .map(|(tid, q)| (PyRep::Integer(tid), PyRep::Integer(q)))
+        .collect();
     insert_item(&p.ctx, 9_400_012, MINER_I, CHAR_ID, 60_003_760, InventoryFlag::Hangar, 2);
+    let q_scrap_npc = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[PyRep::List(vec![PyRep::Integer(9_400_012)])], &kw, None).await.unwrap();
+    let PyRep::Tuple(ref qsn_parts) = q_scrap_npc else { panic!() };
+    let PyRep::Dict(ref qsn_eff) = qsn_parts[1] else { panic!() };
+    let qsn_base = qsn_eff.iter().find(|(k, _)| k.as_i64() == Some(i64::from(MINER_I))).and_then(|(_, v)| v.as_f64()).unwrap_or(0.0);
+    assert!((qsn_base - 0.50).abs() < 1e-4);
     let r_scrap_npc = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(9_400_012)], &kw, None).await.unwrap();
-    assert!((dict_get(&r_scrap_npc, "yieldRate").and_then(|v| v.as_f64()).unwrap_or(0.0) - 0.55).abs() < 1e-4);
+    assert_eq!(
+        r_scrap_npc,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(9_400_012)]),
+            PyRep::Dict(expected_scrap_dict.clone()),
+        ])
+    );
 
     insert_item(&p.ctx, 9_400_013, MINER_I, CHAR_ID, null_tatara_id, InventoryFlag::Hangar, 2);
     sess.station_id = None;
@@ -1021,9 +1057,21 @@ async fn test_b33_moon_mining_and_reprocessing_curves() {
         if let Some(ch) = s.characters.get_mut(&CHAR_ID) { ch.station_id = None; ch.structure_id = Some(null_tatara_id); }
         s.active_implants.entry(CHAR_ID).or_default().push(RX_804_IMPLANT);
     });
-    let r_scrap_tatara = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(9_400_013)], &kw, None).await.unwrap();
+    let q_scrap_tatara = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[PyRep::List(vec![PyRep::Integer(9_400_013)])], &kw, None).await.unwrap();
+    let PyRep::Tuple(ref qst_parts) = q_scrap_tatara else { panic!() };
+    let PyRep::Dict(ref qst_eff) = qst_parts[1] else { panic!() };
+    let qst_base = qst_eff.iter().find(|(k, _)| k.as_i64() == Some(i64::from(MINER_I))).and_then(|(_, v)| v.as_f64()).unwrap_or(0.0);
     assert!(
-        (dict_get(&r_scrap_tatara, "yieldRate").and_then(|v| v.as_f64()).unwrap_or(0.0) - 0.55).abs() < 1e-4,
+        (qst_base - 0.50).abs() < 1e-4,
+        "Scrapmetal reprocessing in rigged null-sec Tatara with RX-804 implant must ignore Tatara base bonus (got {qst_base})"
+    );
+    let r_scrap_tatara = p.ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(9_400_013)], &kw, None).await.unwrap();
+    assert_eq!(
+        r_scrap_tatara,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(9_400_013)]),
+            PyRep::Dict(expected_scrap_dict),
+        ]),
         "Scrapmetal reprocessing in rigged null-sec Tatara with RX-804 implant must still cap at 55%"
     );
 }

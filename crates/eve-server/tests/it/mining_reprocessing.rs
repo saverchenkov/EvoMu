@@ -874,6 +874,7 @@ async fn test_phase_5m_mn12_reprocessing_service() {
     let _ = ctx.drain_notifications_for_char(char_id);
 
     // Execute Reprocess
+    let pre_veld_ids: std::collections::HashSet<i64> = ctx.db.with_snapshot(|s| s.items.keys().copied().collect());
     let reproc_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -887,21 +888,21 @@ async fn test_phase_5m_mn12_reprocessing_service() {
         .await
         .expect("Reprocess Veldspar");
 
-    let outputs_rep = get_dict_val(&reproc_res, "outputs").expect("outputs list");
-    let mat_outputs = match outputs_rep {
-        PyRep::List(l) => l,
-        _ => panic!("Expected list of output items"),
-    };
-    assert!(!mat_outputs.is_empty());
-
-    let trit_out = mat_outputs.iter().find(|entry| {
-        get_dict_val(entry, "typeID").and_then(|v| v.as_i64()) == Some(34)
+    assert_eq!(
+        reproc_res,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(veldspar_id)]),
+            PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(2_682))]),
+        ])
+    );
+    let minted_trit_qty: i64 = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .filter(|i| !pre_veld_ids.contains(&i.item_id) && i.owner_id == char_id && i.location_id == station_id && i.type_id == 34)
+            .map(|i| i64::from(i.quantity))
+            .sum()
     });
-    assert!(trit_out.is_some());
-    let trit_qty = get_dict_val(trit_out.unwrap(), "quantity")
-        .and_then(|v| v.as_i64())
-        .expect("tritium quantity");
-    assert_eq!(trit_qty, 2682);
+    assert_eq!(minted_trit_qty, 2_682);
 
     // Remainder of 50 Veldspar remains in hangar
     let rem_veldspar = ctx.db.get_item(veldspar_id).expect("remainder veldspar");
@@ -952,22 +953,18 @@ async fn test_phase_5m_mn12_reprocessing_service() {
         .await
         .expect("Reprocess packaged Rifter via Scrapmetal Processing");
 
-    let scrap_outputs_rep = get_dict_val(&scrap_res, "outputs").expect("scrap outputs list");
-    let scrap_outputs = match scrap_outputs_rep {
-        PyRep::List(l) => l,
-        _ => panic!("Expected list of output items from scrapmetal"),
+    let PyRep::Tuple(scrap_parts) = scrap_res else {
+        panic!("Expected V24 2-tuple from scrapmetal Reprocess");
+    };
+    assert_eq!(scrap_parts[0], PyRep::List(vec![PyRep::Integer(rifter_item_id)]));
+    let PyRep::Dict(scrap_outputs) = &scrap_parts[1] else {
+        panic!("Expected outputByTypeID Dict from scrapmetal");
     };
     assert!(!scrap_outputs.is_empty());
     // Must produce Tritanium (34), Pyerite (35), Mexallon (36)
-    assert!(scrap_outputs.iter().any(|entry| {
-        get_dict_val(entry, "typeID").and_then(|v| v.as_i64()) == Some(34)
-    }));
-    assert!(scrap_outputs.iter().any(|entry| {
-        get_dict_val(entry, "typeID").and_then(|v| v.as_i64()) == Some(35)
-    }));
-    assert!(scrap_outputs.iter().any(|entry| {
-        get_dict_val(entry, "typeID").and_then(|v| v.as_i64()) == Some(36)
-    }));
+    assert!(scrap_outputs.iter().any(|(k, v)| k.as_i64() == Some(34) && v.as_i64().unwrap_or(0) > 0));
+    assert!(scrap_outputs.iter().any(|(k, v)| k.as_i64() == Some(35) && v.as_i64().unwrap_or(0) > 0));
+    assert!(scrap_outputs.iter().any(|(k, v)| k.as_i64() == Some(36) && v.as_i64().unwrap_or(0) > 0));
 }
 
 #[tokio::test]
@@ -1063,9 +1060,9 @@ async fn reprocess_tax_debit_and_notenoughmoney_leaves_state() {
     let expected_tax_cents = ((expected_gross_cents as f64) * 0.05).round().max(100.0) as i64;
     let expected_tax_isk = (expected_tax_cents as f64) / 100.0;
 
-    let bal_before = ctx
+    let (bal_before, journal_before) = ctx
         .db
-        .with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+        .with_snapshot(|s| (s.characters.get(&char_id).unwrap().balance, s.wallet_journal.len()));
     let reproc_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1078,27 +1075,27 @@ async fn reprocess_tax_debit_and_notenoughmoney_leaves_state() {
         )
         .await
         .expect("Reprocess Veldspar with sufficient funds");
-    let bal_after = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+    let (bal_after, remainder_qty, tax_journal_ok) = ctx.db.with_snapshot(|s| {
+        let bal = s.characters.get(&char_id).unwrap().balance;
+        let rem = s.items.get(&veld_ok_id).map(|i| i.quantity).unwrap_or(0);
+        let j_ok = s.wallet_journal.iter().skip(journal_before).any(|j| {
+            j.character_id == char_id
+                && j.entry_type == "ReprocessingTax"
+                && j.amount.0 == expected_tax_cents
+        });
+        (bal, rem, j_ok)
+    });
 
     assert_eq!(
-        get_dict_val(&reproc_res, "stationTaxRate").and_then(|v| v.as_f64()),
-        Some(0.05)
+        reproc_res,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(veld_ok_id)]),
+            PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(2_682))]),
+        ])
     );
-    let reported_tax = get_dict_val(&reproc_res, "reprocessingTaxISK")
-        .and_then(|v| v.as_f64())
-        .expect("reprocessingTaxISK");
-    assert!((reported_tax - expected_tax_isk).abs() < 1e-6);
-    assert_eq!(
-        get_dict_val(&reproc_res, "tritaniumQuantity").and_then(|v| v.as_i64()),
-        Some(2_682)
-    );
-    assert_eq!(
-        get_dict_val(&reproc_res, "remainderQuantity").and_then(|v| v.as_i64()),
-        Some(50)
-    );
+    assert_eq!(remainder_qty, 50);
     assert_eq!(bal_before.0 - bal_after.0, expected_tax_cents);
+    assert!(tax_journal_ok, "ReprocessingTax wallet journal entry must match expected tax cents ({expected_tax_isk:.2} ISK)");
 
     // 2. Negative path: NotEnoughMoney leaves wallet, hangar items, and wallet journal untouched
     ctx.db.with_mut_snapshot(|snap| {

@@ -1689,29 +1689,7 @@ async fn reprocess_ship_ore_hold_flag_resolution_and_place_multi_sell_tombstones
     };
     use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 
-    // 1. `normalize_macho_rpc_reply("reprocessingSvc", "Reprocess", ...)` (`#784`, `#788`):
-    let multi_reproc = PyRep::List(vec![
-        PyRep::keyval([
-            ("itemID", PyRep::Integer(990_001)),
-            ("typeID", PyRep::Integer(1230)),
-            ("reprocessedQuantity", PyRep::Integer(100)),
-            ("outputs", PyRep::List(vec![PyRep::keyval([("typeID", PyRep::Integer(34)), ("quantity", PyRep::Integer(200)), ("unrecoverable", PyRep::Integer(15))])])),
-        ]),
-        PyRep::keyval([
-            ("itemID", PyRep::Integer(990_002)),
-            ("typeID", PyRep::Integer(1230)),
-            ("reprocessedQuantity", PyRep::Integer(200)),
-            ("outputs", PyRep::List(vec![PyRep::keyval([("typeID", PyRep::Integer(34)), ("quantity", PyRep::Integer(400)), ("unrecoverable", PyRep::Integer(30))])])),
-        ]),
-    ]);
-    let PyRep::Tuple(reproc_tup) = normalize_macho_rpc_reply("reprocessingSvc", "Reprocess", Ok(multi_reproc)).unwrap() else {
-        panic!("expected 2-tuple (input_ids, outputs_by_type) from Reprocess");
-    };
-    assert_eq!(reproc_tup.len(), 2);
-    assert_eq!(reproc_tup[0], PyRep::List(vec![PyRep::Integer(990_001), PyRep::Integer(990_002)]));
-    assert_eq!(reproc_tup[1], PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(600))]));
-
-    // 2. `space_entity_mining::handle("reprocessingSvc", "Reprocess", ...)` (`#784`, `#788`):
+    // 1. `space_entity_mining::handle("reprocessingSvc", "Reprocess", ...)` (`#784`, `#788`, `#933`):
     let ctx = ServerContext::new();
     let char_id = 90_000_001_i64;
     let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
@@ -1720,7 +1698,13 @@ async fn reprocess_ship_ore_hold_flag_resolution_and_place_multi_sell_tombstones
         .acquire_online_lock(uid, 7840, Some(char_id), false, ctx.now_unix());
     let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
     let station_id = JITA_STATION_ID;
-    let (ship_id, ore_partial_id, ore_full_id) = (990_784_001_i64, 990_784_002_i64, 990_784_003_i64);
+    let (ship_id, ore_partial_id, ore_full_id, ore_batch_a, ore_batch_b) = (
+        990_784_001_i64,
+        990_784_002_i64,
+        990_784_003_i64,
+        990_784_004_i64,
+        990_784_005_i64,
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -1734,6 +1718,8 @@ async fn reprocess_ship_ore_hold_flag_resolution_and_place_multi_sell_tombstones
             (ship_id, 32_880_u32, station_id, InventoryFlag::Hangar, 1_i32, true),
             (ore_partial_id, 1230, ship_id, InventoryFlag::SpecializedOreHold, 150, false),
             (ore_full_id, 1230, ship_id, InventoryFlag::SpecializedOreHold, 100, false),
+            (ore_batch_a, 1230, ship_id, InventoryFlag::SpecializedOreHold, 100, false),
+            (ore_batch_b, 1230, ship_id, InventoryFlag::SpecializedOreHold, 200, false),
         ] {
             snap.items.insert(iid, InventoryItemRecord {
                 item_id: iid, type_id: tid, owner_id: char_id, location_id: loc, flag: flg, quantity: qty, singleton: sgl, version: 1, ..Default::default()
@@ -1750,18 +1736,54 @@ async fn reprocess_ship_ore_hold_flag_resolution_and_place_multi_sell_tombstones
     sess.region_id = Some(THE_FORGE_REGION_ID);
     sess.ship_id = Some(ship_id);
 
+    let PyRep::Tuple(batch_tup) = handle_mining(
+        &ctx,
+        &mut sess,
+        "reprocessingSvc",
+        "Reprocess",
+        &[PyRep::List(vec![PyRep::Integer(ore_batch_a), PyRep::Integer(ore_batch_b)])],
+        None,
+    )
+    .await
+    .unwrap()
+    .expect("native multi-item batch Reprocess ok") else {
+        panic!("expected 2-tuple (input_ids, outputs_by_type) from native Reprocess");
+    };
+    assert_eq!(batch_tup.len(), 2);
+    assert_eq!(batch_tup[0], PyRep::List(vec![PyRep::Integer(ore_batch_a), PyRep::Integer(ore_batch_b)]));
+    let PyRep::Dict(ref batch_out_map) = batch_tup[1] else {
+        panic!("expected outputByTypeID Dict");
+    };
+    let batch_trit = batch_out_map
+        .iter()
+        .find_map(|(k, v)| (k.as_i64() == Some(34)).then(|| v.as_i64()).flatten())
+        .unwrap_or(0);
+    assert!(batch_trit >= 600);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ore_batch_a));
+        assert!(!snap.items.contains_key(&ore_batch_b));
+        let minted_trit: i64 = snap
+            .items
+            .values()
+            .filter(|it| it.owner_id == char_id && it.type_id == 34 && it.location_id == station_id)
+            .map(|it| i64::from(it.quantity))
+            .sum();
+        assert_eq!(minted_trit, batch_trit);
+    });
+
     let bad_from = handle_mining(&ctx, &mut sess, "reprocessingSvc", "Reprocess", &[PyRep::List(vec![PyRep::Integer(ore_partial_id)]), PyRep::Integer(ship_id + 999)], None).await.unwrap().unwrap_err();
     assert_eq!(bad_from.code, "OwnershipOrLocationViolation");
 
     let _ = ctx.drain_notifications_for_char(char_id);
-    let PyRep::List(rep_part_list) = handle_mining(
+    let PyRep::Tuple(rep_part_tup) = handle_mining(
         &ctx, &mut sess, "reprocessingSvc", "Reprocess",
         &[PyRep::List(vec![PyRep::Integer(ore_partial_id)]), PyRep::Integer(ship_id), PyRep::None, PyRep::Integer(InventoryFlag::SpecializedOreHold as i64)],
         None,
     ).await.unwrap().expect("partial ore hold reprocess ok") else {
-        panic!("expected List from multi-arg Reprocess");
+        panic!("expected 2-tuple from multi-arg Reprocess");
     };
-    assert_eq!(rep_part_list[0].dict_get("remainderQuantity"), Some(&PyRep::Integer(50)));
+    assert_eq!(rep_part_tup[0], PyRep::List(vec![PyRep::Integer(ore_partial_id)]));
+    assert!(matches!(&rep_part_tup[1], PyRep::Dict(d) if d.iter().any(|(k, v)| k.as_i64() == Some(34) && v.as_i64().unwrap_or(0) > 0)));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&ore_partial_id].quantity, 50);
         assert!(snap.items.values().any(|it| it.owner_id == char_id && it.type_id == 34 && it.location_id == station_id && it.flag == InventoryFlag::Hangar));
@@ -1771,14 +1793,18 @@ async fn reprocess_ship_ore_hold_flag_resolution_and_place_multi_sell_tombstones
     assert!(part_notifs.iter().any(|n| n.event == "OnItemChange" && n.args[0].dict_get("itemID") == Some(&PyRep::Integer(ore_partial_id)) && n.args[0].dict_get("quantity") == Some(&PyRep::Integer(50))));
 
     let _ = ctx.drain_notifications_for_char(char_id);
-    let PyRep::List(rep_full_list) = handle_mining(
+    let PyRep::Tuple(rep_full_tup) = handle_mining(
         &ctx, &mut sess, "reprocessingSvc", "Reprocess",
         &[PyRep::List(vec![PyRep::Integer(ore_full_id)]), PyRep::Integer(ship_id), PyRep::None, PyRep::Integer(InventoryFlag::SpecializedOreHold as i64)],
         None,
     ).await.unwrap().expect("full ore hold reprocess ok") else {
-        panic!("expected List from multi-arg Reprocess");
+        panic!("expected 2-tuple from multi-arg Reprocess");
     };
-    assert_eq!(rep_full_list[0].dict_get("remainderQuantity"), Some(&PyRep::Integer(0)));
+    assert_eq!(rep_full_tup[0], PyRep::List(vec![PyRep::Integer(ore_full_id)]));
+    assert!(matches!(&rep_full_tup[1], PyRep::Dict(d) if d.iter().any(|(k, v)| k.as_i64() == Some(34) && v.as_i64().unwrap_or(0) > 0)));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ore_full_id));
+    });
     let full_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(full_notifs.iter().any(|n| n.event == "OnItemChange" && n.args[0].dict_get("itemID") == Some(&PyRep::Integer(ore_full_id)) && n.args[0].dict_get("locationID") == Some(&PyRep::Integer(6))));
 
