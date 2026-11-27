@@ -1524,7 +1524,7 @@ pub(crate) fn parse_dungeon_trigger_kind(
             item_type_id: t_rep.dict_get("itemTypeID").or_else(|| t_rep.dict_get("itemTypeId")).and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()).filter(|&id| id > 0),
             required_quantity: t_rep.dict_get("requiredQuantity").and_then(|v| v.as_i64()).and_then(|v| u32::try_from(v).ok()).unwrap_or(1).max(1),
         },
-        "structure_destroyed" | "onstructuredestroyed" | "on_structure_destroyed" | "destroy_structure" => DungeonTriggerKind::OnStructureDestroyed {
+        "structure_destroyed" | "onstructuredestroyed" | "on_structure_destroyed" | "destroy_structure" | "object_destroyed" => DungeonTriggerKind::OnStructureDestroyed {
             target_ball_id: None,
             target_object_index: t_rep.dict_get("targetObjectIndex").and_then(|v| v.as_i64()).and_then(|v| usize::try_from(v).ok()),
             target_tag: t_rep.dict_get("targetTag").or_else(|| t_rep.dict_get("tag")).and_then(|v| v.as_str()).map(str::to_string),

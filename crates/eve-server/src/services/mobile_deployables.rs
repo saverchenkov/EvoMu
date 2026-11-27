@@ -665,7 +665,9 @@ pub(crate) fn apply_mobile_deployable_in_snap(
             mtu_capacity,
         } => {
             if let Some(sde) = sde_opt {
-                if !snap.items.contains_key(mtu_item_id) {
+                if !snap.items.contains_key(mtu_item_id)
+                    || crate::services::pve_dungeon_runtime_hooks::is_owned_dungeon_object_any_sys_in_snap(snap, *target_id)
+                {
                     return None;
                 }
                 let mut current_vol: f64 = snap
@@ -702,7 +704,9 @@ pub(crate) fn apply_mobile_deployable_in_snap(
             None
         }
         MobileDeployableDbOp::UpdateMtuTargetPosition { target_id, new_pos } => {
-            if snap.items.contains_key(target_id) {
+            if snap.items.contains_key(target_id)
+                && !crate::services::pve_dungeon_runtime_hooks::is_owned_dungeon_object_any_sys_in_snap(snap, *target_id)
+            {
                 snap.item_positions.insert(*target_id, *new_pos);
             }
             None
@@ -1011,6 +1015,9 @@ pub(crate) fn step_mobile_deployables_in_actor_collecting(
                     continue;
                 }
                 if it.location_id != solar_system_id as i64 || it.item_id == mtu.item_id || it.owner_id != mtu.owner_id {
+                    continue;
+                }
+                if crate::services::pve_dungeon_runtime_hooks::is_owned_dungeon_object_in_snap(snap, solar_system_id, it.item_id) {
                     continue;
                 }
                 let is_wreck = sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 186);

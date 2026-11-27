@@ -4185,3 +4185,115 @@ async fn own_diff_p1_08_and_09_trash_and_launch_from_container_preserve_dungeon_
     let _ = crate::combat::death_pipeline::on_ball_destroyed_sync(&ctx, sys_id, cont_bunker, Some(char_id), DVec3::ZERO).unwrap();
     read_dungeon_runtime_store(&ctx, |s| assert!(!s.instances[&inst_id].rooms[0].triggers[0].fired && s.instances[&inst_id].rooms[0].gate_locked));
 }
+
+#[tokio::test]
+async fn own_diff_p1_10_and_11_mtu_tractor_and_scoop_cannot_touch_dungeon_containers() {
+    use crate::services::combat_crimewatch::combat_npcs_drones::precheck_tractor_beam_activation;
+    use crate::services::inventory_fitting::fitting_ships_mastery::handle_ships_mastery_and_fitting_ext;
+    use crate::services::mobile_deployables::{
+        apply_mobile_deployable_in_snap, register_mobile_deployable,
+        step_mobile_deployables_in_actor_collecting, write_deployable_state, MobileDeployableDbOp,
+        CATEGORY_DEPLOYABLE, GROUP_MOBILE_TRACTOR, TYPE_MTU_STANDARD,
+    };
+    use crate::system_actor::post_unlock::{PostUnlockIntent, PostUnlockOps};
+
+    let mut sde = build_hooks_test_sde();
+    let tractor_type = mk_inv_type(650_001, 650, 7, "Small Tractor Beam I", 5.0, 0.0, None, &[(54, 20_000.0)]);
+    {
+        let sm = Arc::get_mut(&mut sde).unwrap();
+        sm.types.insert(TYPE_MTU_STANDARD, mk_inv_type(TYPE_MTU_STANDARD, GROUP_MOBILE_TRACTOR, CATEGORY_DEPLOYABLE, "Mobile Tractor Unit", 100.0, 27_000.0, None, &[(1556, 27_000.0), (54, 125_000.0)]));
+        sm.types.insert(340_002, mk_inv_type(340_002, 340, 2, "Dungeon Secure Can", 1_000.0, 3_900.0, None, &[]));
+        sm.types.insert(448_002, mk_inv_type(448_002, 448, 2, "Dungeon Station Can", 1_000.0, 100_000.0, None, &[]));
+        sm.types.insert(650_001, tractor_type.clone());
+    }
+    let sys_id = 30_000_142;
+    let char_id = 95_008_801;
+    let inst_id = 8_801_001;
+    let r_pos = [24_000.0, 0.0, 0.0];
+    let (ctx, _clock, mut sess, ship_id) =
+        make_space_pilot_ctx(sde, sys_id, char_id, "r8_mtu_scoop", 587, DVec3::new(r_pos[0] + 50.0, 0.0, 0.0)).await;
+    let mut room = make_room(
+        0,
+        9_801,
+        r_pos,
+        vec![
+            DungeonRuntimeObject { type_id: DEFAULT_CONTAINER_TYPE_ID, name: "Can 23".into(), position: [r_pos[0] + 100.0, 0.0, 0.0], radius: 150.0, is_container: true, loot_items: vec![(35, 5)], ..Default::default() },
+            DungeonRuntimeObject { type_id: 340_002, name: "Can 340".into(), position: [r_pos[0] + 4_000.0, 0.0, 0.0], radius: 150.0, is_container: true, loot_items: vec![(34, 5)], ..Default::default() },
+            DungeonRuntimeObject { type_id: 448_002, name: "Can 448".into(), position: [r_pos[0] + 5_000.0, 0.0, 0.0], radius: 150.0, is_container: true, loot_items: vec![(34, 5)], ..Default::default() },
+            DungeonRuntimeObject { type_id: 16_757, name: "Bunker".into(), position: [r_pos[0] + 150.0, 0.0, 0.0], radius: 150.0, is_container: true, destructible: true, ..Default::default() },
+        ],
+        vec![make_trig(
+            1,
+            DungeonTriggerKind::OnCargoDelivered { container_ball_id: None, target_object_index: Some(0), item_type_id: Some(34), required_quantity: 2 },
+            DungeonTriggerAction::CompleteDungeon,
+            false,
+        )],
+    );
+    room.entered = true;
+    room.entered_unix = Some(1_785_100_000);
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(inst_id, DungeonRuntimeInstance { instance_id: inst_id, dungeon_id: 1, solar_system_id: sys_id, owner_char_id: char_id, base_position: r_pos, rooms: vec![room], created_unix: 1_785_100_000, ..Default::default() });
+    });
+    let mat = materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 0).await.expect("mat");
+    let (cont_23, cont_340, cont_448, cont_16757) = (mat.object_ids[0], mat.object_ids[1], mat.object_ids[2], mat.object_ids[3]);
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+
+    // OWN-DIFF-P1-11: Scoop / ScoopToFleetHangar reject non-23 dungeon container (empty & non-empty).
+    for step_fill in [false, true] {
+        if step_fill {
+            insert_ship_item(&ctx, char_id, ship_id, 8_801_201, 34, InventoryFlag::Cargo, 5, false);
+            inv_add_to(&ctx, &mut sess, char_id, cont_16757, 8_801_201, ship_id, Some(5)).await;
+        }
+        for method in ["Scoop", "ScoopToFleetHangar"] {
+            let err = handle_ships_mastery_and_fitting_ext(&ctx, &mut sess, None, "ship", method, &[PyRep::Integer(cont_16757)], &HashMap::new())
+                .await.expect("handled").unwrap_err();
+            assert_eq!(err.code, "CannotScoop");
+            assert!(ctx.db.with_snapshot(|s| s.items.get(&cont_16757).is_some_and(|i| i.location_id == i64::from(sys_id))));
+            assert!(sys_h.get_ball_snapshot(cont_16757).await.unwrap().is_some());
+        }
+    }
+
+    // OWN-DIFF-P1-10: Deliver 1 Tritanium into cont_23, deploy MTU + active control jetcan, and verify MTU/Tractor reject dungeon cans.
+    insert_ship_item(&ctx, char_id, ship_id, 8_801_202, 34, InventoryFlag::Cargo, 1, false);
+    inv_add_to(&ctx, &mut sess, char_id, cont_23, 8_801_202, ship_id, Some(1)).await;
+    let (mtu_id, player_can, player_loot) = (8_801_301, 8_801_302, 8_801_303);
+    let mtu_pos = DVec3::new(r_pos[0] + 120.0, 0.0, 0.0);
+    let can_pos = DVec3::new(r_pos[0] + 140.0, 0.0, 0.0);
+    ctx.db.with_mut_snapshot(|s| {
+        for (id, tid, loc, pos) in [(mtu_id, TYPE_MTU_STANDARD, i64::from(sys_id), Some(mtu_pos)), (player_can, 23, i64::from(sys_id), Some(can_pos)), (player_loot, 35, player_can, None)] {
+            s.items.insert(id, InventoryItemRecord { item_id: id, type_id: tid, owner_id: char_id, location_id: loc, flag: InventoryFlag::None, quantity: 1, singleton: pos.is_some(), version: 1, ..Default::default() });
+            if let Some(p) = pos { s.item_positions.insert(id, [p.x, p.y, p.z]); }
+        }
+    });
+    for (id, tid, pos) in [(mtu_id, TYPE_MTU_STANDARD, mtu_pos), (player_can, 23, can_pos)] {
+        sys_h.spawn_ball(Ball { id, type_id: tid, position: pos, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1_000.0, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await.unwrap();
+    }
+    register_mobile_deployable(&ctx, mtu_id, TYPE_MTU_STANDARD, GROUP_MOBILE_TRACTOR, char_id, sys_id, 0, mtu_pos);
+    write_deployable_state(&ctx, |st| { st.deployables.get_mut(&mtu_id).unwrap().anchor_completed = true; });
+    let (sde_c, db_c, rng_c) = (Arc::clone(&ctx.sde), Arc::clone(&ctx.db), Arc::clone(&ctx.mechanic_rng));
+    let intents = sys_h.test_with_ballpark_and_state_mut_async(move |bp, st| {
+        let mut ops = PostUnlockOps::default();
+        step_mobile_deployables_in_actor_collecting(bp, &mut st.active_module_cycles, &rng_c, Some(&sde_c), Some(&db_c), Some(&rng_c), sys_id, 1.0, 1_785_100_005, None, None, &mut ops);
+        assert_eq!(bp.balls[&cont_340].position, DVec3::new(r_pos[0] + 4_000.0, 0.0, 0.0));
+        assert_eq!(bp.balls[&cont_448].position, DVec3::new(r_pos[0] + 5_000.0, 0.0, 0.0));
+        ops.intents
+    }).await;
+    assert!(intents.iter().any(|i| matches!(i, PostUnlockIntent::MobileDeployable(MobileDeployableDbOp::LootMtuCargo { target_id, .. }) if *target_id == player_can)));
+    assert!(!intents.iter().any(|i| matches!(i, PostUnlockIntent::MobileDeployable(MobileDeployableDbOp::LootMtuCargo { target_id, .. } | MobileDeployableDbOp::UpdateMtuTargetPosition { target_id, .. }) if [cont_23, cont_340, cont_448, cont_16757].contains(target_id))));
+
+    // Defensive DB-op guard + Tractor Beam precheck + net cargo anti-recycle invariant:
+    ctx.db.with_mut_snapshot(|s| {
+        apply_mobile_deployable_in_snap(s, Some(&ctx.sde), &MobileDeployableDbOp::LootMtuCargo { mtu_item_id: mtu_id, target_id: cont_23, mtu_capacity: 27_000.0 });
+        apply_mobile_deployable_in_snap(s, Some(&ctx.sde), &MobileDeployableDbOp::UpdateMtuTargetPosition { target_id: cont_23, new_pos: [0.0, 0.0, 0.0] });
+        assert!(s.items.values().any(|i| i.location_id == cont_23 && i.type_id == 34));
+        assert!(s.items.values().any(|i| i.location_id == cont_23 && i.type_id == 35));
+        assert!(!s.items.values().any(|i| i.location_id == mtu_id));
+        assert_eq!(s.item_positions[&cont_23], [r_pos[0] + 100.0, 0.0, 0.0]);
+    });
+    assert_eq!(precheck_tractor_beam_activation(&ctx, &sys_h, char_id, ship_id, 0, &tractor_type, Some(cont_23)).await.unwrap_err().code, "TractorBeamDungeonObjectRestricted");
+    read_dungeon_runtime_store(&ctx, |s| {
+        let inst = &s.instances[&inst_id];
+        assert_eq!(inst.rooms[0].cargo_delivered_net.get(&format!("{cont_23}:34")).copied(), Some(1));
+        assert!(!inst.completed && !inst.rooms[0].triggers[0].fired);
+    });
+}

@@ -941,6 +941,10 @@ pub(crate) async fn ship_scoop_and_store(
         let Some(it) = snap.items.get(&item_id) else {
             return Err(err("ItemNotFound", format!("Item {item_id} not found")));
         };
+        if crate::services::pve_dungeon_runtime_hooks::is_owned_dungeon_object_any_sys_in_snap(snap, item_id) {
+            let msg = format!("Dungeon object {item_id} cannot be scooped");
+            return Err(BridgeRpcError::with_client_error("CannotScoop", msg.clone(), eve_proto::ClientError::CustomInfo(msg)));
+        }
         let it_type = ctx.sde.types.get(&it.type_id);
         let it_cat = it_type.map(|t| t.category_id).unwrap_or(0);
         let it_grp = it_type.map(|t| t.group_id).unwrap_or(0);

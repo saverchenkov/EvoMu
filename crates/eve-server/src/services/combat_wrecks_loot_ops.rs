@@ -177,7 +177,7 @@ pub(super) async fn handle_loot_all(
         .get_or_create(wreck_item.owner_id)
         .is_criminal(now_unix);
 
-    let (looted_ids, remaining_ids, suspect_triggered, is_abandoned) =
+    let (looted_ids, looted_items, remaining_ids, suspect_triggered, is_abandoned) =
         ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get(&char_id) {
             let cur_db_state = (ch.station_id, ch.structure_id, ch.solar_system_id, ch.active_ship_id);
@@ -260,6 +260,7 @@ pub(super) async fn handle_loot_all(
         wreck_children.sort_unstable();
 
         let mut looted = Vec::new();
+        let mut looted_items: Vec<(u32, i32)> = Vec::new();
         let mut remaining = Vec::new();
         for cid in wreck_children {
             let Some(child) = snap.items.get(&cid).cloned() else {
@@ -286,6 +287,7 @@ pub(super) async fn handle_loot_all(
                     c_mut.version += 1;
                 }
                 looted.push(cid);
+                looted_items.push((child.type_id, child.quantity));
             } else {
                 let max_units = (avail_vol / unit_vol).floor() as i32;
                 if max_units > 0 && child.quantity > max_units && !child.singleton {
@@ -313,11 +315,12 @@ pub(super) async fn handle_loot_all(
                     };
                     snap.items.insert(split_id, split_rec);
                     looted.push(split_id);
+                    looted_items.push((child.type_id, max_units));
                 }
                 remaining.push(cid);
             }
         }
-        Ok((looted, remaining, needs_suspect, is_abandoned))
+        Ok((looted, looted_items, remaining, needs_suspect, is_abandoned))
     })?;
 
     if suspect_triggered {
@@ -336,12 +339,6 @@ pub(super) async fn handle_loot_all(
             items: looted_ids.clone(),
         },
     );
-    let looted_items: Vec<(u32, i32)> = ctx.db.with_snapshot(|snap| {
-        looted_ids
-            .iter()
-            .filter_map(|lid| snap.items.get(lid).map(|it| (it.type_id, it.quantity)))
-            .collect()
-    });
     for (ltid, lqty) in looted_items {
         crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
             ctx,
