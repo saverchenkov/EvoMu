@@ -10,7 +10,7 @@
 #![forbid(unsafe_code)]
 
 use super::celestials::{
-    clear_db_system_ballpark_if_matching, register_db_system_ballpark, BallPositionSyncCache,
+    clear_db_system_ballpark_if_matching, register_db_system_ballpark_arc, BallPositionSyncCache,
 };
 use super::lifecycle::{
     ClusterTickWakeReason, LifecycleTransitionRecord, SessionArrivalWakeReason,
@@ -114,7 +114,7 @@ pub(crate) enum SystemLifecycleSlot {
     },
     Live {
         generation: u64,
-        handle: SystemHandle,
+        handle: Arc<SystemHandle>,
     },
     Stopping {
         generation: u64,
@@ -133,7 +133,7 @@ impl SystemLifecycleSlot {
 
     pub(crate) fn live_handle(&self) -> Option<&SystemHandle> {
         match self {
-            Self::Live { handle, .. } if !handle.cmd_tx.is_closed() => Some(handle),
+            Self::Live { handle, .. } if !handle.cmd_tx.is_closed() => Some(handle.as_ref()),
             _ => None,
         }
     }
@@ -1010,7 +1010,7 @@ impl SystemRegistry {
                 None => Snapshot::Cold,
                 Some(SystemLifecycleSlot::Loading { .. }) => Snapshot::Loading,
                 Some(SystemLifecycleSlot::Stopping { .. }) => Snapshot::Stopping,
-                Some(SystemLifecycleSlot::Live { handle, .. }) => Snapshot::Live(handle.clone()),
+                Some(SystemLifecycleSlot::Live { handle, .. }) => Snapshot::Live((**handle).clone()),
             }
         };
 
@@ -1308,7 +1308,7 @@ impl SystemRegistry {
             .iter()
             .filter_map(|(&id, slot)| match slot {
                 SystemLifecycleSlot::Live { generation, handle } if !handle.cmd_tx.is_closed() => {
-                    Some((id, *generation, handle.clone()))
+                    Some((id, *generation, (**handle).clone()))
                 }
                 _ => None,
             })
@@ -1333,7 +1333,7 @@ impl SystemRegistry {
             if let Some(slot) = guard.get(&solar_system_id) {
                 match slot {
                     SystemLifecycleSlot::Live { handle, .. } if !handle.cmd_tx.is_closed() => {
-                        return Ok(SlotStep::Live(handle.clone()));
+                        return Ok(SlotStep::Live((**handle).clone()));
                     }
                     SystemLifecycleSlot::Loading { gate, .. } => {
                         if any_lock_held {
@@ -1390,7 +1390,7 @@ impl SystemRegistry {
 
     pub(crate) fn dead_live_system_handles(&self) -> Vec<(SolarSystemId, SystemHandle)> {
         self.read_systems_slot_map().iter().filter_map(|(&id, slot)| match slot {
-            SystemLifecycleSlot::Live { handle, .. } if handle.cmd_tx.is_closed() => Some((id, handle.clone())),
+            SystemLifecycleSlot::Live { handle, .. } if handle.cmd_tx.is_closed() => Some((id, (**handle).clone())),
             _ => None,
         }).collect()
     }
@@ -1412,6 +1412,7 @@ impl SystemRegistry {
             return Err(guard);
         }
         let Some(SystemLifecycleSlot::Live { generation: dead_gen, handle }) = guard.remove(&solar_system_id) else { unreachable!() };
+        let handle = Arc::try_unwrap(handle).unwrap_or_else(|a| (*a).clone());
         let gate = Arc::new(LifecycleGate::new_stopping());
         if let Ok(mut telem) = self.lifecycle_telemetry.write() {
             telem.mark_retired_floor(solar_system_id, dead_gen);
@@ -1439,7 +1440,7 @@ impl SystemRegistry {
         let from_state = match guard.get(&solar_system_id) {
             None => SystemLifecycleState::Cold,
             Some(SystemLifecycleSlot::Live { handle, .. }) if !handle.cmd_tx.is_closed() => {
-                return Ok(SlotStep::Live(handle.clone()));
+                return Ok(SlotStep::Live((**handle).clone()));
             }
             Some(SystemLifecycleSlot::Loading { gate, .. })
                 if matches!(gate.current_resolution(), GateResolution::Pending) =>
@@ -1628,7 +1629,7 @@ impl SystemRegistry {
         }
 
         let mut persist_payload_opt = None;
-        loop {
+        let handle = loop {
             let db_read_safe = !held_lock_ranks().iter().any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER);
             let (abort_tidi, abort_hist) = self.resolve_effective_tidi_mode(solar_system_id, db_read_safe);
             let mut guard = match self.write_systems_for_publish(solar_system_id) {
@@ -1702,18 +1703,20 @@ impl SystemRegistry {
             cg.phase = CooldownGatePhase::Live;
             drop(cg);
 
+            let handle_arc = Arc::new(handle);
             if let Some(ref db) = self.db {
-                register_db_system_ballpark(db, solar_system_id, &handle);
+                register_db_system_ballpark_arc(db, solar_system_id, &handle_arc);
             }
             self.commit_staged_seed_claims(solar_system_id, staged_claims);
             self.fighter_persist
                 .slot_for(solar_system_id)
                 .mark_live(generation);
-            guard.insert(solar_system_id, SystemLifecycleSlot::Live { generation, handle: handle.clone() });
+            let published_handle = (*handle_arc).clone();
+            guard.insert(solar_system_id, SystemLifecycleSlot::Live { generation, handle: handle_arc });
             loading_guard.disarm();
             drop(guard);
-            break;
-        }
+            break published_handle;
+        };
 
         if let Some(payload) = persist_payload_opt {
             if !held_lock_ranks().iter().any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER) {
@@ -1859,6 +1862,7 @@ impl SystemRegistry {
                 else {
                     return StopBeginAction::AlreadyCold;
                 };
+                let handle = Arc::try_unwrap(handle).unwrap_or_else(|a| (*a).clone());
                 let dead_live = handle.cmd_tx.is_closed();
                 let from_state = if !dead_live && self.is_handle_hibernated_safe(&handle) {
                     SystemLifecycleState::Hibernating
@@ -2026,7 +2030,7 @@ impl SystemRegistry {
         match sys_guard.get(&solar_system_id) {
             Some(SystemLifecycleSlot::Live { generation, handle }) => {
                 if !handle.cmd_tx.is_closed() {
-                    return Ok(FighterColdProbe::Live(handle.clone()));
+                    return Ok(FighterColdProbe::Live((**handle).clone()));
                 }
                 let dead_gen = *generation;
                 drop(sys_guard);
@@ -2332,7 +2336,7 @@ impl SystemRegistry {
         }
         guard.insert(
             solar_system_id,
-            SystemLifecycleSlot::Live { generation, handle },
+            SystemLifecycleSlot::Live { generation, handle: Arc::new(handle) },
         );
     }
 }

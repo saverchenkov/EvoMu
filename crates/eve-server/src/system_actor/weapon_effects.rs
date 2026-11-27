@@ -2417,18 +2417,6 @@ impl SystemRegistry {
     }
 }
 
-pub(in crate::system_actor) fn try_flush_from_sender(
-    _solar_system_id: SolarSystemId,
-    cmd_tx: &tokio::sync::mpsc::Sender<SystemCommand>,
-    coord: &WeaponEffectsFlushCoord,
-) {
-    if !coord.has_pending_work() || cmd_tx.is_closed() {
-        return;
-    }
-    let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
-    let _ = cmd_tx.try_send(SystemCommand::FlushWeaponEffectsCheckpoint { reply: reply_tx });
-}
-
 pub(in crate::system_actor) fn flush_from_handle(handle: &SystemHandle) {
     if held_lock_ranks().is_empty()
         && handle

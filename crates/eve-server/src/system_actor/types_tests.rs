@@ -572,6 +572,36 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::RemoveActiveBreacherDot { .. } => "RemoveActiveBreacherDot",
             SystemCommand::FlushWeaponEffectsCheckpoint { .. } => "FlushWeaponEffectsCheckpoint",
             SystemCommand::ShutdownActor { .. } => "ShutdownActor",
+            SystemCommand::RefreshStargateActivationStates { .. } => "RefreshStargateActivationStates",
+            SystemCommand::ActivateStargateTransitionForDest { .. } => "ActivateStargateTransitionForDest",
+            SystemCommand::ActivateStargateTransition { .. } => "ActivateStargateTransition",
+            SystemCommand::SetStargateActivationState { .. } => "SetStargateActivationState",
+            SystemCommand::SettleStargateActivationStates { .. } => "SettleStargateActivationStates",
+            SystemCommand::MutateExternalActiveModule { .. } => "MutateExternalActiveModule",
+            SystemCommand::RepairCombatStateSync { .. } => "RepairCombatStateSync",
+            SystemCommand::SetBallPositionSync { .. } => "SetBallPositionSync",
+            SystemCommand::StopBall { .. } => "StopBall",
+            SystemCommand::RemoveBallSync { .. } => "RemoveBallSync",
+            SystemCommand::CancelShipNaniteRepairsSync { .. } => "CancelShipNaniteRepairsSync",
+            SystemCommand::CancelNaniteRepairsForShip { .. } => "CancelNaniteRepairsForShip",
+            SystemCommand::TrySpawnAsteroid { .. } => "TrySpawnAsteroid",
+            SystemCommand::SyncAsteroidQuantity { .. } => "SyncAsteroidQuantity",
+            SystemCommand::TrySpawnBallWithMeta { .. } => "TrySpawnBallWithMeta",
+            SystemCommand::MarkBallNonFree { .. } => "MarkBallNonFree",
+            SystemCommand::TrackModuleReloadSimSync { .. } => "TrackModuleReloadSimSync",
+            SystemCommand::TryHandoffInSpaceObserver { .. } => "TryHandoffInSpaceObserver",
+            SystemCommand::TrySpawnBallWithCombat { .. } => "TrySpawnBallWithCombat",
+            SystemCommand::UpdateCombatState { .. } => "UpdateCombatState",
+            SystemCommand::ApplyDirectCombatDamage { .. } => "ApplyDirectCombatDamage",
+            SystemCommand::SyncShipBallparkStats { .. } => "SyncShipBallparkStats",
+            SystemCommand::RespawnDepletedBeltsOnDowntime { .. } => "RespawnDepletedBeltsOnDowntime",
+            SystemCommand::TryStepManual { .. } => "TryStepManual",
+            SystemCommand::TakePendingCycleActions { .. } => "TakePendingCycleActions",
+            SystemCommand::MutateWarpState { .. } => "MutateWarpState",
+            SystemCommand::FinishWarpForDock { .. } => "FinishWarpForDock",
+            SystemCommand::FlushDirtyConditionCheckpointSync { .. } => "FlushDirtyConditionCheckpointSync",
+            SystemCommand::StepFullTick { .. } => "StepFullTick",
+            SystemCommand::TryRemoveModuleCycle { .. } => "TryRemoveModuleCycle",
             #[cfg(any(test, feature = "testkit"))]
             SystemCommand::TestAccess { .. } => "TestAccess",
         }
@@ -1269,6 +1299,171 @@ fn system_command_all_variants_construct_and_match() {
         SystemCommand::ShutdownActor {
             reply: oneshot::channel().0,
         },
+        SystemCommand::RefreshStargateActivationStates {
+            lazy_enabled: false,
+            loaded_systems: std::collections::HashSet::new(),
+            reply: None,
+        },
+        SystemCommand::ActivateStargateTransitionForDest {
+            dest_sys_id: 30_000_142,
+            now_ms: 0,
+            reply: None,
+        },
+        SystemCommand::ActivateStargateTransition {
+            gate_id: 1,
+            transition_ms: 1000,
+            now_ms_opt: None,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SetStargateActivationState {
+            gate_id: 1,
+            activation_state: 1,
+            transition_remaining_ms: 0,
+            activation_transition_at_ms: 0,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SettleStargateActivationStates {
+            now_ms: 0,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::MutateExternalActiveModule {
+            op: crate::system_actor::ExternalActiveModuleOp::ClearAll,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RepairCombatStateSync {
+            ball_id: 1,
+            hull_heal: 0.0,
+            armor_heal: 0.0,
+            shield_heal: 0.0,
+            wait_for_post_unlock: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SetBallPositionSync {
+            ball_id: 1,
+            position: DVec3::ZERO,
+            wait_for_post_unlock: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::StopBall {
+            ball_id: 1,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RemoveBallSync {
+            ball_id: 1,
+            emit_destruction_fx: false,
+            wait_for_post_unlock: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::CancelShipNaniteRepairsSync {
+            ship_id: 1,
+            refund_paste: false,
+            wait_for_post_unlock: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::CancelNaniteRepairsForShip {
+            ship_id: 1,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::TrySpawnAsteroid {
+            asteroid: super::AsteroidState {
+                asteroid_id: 1,
+                belt_id: 2,
+                type_id: 1230,
+                initial_units: 10,
+                remaining_units: 10,
+                unit_volume: 0.1,
+                depleted: false,
+                respawn_at_tick: None,
+            },
+            ball: ball.clone(),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SyncAsteroidQuantity {
+            asteroid_id: 1,
+            remaining_units: 0,
+            due_unix_on_belt_empty: 100,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::TrySpawnBallWithMeta {
+            ball: ball.clone(),
+            combat_state: CombatState::default(),
+            slim_meta: SlimItemMeta::default(),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::MarkBallNonFree {
+            ball_id: 1,
+            is_free: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::TrackModuleReloadSimSync {
+            module_id: 1,
+            ship_id: 1,
+            remaining_sim_s: 0.0,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::TryHandoffInSpaceObserver {
+            old_ball_id: 1,
+            new_ball_id: 2,
+            added_ball_ids: vec![],
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::TrySpawnBallWithCombat {
+            ball,
+            combat_state: CombatState::default(),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::UpdateCombatState {
+            ball_id: 1,
+            recompute_attrs: false,
+            mutator: Box::new(|_| {}),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ApplyDirectCombatDamage {
+            ball_id: 1,
+            damage: 10.0,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SyncShipBallparkStats {
+            ball_id: 1,
+            fresh: Box::new(CombatState::default()),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RespawnDepletedBeltsOnDowntime {
+            wait_for_post_unlock: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::TryStepManual {
+            dt: 1.0,
+            wait_for_post_unlock: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::TakePendingCycleActions {
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::MutateWarpState {
+            op: crate::system_actor::WarpStateMutOp::ClearAllForTest,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::FinishWarpForDock {
+            ball_id: 1,
+            landing_pos: None,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::FlushDirtyConditionCheckpointSync {
+            wait_for_post_unlock: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::StepFullTick {
+            dt: 1.0,
+            wait_for_post_unlock: false,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::TryRemoveModuleCycle {
+            ship_id: 1,
+            module_id: 2,
+            wait_for_post_unlock: false,
+            reply: oneshot::channel().0,
+        },
         #[cfg(any(test, feature = "testkit"))]
         SystemCommand::TestAccess {
             op: TestAccessOp::new(|_, _| {}),
@@ -1278,9 +1473,9 @@ fn system_command_all_variants_construct_and_match() {
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
     if cfg!(any(test, feature = "testkit")) {
-        assert_eq!(tags.len(), 160);
+        assert_eq!(tags.len(), 190);
     } else {
-        assert_eq!(tags.len(), 159);
+        assert_eq!(tags.len(), 189);
     }
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
@@ -1327,8 +1522,11 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[145], "HydrateWeaponEffects");
     assert_eq!(tags[157], "FlushWeaponEffectsCheckpoint");
     assert_eq!(tags[158], "ShutdownActor");
+    assert_eq!(tags[159], "RefreshStargateActivationStates");
+    assert_eq!(tags[187], "StepFullTick");
+    assert_eq!(tags[188], "TryRemoveModuleCycle");
     #[cfg(any(test, feature = "testkit"))]
-    assert_eq!(tags[159], "TestAccess");
+    assert_eq!(tags[189], "TestAccess");
 }
 
 #[test]
@@ -1458,6 +1656,32 @@ fn system_command_may_mutate_system_view_classifies_reads_vs_writes() {
             fx_parity: 0,
             wire_dbuffs: vec![],
         }),
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(!SystemCommand::TakePendingCycleActions {
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(!SystemCommand::FlushDirtyConditionCheckpointSync {
+        wait_for_post_unlock: false,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::StepFullTick {
+        dt: 1.0,
+        wait_for_post_unlock: false,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::ApplyDirectCombatDamage {
+        ball_id: 1,
+        damage: 10.0,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::MutateExternalActiveModule {
+        op: crate::system_actor::ExternalActiveModuleOp::ClearAll,
         reply: oneshot::channel().0,
     }
     .may_mutate_system_view());

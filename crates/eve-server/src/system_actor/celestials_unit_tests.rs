@@ -655,6 +655,7 @@ fn make_dummy_system_handle(cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>) ->
         target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
+        actor_flush_thread: Arc::new(std::sync::Mutex::new(None)),
         cooldown_persist_gate: Arc::new(super::super::CooldownPersistGate::default()),
     };
     h.ballpark.attach_actor_state(&h.actor_state);
@@ -1634,10 +1635,21 @@ async fn try_repair_combat_state_sync_emits_damage_event_persists_db_and_falls_b
     });
     held_rx.recv().unwrap();
 
-    // Keep the actor blocked on `ballpark.write()` via one `SetSpeedFraction` command, then fill
-    // the remaining 256-slot mpsc buffer so `try_send` hits `Full`.
-    let mut dummy_replies = Vec::new();
-    for _ in 0..300 {
+    // Keep the actor blocked on `ballpark.write()` via one `SetSpeedFraction` command first,
+    // then fill the remaining 256-slot mpsc buffer until `try_send` stably hits `Full`.
+    let (blk_tx, blk_rx) = tokio::sync::oneshot::channel();
+    sys.cmd_sender()
+        .try_send(SystemCommand::SetSpeedFraction {
+            ball_id: ship2_id,
+            fraction: 0.25,
+            reply: blk_tx,
+        })
+        .expect("enqueue actor blocker");
+    let mut dummy_replies = vec![blk_rx];
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let mut hit_full = false;
+    for _ in 0..512 {
         let (tx, rx) = tokio::sync::oneshot::channel();
         match sys.cmd_sender().try_send(SystemCommand::SetSpeedFraction {
             ball_id: ship2_id,
@@ -1645,18 +1657,29 @@ async fn try_repair_combat_state_sync_emits_damage_event_persists_db_and_falls_b
             reply: tx,
         }) {
             Ok(()) => dummy_replies.push(rx),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => break,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                if matches!(
+                    sys.cmd_sender().try_reserve(),
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+                ) {
+                    hit_full = true;
+                    break;
+                }
+            }
             Err(err) => panic!("unexpected try_send error: {err:?}"),
         }
-        std::thread::yield_now();
     }
-    assert_eq!(
-        sys.try_repair_combat_state_sync(ship2_id, 50.0, 40.0, 0.0),
-        crate::system_actor::TryRepairCombatOutcome::NeedsAsyncFallback
-    );
+    let outcome = hit_full.then(|| sys.try_repair_combat_state_sync(ship2_id, 50.0, 40.0, 0.0));
 
     release_tx.send(()).unwrap();
     bg.join().unwrap();
+
+    assert!(hit_full, "mailbox must stably hit Full while actor is blocked on ballpark.write()");
+    assert_eq!(
+        outcome,
+        Some(crate::system_actor::TryRepairCombatOutcome::NeedsAsyncFallback)
+    );
 
     let updated = sys
         .repair_combat_state(ship2_id, 50.0, 40.0, 0.0)
@@ -1941,4 +1964,707 @@ fn p2_2_execute_post_unlock_ops_enforces_assert_locks_disallowed_under_actor_loc
         let _ = execute_post_unlock_ops(Some(&ctx.db), None, ops, None, None);
     }));
     assert!(res.is_err(), "execute_post_unlock_ops must panic via assert_locks_disallowed when RANK_BALLPARK is held");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4c_sync_writers_concurrent_mailbox_and_view_publish_multi_thread() {
+    let ctx = test_ctx();
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+
+    let (char_id, ship_a, ship_b, ship_warp, ship_rm, mod_cyc, mod_ext) = (
+        90_000_001_i64,
+        799_001_i64,
+        799_002_i64,
+        799_003_i64,
+        799_004_i64,
+        799_101_i64,
+        799_102_i64,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(mod_cyc, make_item(mod_cyc, 2048, char_id, ship_a, InventoryFlag::LoSlot0, 1));
+    });
+
+    let mut ball_a = make_ball(ship_a, 587, DVec3::new(100.0, 0.0, 0.0));
+    ball_a.velocity = DVec3::ZERO;
+    ball_a.mode = MovementMode::Stop;
+    sys.try_spawn_ball_with_meta(
+        ball_a,
+        make_combat_state(100.0, 100.0, 100.0, 100.0),
+        SlimItemMeta { char_id: Some(char_id), ..Default::default() },
+    );
+    let warp_origin = DVec3::new(1_000.0, 0.0, 0.0);
+    let warp_dest = DVec3::new(100_000.0, 0.0, 0.0);
+    let mut warp_ball = make_ball(ship_warp, 587, warp_origin);
+    warp_ball.mode = MovementMode::Warp {
+        origin: warp_origin,
+        destination: warp_dest,
+        warp_speed_au_s: 3.0,
+        total_distance: DVec3::distance(warp_origin, warp_dest),
+        phase: eve_destiny::WarpPhase::Accelerating,
+        elapsed_warp_time: 0.0,
+    };
+    sys.try_spawn_ball_with_combat(warp_ball, make_combat_state(100.0, 100.0, 100.0, 100.0));
+    sys.track_player_or_fleet_warp(ship_warp, char_id);
+    sys.try_spawn_ball_with_combat(make_ball(ship_rm, 587, DVec3::ZERO), make_combat_state(50.0, 50.0, 50.0, 50.0));
+    sys.add_module_cycle(ActiveModuleCycle {
+        ship_id: ship_a,
+        module_id: mod_cyc,
+        module_type_id: 2048,
+        owner_char_id: Some(char_id),
+        duration_s: 10.0,
+        repeat: 1,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    sys.register_external_active_module_sync(ship_a, mod_ext);
+    assert!(sys.view().has_active_module(ship_a));
+
+    let local_scram = 3_i32;
+    let new_pos = DVec3::new(5_000.0, 6_000.0, 7_000.0);
+    let (h1, h2, h3, h4, h5, h6, h7, h8, h9, h10) = (
+        sys.clone(), sys.clone(), sys.clone(), sys.clone(), sys.clone(),
+        sys.clone(), sys.clone(), sys.clone(), sys.clone(), sys.clone(),
+    );
+    let (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10) = tokio::join!(
+        tokio::task::spawn_blocking(move || h1.try_set_ball_position(ship_a, new_pos)),
+        tokio::task::spawn_blocking(move || {
+            let ok = h2.try_update_combat_state(ship_a, move |cs| {
+                cs.warp_scramble_strength = local_scram;
+            });
+            assert!(ok);
+        }),
+        tokio::task::spawn_blocking(move || {
+            h3.try_spawn_ball_with_combat(
+                make_ball(ship_b, 587, DVec3::new(200.0, 0.0, 0.0)),
+                make_combat_state(80.0, 80.0, 80.0, 80.0),
+            );
+            assert!(h3.get_ball_position_sync(ship_b).is_some());
+        }),
+        tokio::task::spawn_blocking(move || {
+            h4.try_remove_ball(ship_rm);
+            assert!(h4.view().ball(ship_rm).is_none());
+        }),
+        tokio::task::spawn_blocking(move || {
+            assert!(h5.try_emit_destiny_event(
+                ship_a,
+                DestinyEvent::SetSpeedFraction { ball_id: ship_a, fraction: 0.4 },
+            ));
+        }),
+        tokio::task::spawn_blocking(move || {
+            let res = h6.finish_warp_for_dock(ship_warp, Some(DVec3::new(99_000.0, 0.0, 0.0)));
+            assert!(res.is_ok());
+            assert!(!h6.is_active_warp(ship_warp));
+        }),
+        tokio::task::spawn_blocking(move || {
+            let _ = h7.flush_dirty_condition_checkpoint_sync();
+        }),
+        tokio::task::spawn_blocking(move || {
+            let tick = h8.try_step_full_tick(1.0);
+            assert_eq!(h8.view().current_tick, tick);
+        }),
+        tokio::task::spawn_blocking(move || {
+            h9.try_remove_module_cycle(ship_a, mod_cyc);
+            assert!(!h9.has_active_module_cycle_sync(ship_a, mod_cyc));
+        }),
+        tokio::task::spawn_blocking(move || {
+            assert!(h10.unregister_external_active_module_sync(ship_a, mod_ext));
+        }),
+    );
+    for r in [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10] {
+        r.unwrap();
+    }
+    assert_eq!(sys.view().ball(ship_a).map(|b| b.position), Some(new_pos));
+    assert!(!sys.has_active_modules_or_cloak_sync(ship_a));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4c_rt101_try_remove_ball_for_db_mailbox_and_lifetime_isolation() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let h = ctx.systems.get_or_spawn(sys_id);
+    assert_eq!(
+        Arc::strong_count(&h.ballpark),
+        3,
+        "DbBallparkRegistry must never bump BallparkHandle strong count above 3"
+    );
+
+    let (b1, b2, ext_mod) = (799_201_i64, 799_202_i64, 799_203_i64);
+    for bid in [b1, b2] {
+        let mut cs = make_combat_state(100.0, 100.0, 100.0, 100.0);
+        cs.apply_jump_cloak_and_invuln_timers(45);
+        h.spawn_ball_with_meta(
+            make_ball(bid, 587, DVec3::new(50.0, 0.0, 0.0)),
+            cs,
+            SlimItemMeta { char_id: Some(90_000_001), is_cloaked: true, ..Default::default() },
+        )
+        .await
+        .unwrap();
+    }
+    h.register_external_active_module_sync(b1, ext_mod);
+    assert!(h.view().has_active_module(b1));
+    assert!(h.get_protection_snapshot(b1).await.unwrap().is_some());
+
+    // Unlocked call goes through mailbox synchronously and cleans view/protection/active-module state.
+    try_remove_ball_for_db(&ctx.db, sys_id, b1);
+    assert!(h.view().ball(b1).is_none());
+    assert!(!h.view().has_active_module(b1));
+    assert!(!h.active_module_ships.read().unwrap().contains(&b1));
+    assert!(h.get_protection_snapshot(b1).await.unwrap().is_none());
+
+    // Held-lock call enqueues through mailbox without rank violation or deadlock.
+    {
+        let bp_lock = eve_db::lock_rank::RankedRwLock::<(), { eve_db::lock_rank::RANK_BALLPARK }>::new(());
+        let _bp_guard = bp_lock.write().unwrap();
+        let st_lock = eve_db::lock_rank::RankedRwLock::<(), { eve_db::lock_rank::RANK_ACTOR_STATE }>::new(());
+        let _st_guard = st_lock.write().unwrap();
+        let world_lock = eve_db::lock_rank::RankedRwLock::<(), { eve_db::lock_rank::RANK_WORLD_INNER }>::new(());
+        let _world_guard = world_lock.write().unwrap();
+        try_remove_ball_for_db(&ctx.db, sys_id, b2);
+    }
+    assert!(h.get_ball_snapshot(b2).await.unwrap().is_none());
+    assert!(h.get_protection_snapshot(b2).await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4c_f01_bool_dispatchers_never_fabricate_true() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let h = ctx.systems.get_or_spawn(sys_id);
+    let (ship_a, ship_b, missing_ball, missing_mod) = (799_301_i64, 799_302_i64, 799_399_i64, 799_400_i64);
+    h.try_spawn_ball_with_combat(make_ball(ship_a, 587, DVec3::ZERO), make_combat_state(50.0, 50.0, 50.0, 50.0));
+    h.register_external_active_module_sync(ship_a, 888_001);
+
+    let mut seeded = h.snapshot_warp_state_for_test();
+    seeded.pending_warp_finished.insert(ship_a);
+    h.restore_warp_state_for_test(seeded);
+    assert!(h.view().pending_warp_finished.contains(&ship_a));
+
+    // Held lock: no boolean dispatcher or confirmed mutation may fabricate `true` / `Ok` / `Some`
+    // for either existing or non-existent entities.
+    {
+        let leaf = eve_db::lock_rank::RankedRwLock::<(), { eve_db::lock_rank::RANK_LEAF }>::new(());
+        let _guard = leaf.write().unwrap();
+        assert!(!h.consume_warp_finished(ship_a));
+        assert!(!h.try_handoff_in_space_observer(ship_a, ship_b, &[ship_b]));
+        assert!(!h.try_handoff_in_space_observer(missing_ball, ship_b, &[ship_b]));
+        assert!(!h.try_update_combat_state(ship_a, |_| {}));
+        assert!(!h.try_update_combat_state(missing_ball, |_| {}));
+        assert!(!h.try_recompute_combat_attributes(ship_a, |_| {}));
+        assert!(!h.try_recompute_combat_attributes(missing_ball, |_| {}));
+        assert!(!h.try_sync_ship_ballpark_stats(ship_a, &make_combat_state(10.0, 10.0, 10.0, 10.0)));
+        assert!(!h.try_sync_ship_ballpark_stats(missing_ball, &make_combat_state(10.0, 10.0, 10.0, 10.0)));
+        assert!(!h.try_push_set_state(ship_a));
+        assert!(!h.try_push_set_state(missing_ball));
+        assert!(!h.unregister_external_active_module_sync(ship_a, 888_001));
+        assert!(!h.unregister_external_active_module_sync(ship_a, missing_mod));
+        assert!(!h.try_emit_destiny_event(ship_a, DestinyEvent::Stop { ball_id: ship_a }));
+        assert!(!h.try_emit_destiny_event(missing_ball, DestinyEvent::Stop { ball_id: missing_ball }));
+        assert_eq!(h.try_apply_direct_combat_damage(ship_a, 10.0), None);
+        assert_eq!(h.try_apply_direct_combat_damage(missing_ball, 10.0), None);
+        assert!(h.flush_module_ewar_sync(ship_a, 888_001, false).is_err());
+    }
+    assert!(h.view().pending_warp_finished.contains(&ship_a));
+    assert!(h.is_module_active_sync(ship_a, 888_001));
+    assert!(h.consume_warp_finished(ship_a));
+    assert!(!h.consume_warp_finished(ship_a));
+
+    // Live actor (unlocked): non-existent ball/module always returns `false` / `None`.
+    assert!(!h.try_handoff_in_space_observer(missing_ball, ship_b, &[ship_b]));
+    assert!(!h.try_update_combat_state(missing_ball, |_| {}));
+    assert!(!h.try_recompute_combat_attributes(missing_ball, |_| {}));
+    assert!(!h.try_sync_ship_ballpark_stats(missing_ball, &make_combat_state(10.0, 10.0, 10.0, 10.0)));
+    assert!(!h.try_push_set_state(missing_ball));
+    assert!(!h.unregister_external_active_module_sync(ship_a, missing_mod));
+    assert!(!h.try_emit_destiny_event(missing_ball, DestinyEvent::Stop { ball_id: missing_ball }));
+    assert_eq!(h.try_apply_direct_combat_damage(missing_ball, 10.0), None);
+
+    // Stopped/closed actor: never fabricate `true` / `Some` / `Ok`.
+    assert!(ctx.systems.stop_system(sys_id).await);
+    assert!(!h.consume_warp_finished(ship_a));
+    assert!(!h.try_handoff_in_space_observer(ship_a, ship_b, &[ship_b]));
+    assert!(!h.try_update_combat_state(ship_a, |_| {}));
+    assert!(!h.try_recompute_combat_attributes(ship_a, |_| {}));
+    assert!(!h.try_sync_ship_ballpark_stats(ship_a, &make_combat_state(10.0, 10.0, 10.0, 10.0)));
+    assert!(!h.try_push_set_state(ship_a));
+    assert!(!h.unregister_external_active_module_sync(ship_a, 888_001));
+    assert!(!h.try_emit_destiny_event(ship_a, DestinyEvent::Stop { ball_id: ship_a }));
+    assert_eq!(h.try_apply_direct_combat_damage(ship_a, 10.0), None);
+    assert!(h.flush_module_ewar_sync(ship_a, 888_001, false).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4c_f02_closed_post_unlock_deact_hook_guards_actor_flush_thread() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let (char_id, ship_id, alive_ship_id, target_id, module_id) =
+        (90_000_302_i64, 799_311_i64, 799_314_i64, 799_312_i64, 799_313_i64);
+    let h = ctx.systems.get_or_spawn(sys_id);
+    h.try_spawn_ball_with_meta(
+        make_ball(ship_id, 587, DVec3::ZERO),
+        make_combat_state(100.0, 100.0, 100.0, 100.0),
+        SlimItemMeta { char_id: Some(char_id), ..Default::default() },
+    );
+    h.try_spawn_ball_with_combat(
+        make_ball(alive_ship_id, 587, DVec3::new(100.0, 0.0, 0.0)),
+        make_combat_state(100.0, 100.0, 100.0, 100.0),
+    );
+    h.record_active_ewar_start_sync(ship_id, module_id, target_id, "web").unwrap();
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id,
+        module_id,
+        module_type_id: 1978,
+        owner_char_id: Some(char_id),
+        duration_s: 10.0,
+        repeat: 1,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let hook_done = Arc::new(AtomicBool::new(false));
+    let flush_thread_ok = Arc::new(AtomicBool::new(false));
+    let ewar_ok = Arc::new(AtomicBool::new(false));
+    let ewar_view_cleared_immediately = Arc::new(AtomicBool::new(false));
+    let second_ewar_empty = Arc::new(AtomicBool::new(false));
+    let removed_destiny_false = Arc::new(AtomicBool::new(false));
+    let alive_destiny_true_and_visible = Arc::new(AtomicBool::new(false));
+    let (hd, ftok, eok, evc, see, rdf, adtv, h_hook) = (
+        Arc::clone(&hook_done),
+        Arc::clone(&flush_thread_ok),
+        Arc::clone(&ewar_ok),
+        Arc::clone(&ewar_view_cleared_immediately),
+        Arc::clone(&second_ewar_empty),
+        Arc::clone(&removed_destiny_false),
+        Arc::clone(&alive_destiny_true_and_visible),
+        h.clone(),
+    );
+    ctx.systems.set_module_deactivation_hook(Arc::new(move |_sid, _cid, _cyc| {
+        ftok.store(h_hook.is_on_actor_flush_thread(), Ordering::Release);
+        if let Ok(snap) = h_hook.flush_module_ewar_sync(ship_id, module_id, false) {
+            if !snap.started_targets.is_empty() {
+                eok.store(true, Ordering::Release);
+            }
+        }
+        evc.store(
+            !h_hook.view().ewar.active_ewar_starts.contains_key(&(ship_id, module_id)),
+            Ordering::Release,
+        );
+        if let Ok(snap2) = h_hook.flush_module_ewar_sync(ship_id, module_id, false) {
+            see.store(snap2.started_targets.is_empty() && snap2.projected_targets.is_empty(), Ordering::Release);
+        }
+        rdf.store(!h_hook.try_emit_destiny_event(ship_id, DestinyEvent::Stop { ball_id: ship_id }), Ordering::Release);
+        let ok_alive = h_hook.try_emit_destiny_event(
+            alive_ship_id,
+            DestinyEvent::SetSpeedFraction { ball_id: alive_ship_id, fraction: 0.25 },
+        );
+        let speed_now = h_hook.view().ball(alive_ship_id).map(|b| b.speed_fraction).unwrap_or(-1.0);
+        adtv.store(ok_alive && (speed_now - 0.25).abs() < 1e-6, Ordering::Release);
+        hd.store(true, Ordering::Release);
+    }));
+
+    let _ = h
+        .post_unlock_tx
+        .send(crate::system_actor::post_unlock::PostUnlockMsg::Shutdown);
+    for _ in 0..100 {
+        if h.post_unlock_tx.is_closed() { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(h.post_unlock_tx.is_closed());
+
+    let started = std::time::Instant::now();
+    h.try_remove_ball(ship_id);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "actor flush hook must not self-deadlock");
+    assert!(hook_done.load(Ordering::Acquire));
+    assert!(flush_thread_ok.load(Ordering::Acquire));
+    assert!(ewar_ok.load(Ordering::Acquire));
+    assert!(ewar_view_cleared_immediately.load(Ordering::Acquire));
+    assert!(second_ewar_empty.load(Ordering::Acquire));
+    assert!(removed_destiny_false.load(Ordering::Acquire));
+    assert!(alive_destiny_true_and_visible.load(Ordering::Acquire));
+    assert!(!h.is_on_actor_flush_thread());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4c_f03_dropped_reply_returns_full_or_closed_and_f04_mutator_safety() {
+    use std::sync::atomic::Ordering;
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let h = ctx.systems.get_or_spawn(sys_id);
+    let ship_id = 799_321_i64;
+    let mut cs = make_combat_state(100.0, 100.0, 100.0, 100.0);
+    cs.shield_hp = 50.0;
+    h.try_spawn_ball_with_combat(make_ball(ship_id, 587, DVec3::ZERO), cs);
+
+    // F-03: actor panic drops reply sender without timing out -> FullOrClosed / NeedsAsyncFallback / false.
+    h.panic_next_command_for_test.store(true, Ordering::SeqCst);
+    assert_eq!(
+        h.try_repair_combat_state_sync(ship_id, 0.0, 0.0, 25.0),
+        crate::system_actor::TryRepairCombatOutcome::NeedsAsyncFallback
+    );
+    h.panic_next_command_for_test.store(true, Ordering::SeqCst);
+    assert!(!h.try_emit_destiny_event(ship_id, DestinyEvent::Stop { ball_id: ship_id }));
+
+    // F-04: held lock returns false without rank panic or silent mutation; unlocked mutates cleanly;
+    // closure panic returns false without stalling the actor; direct combat damage returns confirmed Some(dead).
+    {
+        let leaf = eve_db::lock_rank::RankedRwLock::<(), { eve_db::lock_rank::RANK_LEAF }>::new(());
+        let _guard = leaf.write().unwrap();
+        assert!(!h.try_update_combat_state(ship_id, |c| c.capacitor = 99.0));
+        assert_eq!(h.try_apply_direct_combat_damage(ship_id, 10.0), None);
+    }
+    assert!((h.view().combat_state(ship_id).unwrap().capacitor - 100.0).abs() < 1e-6);
+    assert!(h.try_update_combat_state(ship_id, |c| c.capacitor = 42.0));
+    let panics_before = h.command_panics.load(Ordering::Acquire);
+    assert!(!h.try_update_combat_state(ship_id, |_c| panic!("injected mutator panic for f04")));
+    assert!(h.command_panics.load(Ordering::Acquire) > panics_before);
+    assert!(h.try_update_combat_state(ship_id, |c| c.is_cloaked = true));
+    let view = h.view();
+    let view_cs = view.combat_state(ship_id).expect("ship combat state present");
+    assert!((view_cs.capacitor - 42.0).abs() < 1e-6 && view_cs.is_cloaked);
+    assert_eq!(h.try_apply_direct_combat_damage(ship_id, 60.0), Some(false));
+    assert_eq!(h.try_apply_direct_combat_damage(ship_id, 500.0), Some(true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4c_r2_p1_01_actor_flush_thread_ewar_end_clears_view_before_fit_projection() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ctx = Arc::new(test_ctx());
+    let sys_id = 30_000_142_u32;
+    let (char1, ship1, char2, ship2, mod_tp) =
+        (90_000_001_i64, 799_411_i64, 90_000_402_i64, 799_412_i64, 799_413_i64);
+    let tp_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 379 && t.published)
+        .map(|t| t.type_id)
+        .unwrap_or(528);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&char1) {
+            c1.solar_system_id = sys_id;
+            c1.station_id = None;
+            c1.structure_id = None;
+            c1.active_ship_id = ship1;
+        }
+        if let Some(template) = snap.characters.get(&char1).cloned() {
+            let mut c2 = template;
+            c2.character_id = char2;
+            c2.user_id = 2;
+            c2.name = "TP Pilot 2".into();
+            c2.solar_system_id = sys_id;
+            c2.station_id = None;
+            c2.structure_id = None;
+            c2.active_ship_id = ship2;
+            snap.characters.insert(char2, c2);
+        }
+        snap.items.insert(ship1, make_item(ship1, 587, char1, sys_id as i64, InventoryFlag::None, 1));
+        snap.items.insert(ship2, make_item(ship2, 587, char2, sys_id as i64, InventoryFlag::None, 1));
+        snap.items.insert(mod_tp, make_item(mod_tp, tp_tid, char1, ship1, InventoryFlag::MedSlot0, 1));
+    });
+    let now_unix = ctx.db.clock().now_unix_secs();
+    ctx.db.acquire_online_lock(1, 1401, Some(char1), true, now_unix).unwrap();
+    ctx.db.acquire_online_lock(2, 1402, Some(char2), true, now_unix).unwrap();
+    let h = ctx.systems.get_or_spawn(sys_id);
+    h.try_spawn_ball_with_meta(
+        make_ball(ship1, 587, DVec3::ZERO),
+        make_combat_state(100.0, 100.0, 100.0, 100.0),
+        SlimItemMeta { char_id: Some(char1), ..Default::default() },
+    );
+    h.try_spawn_ball_with_meta(
+        make_ball(ship2, 587, DVec3::new(1_000.0, 0.0, 0.0)),
+        ctx.build_ship_combat_state(char2, ship2, 587),
+        SlimItemMeta { char_id: Some(char2), ..Default::default() },
+    );
+    let mut tp_eff = eve_dogma::DogmaItemState::from_sde(mod_tp, tp_tid, &ctx.sde);
+    tp_eff.base_attributes.insert(54, 50_000.0);
+    tp_eff.base_attributes.insert(554, 30.0);
+    let eff = eve_dogma::ProjectedEwarEffect {
+        source_module_id: mod_tp,
+        source_module_type_id: tp_tid,
+        charge_type_id: None,
+        distance: 5_000.0,
+        overloaded: false,
+        effective_module: tp_eff,
+    };
+    h.upsert_projected_ewar(ship1, ship2, eff).await.unwrap();
+    h.record_active_ewar_start_sync(ship1, mod_tp, ship2, "targetPainter").unwrap();
+    let _ = ctx.push_fit_projection_for_ship(ship2);
+    let _ = h.query_current_tick().await.unwrap();
+    assert!(!ctx.systems.ship_ewar_projections(ship2).is_empty());
+    let tp_mult_before = ctx.effective_target_painter_multiplier(ship2);
+    assert!(
+        tp_mult_before > 1.1,
+        "expected target painter multiplier > 1.1 before removal, got {tp_mult_before}"
+    );
+    let unpainted_sig_pre = ctx
+        .build_ship_combat_state(char2, ship2, 587)
+        .base_signature_radius
+        .expect("ship2 base_signature_radius");
+    let baseline_before = h.view().fit_projections[&ship2].baseline.signature_radius;
+    assert!(
+        (baseline_before - unpainted_sig_pre).abs() < 1e-3,
+        "expected FitProjection baseline signature_radius ({unpainted_sig_pre}) while consistent, got {baseline_before}"
+    );
+
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: ship1,
+        module_id: mod_tp,
+        module_type_id: tp_tid,
+        owner_char_id: Some(char1),
+        duration_s: 5.0,
+        repeat: 1,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let _ = ctx.drain_notifications_for_char(char1);
+    let _ = ctx.drain_notifications_for_char(char2);
+
+    let cleared_before_return = Arc::new(AtomicBool::new(false));
+    let ctx_hook = Arc::clone(&ctx);
+    let cbr = Arc::clone(&cleared_before_return);
+    ctx.systems.set_module_deactivation_hook(Arc::new(move |_sid, cid, cyc| {
+        let aff = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
+            &ctx_hook,
+            cid,
+            Some(sys_id),
+            cyc.ship_id,
+            cyc.module_id,
+        );
+        let ewar_empty = ctx_hook.systems.ship_ewar_projections(ship2).is_empty();
+        // Second immediate flush must emit zero duplicate `OnEwarEnd`.
+        let aff2 = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
+            &ctx_hook,
+            cid,
+            Some(sys_id),
+            cyc.ship_id,
+            cyc.module_id,
+        );
+        cbr.store(ewar_empty && aff.contains(&ship2) && aff2.is_empty(), Ordering::Release);
+    }));
+
+    let _ = h.post_unlock_tx.send(crate::system_actor::post_unlock::PostUnlockMsg::Shutdown);
+    for _ in 0..100 {
+        if h.post_unlock_tx.is_closed() { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(h.post_unlock_tx.is_closed());
+
+    h.try_remove_ball(ship1);
+    let _ = h.query_current_tick().await.unwrap();
+    assert!(cleared_before_return.load(Ordering::Acquire));
+    assert!(ctx.systems.ship_ewar_projections(ship2).is_empty());
+    let proj_after = h.view().fit_projections.get(&ship2).cloned().expect("ship2 FitProjection pushed");
+    let unpainted_sig = ctx
+        .build_ship_combat_state(char2, ship2, 587)
+        .base_signature_radius
+        .expect("ship2 base_signature_radius");
+    assert!(
+        (proj_after.baseline.signature_radius - unpainted_sig).abs() < 1e-3,
+        "FitProjection must reflect un-painted signature_radius ({unpainted_sig}), got {}",
+        proj_after.baseline.signature_radius
+    );
+    let notifs1: Vec<_> = ctx
+        .drain_notifications_for_char(char1)
+        .into_iter()
+        .filter(|n| n.event == "OnEwarEnd")
+        .collect();
+    assert_eq!(notifs1.len(), 1, "expected exactly 1 OnEwarEnd for attacker without duplicates");
+    let notifs2: Vec<_> = ctx
+        .drain_notifications_for_char(char2)
+        .into_iter()
+        .filter(|n| n.event == "OnEwarEnd")
+        .collect();
+    assert_eq!(notifs2.len(), 1, "expected exactly 1 OnEwarEnd for target without duplicates");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4c_r2_p1_02_step_full_tick_finalizes_deact_and_view_before_tick_broadcast() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let (char_id, ship_id, target_id, cloak_mod_id) =
+        (90_000_501_i64, 799_511_i64, 799_512_i64, 799_513_i64);
+    let h = ctx.systems.get_or_spawn(sys_id);
+    let mut cloak_cs = make_combat_state(100.0, 100.0, 100.0, 100.0);
+    cloak_cs.is_cloaked = true;
+    cloak_cs.is_covert_cloak = true;
+    cloak_cs.cloak_velocity_multiplier = Some(0.25);
+    h.try_spawn_ball_with_meta(
+        make_ball(ship_id, 587, DVec3::ZERO),
+        cloak_cs.clone(),
+        SlimItemMeta { char_id: Some(char_id), is_cloaked: true, ..Default::default() },
+    );
+    h.record_active_ewar_start_sync(ship_id, cloak_mod_id, target_id, "webify").unwrap();
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id,
+        module_id: cloak_mod_id,
+        module_type_id: 11578,
+        effect_name: "cloakingWarpSafe".into(),
+        owner_char_id: Some(char_id),
+        duration_s: 1.0,
+        elapsed_s: 0.5,
+        repeat: 0,
+        reactivation_delay_s: 15.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let post_hook_hits = Arc::new(AtomicUsize::new(0));
+    let phi = Arc::clone(&post_hook_hits);
+    ctx.systems.set_module_deactivation_post_unlock_hook((
+        Arc::new(|_, _, _| {}),
+        Arc::new(move |_, _, _, _| {
+            phi.fetch_add(1, Ordering::SeqCst);
+        }),
+    ));
+
+    let mut rx = h.subscribe();
+    let h_step = h.clone();
+    let step_join = tokio::task::spawn_blocking(move || h_step.try_step_full_tick(1.0));
+    let _bcast = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("TickBroadcast arrived")
+        .expect("TickBroadcast ok");
+    let view_on_broadcast = h.view();
+    assert!(
+        !view_on_broadcast
+            .ewar
+            .active_ewar_starts
+            .contains_key(&(ship_id, cloak_mod_id)),
+        "TickBroadcast subscribers must see EWAR finalized before TickBroadcast: tick={} cycles={} ewar={:?} cooldowns={:?}",
+        view_on_broadcast.current_tick,
+        view_on_broadcast.active_module_cycles.len(),
+        view_on_broadcast.ewar.active_ewar_starts,
+        view_on_broadcast.module_cooldowns.reactivation_cooldowns
+    );
+    assert!(
+        view_on_broadcast
+            .module_cooldowns
+            .reactivation_cooldowns
+            .contains_key(&(ship_id, cloak_mod_id, 11578)),
+        "TickBroadcast subscribers must see reactivation cooldown recorded before TickBroadcast"
+    );
+    step_join.await.unwrap();
+    for _ in 0..100 {
+        if post_hook_hits.load(Ordering::SeqCst) >= 1 { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(post_hook_hits.load(Ordering::SeqCst), 1);
+
+    // CurrentThread path (`TickEnvRefs::from_handle`) must honor `module_deactivation_post_unlock_hook`
+    // directly even when `set_module_deactivation_hook` was not installed separately.
+    let ct_hits = Arc::new(AtomicUsize::new(0));
+    let ct_hits_hook = Arc::clone(&ct_hits);
+    let view_ewar_cleared_ct = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async move {
+            let ctx_ct = test_ctx();
+            let h_ct = ctx_ct.systems.get_or_spawn(sys_id);
+            h_ct.try_spawn_ball_with_meta(
+                make_ball(ship_id, 587, DVec3::ZERO),
+                cloak_cs,
+                SlimItemMeta { char_id: Some(char_id), is_cloaked: true, ..Default::default() },
+            );
+            h_ct.record_active_ewar_start_sync(ship_id, cloak_mod_id, target_id, "webify").unwrap();
+            h_ct.add_module_cycle(ActiveModuleCycle {
+                ship_id,
+                module_id: cloak_mod_id,
+                module_type_id: 11578,
+                effect_name: "cloakingWarpSafe".into(),
+                owner_char_id: Some(char_id),
+                duration_s: 1.0,
+                elapsed_s: 0.5,
+                repeat: 0,
+                reactivation_delay_s: 15.0,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            ctx_ct.systems.set_module_deactivation_post_unlock_hook((
+                Arc::new(|_, _, _| {}),
+                Arc::new(move |_, _, _, _| {
+                    ct_hits_hook.fetch_add(1, Ordering::SeqCst);
+                }),
+            ));
+            let mut rx_ct = h_ct.subscribe();
+            let _ = h_ct.try_step_full_tick(1.0);
+            let _ = rx_ct.try_recv().expect("TickBroadcast emitted on current_thread");
+            !h_ct.view().ewar.active_ewar_starts.contains_key(&(ship_id, cloak_mod_id))
+        })
+    })
+    .join()
+    .unwrap();
+    assert!(view_ewar_cleared_ct);
+    assert_eq!(ct_hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4c_r2_p1_03_closed_worker_direct_flush_panic_keeps_actor_alive_and_delivers_replies() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let (char_id, ship_id, mod_id) = (90_000_601_i64, 799_611_i64, 799_612_i64);
+    let h = ctx.systems.get_or_spawn(sys_id);
+    h.try_spawn_ball_with_meta(
+        make_ball(ship_id, 587, DVec3::ZERO),
+        make_combat_state(100.0, 100.0, 100.0, 100.0),
+        SlimItemMeta { char_id: Some(char_id), ..Default::default() },
+    );
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id,
+        module_id: mod_id,
+        module_type_id: 1978,
+        owner_char_id: Some(char_id),
+        duration_s: 10.0,
+        repeat: 1,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    ctx.systems.set_module_deactivation_hook(Arc::new(|_sid, _cid, _cyc| {
+        panic!("injected deact hook panic during closed-worker actor flush");
+    }));
+    let _ = h.post_unlock_tx.send(crate::system_actor::post_unlock::PostUnlockMsg::Shutdown);
+    for _ in 0..100 {
+        if h.post_unlock_tx.is_closed() { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(h.post_unlock_tx.is_closed());
+
+    let panics_before = h.command_panics.load(Ordering::Acquire);
+    let (rm_tx, rm_rx) = tokio::sync::oneshot::channel();
+    h.cmd_sender()
+        .send(crate::system_actor::SystemCommand::RemoveBallSync {
+            ball_id: ship_id,
+            emit_destruction_fx: false,
+            wait_for_post_unlock: true,
+            reply: rm_tx,
+        })
+        .await
+        .unwrap();
+    rm_rx.await.expect("batch_deferred_db_replies must still deliver after direct flush panic");
+    assert!(h.command_panics.load(Ordering::Acquire) > panics_before);
+    assert!(!h.is_on_actor_flush_thread());
+    assert!(!h.cmd_sender().is_closed());
+
+    // Also verify `flush_post_unlock_actions_on_actor` catches individual panics without killing actor
+    // and still executes subsequent queued actions.
+    let panics_mid = h.command_panics.load(Ordering::Acquire);
+    let second_action_ran = Arc::new(AtomicBool::new(false));
+    let second_cl = Arc::clone(&second_action_ran);
+    h.enqueue_post_unlock_action(Box::new(|| {
+        panic!("injected post_unlock_action panic");
+    }));
+    h.enqueue_post_unlock_action(Box::new(move || {
+        second_cl.store(true, Ordering::Release);
+    }));
+    assert!(h.query_current_tick().await.is_ok());
+    assert!(second_action_ran.load(Ordering::Acquire));
+    assert!(h.command_panics.load(Ordering::Acquire) > panics_mid);
+    assert!(!h.is_on_actor_flush_thread());
 }

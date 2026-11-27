@@ -250,7 +250,7 @@ pub(super) fn set_homefront_relay_tethered(
     tethered: bool,
 ) {
     if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
-        let _ = sys_h.try_update_combat_state(relay_id, |cs| {
+        let _ = sys_h.try_update_combat_state(relay_id, move |cs| {
             cs.is_tethered = tethered;
         });
     }
@@ -339,24 +339,16 @@ pub(super) fn apply_homefront_direct_damage_in_space(
     target_id: i64,
     dmg: f64,
 ) -> bool {
-    let mut destroyed = false;
-    if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
-        sys_h.try_update_combat_state(target_id, |cs| {
-            let mut rem = dmg;
-            let ds = rem.min(cs.shield_hp);
-            cs.shield_hp -= ds;
-            rem -= ds;
-            let da = rem.min(cs.armor_hp);
-            cs.armor_hp -= da;
-            rem -= da;
-            cs.structure_hp = (cs.structure_hp - rem).max(0.0);
-            destroyed = cs.structure_hp <= 0.0;
-        });
-        if destroyed {
-            sys_h.try_remove_destroyed_ball(target_id);
-        }
+    let Some(sys_h) = ctx.systems.get_handle(sys_id) else {
+        return false;
+    };
+    let Some(dead) = sys_h.try_apply_direct_combat_damage(target_id, dmg) else {
+        return false;
+    };
+    if dead {
+        sys_h.try_remove_destroyed_ball(target_id);
     }
-    destroyed
+    dead
 }
 
 fn validate_finite_non_negative(name: &str, val: f64) -> Result<(), BridgeRpcError> {

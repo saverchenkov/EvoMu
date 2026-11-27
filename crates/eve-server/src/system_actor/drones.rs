@@ -662,47 +662,26 @@ pub(crate) fn ensure_active_drones_hydrated_sync(handle: &SystemHandle) {
     );
 }
 
-#[derive(Clone, Copy)]
-enum FlushTarget<'a> {
-    Handle(&'a SystemHandle),
-    Sender(&'a tokio::sync::mpsc::Sender<SystemCommand>),
+fn send_drone_flush_step<P: Send, T: Send + 'static>(
+    handle: &SystemHandle,
+    payload: P,
+    make_cmd: impl FnOnce(P, tokio::sync::oneshot::Sender<Result<T, String>>) -> SystemCommand + Send,
+    direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> Result<T, String>,
+) -> Option<T> {
+    dispatch_actor_sync_no_flush_with_deadline(
+        handle, "ActiveDroneFlushStep", ACTOR_CMD_TIMEOUT, payload, make_cmd, direct_fn,
+    ).ok()
 }
 
-impl<'a> FlushTarget<'a> {
-    fn send_sync<P: Send, T: Send + 'static>(
-        self,
-        payload: P,
-        make_cmd: impl FnOnce(P, tokio::sync::oneshot::Sender<Result<T, String>>) -> SystemCommand + Send,
-        direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> Result<T, String>,
-    ) -> Option<T> {
-        match self {
-            Self::Handle(h) => dispatch_actor_sync_no_flush_with_deadline(
-                h, "ActiveDroneFlushStep", ACTOR_CMD_TIMEOUT, payload, make_cmd, direct_fn,
-            ).ok(),
-            Self::Sender(tx) if !tx.is_closed() => {
-                let fut = async {
-                    let (rtx, rrx) = tokio::sync::oneshot::channel();
-                    tokio::time::timeout(ACTOR_CMD_TIMEOUT, tx.send(make_cmd(payload, rtx))).await.ok()?.ok()?;
-                    tokio::time::timeout(ACTOR_CMD_TIMEOUT, rrx).await.ok()?.ok()?.ok()
-                };
-                match tokio::runtime::Handle::try_current() {
-                    Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread => None,
-                    Ok(h) => tokio::task::block_in_place(|| h.block_on(fut)),
-                    Err(_) => tokio::runtime::Builder::new_current_thread().enable_time().build().ok().and_then(|rt| rt.block_on(fut)),
-                }
-            }
-            Self::Sender(_) => None,
-        }
-    }
-}
-
-fn flush_sync_with_target(sys_id: SolarSystemId, shared: &ActiveDronesSharedCtx, target: FlushTarget<'_>, blocking: bool) {
+fn flush_sync_from_handle(handle: &SystemHandle, shared: &ActiveDronesSharedCtx, blocking: bool) {
+    let sys_id = handle.solar_system_id;
     if !eve_db::lock_rank::held_lock_ranks().is_empty() { return; }
     let (dirty, needs) = active_drone_flush_flags(shared);
     if !dirty && !needs { return; }
     if needs {
         let Some((drones, legacy_dirty)) = read_sqlite_for_shared(shared, sys_id, blocking) else { return; };
-        let _ = target.send_sync(
+        let _ = send_drone_flush_step(
+            handle,
             (drones, legacy_dirty),
             |(drones, legacy_dirty), reply| SystemCommand::HydrateActiveDronesFromSqlite { drones, legacy_dirty, reply },
             |ctx, (drones, legacy_dirty)| {
@@ -711,13 +690,15 @@ fn flush_sync_with_target(sys_id: SolarSystemId, shared: &ActiveDronesSharedCtx,
             },
         );
     }
-    if let Some(Some((seq, entries))) = target.send_sync(
+    if let Some(Some((seq, entries))) = send_drone_flush_step(
+        handle,
         (),
         |_, reply| SystemCommand::SnapshotDirtyActiveDrones { reply },
         |ctx, _| Ok(capture_dirty_active_drones_snapshot(ctx.actor_st).map(|(s, _, e)| (s, e))),
     ) {
         if write_sqlite_for_shared(shared, sys_id, seq, &entries, blocking).is_persisted() {
-            let _ = target.send_sync(
+            let _ = send_drone_flush_step(
+                handle,
                 seq,
                 |seq, reply| SystemCommand::CommitActiveDronesFlushed { seq, reply },
                 |ctx, seq| { finish_flush_in_actor(ctx.ballpark, ctx.actor_st, 0, seq); Ok(()) },
@@ -750,23 +731,15 @@ pub(in crate::system_actor) async fn flush_from_handle_async(handle: &SystemHand
     }
 }
 
-pub(in crate::system_actor) fn try_flush_from_sender(
-    solar_system_id: SolarSystemId,
-    cmd_tx: &tokio::sync::mpsc::Sender<SystemCommand>,
-    shared: &ActiveDronesSharedCtx,
-) {
-    flush_sync_with_target(solar_system_id, shared, FlushTarget::Sender(cmd_tx), false);
-}
-
 pub(in crate::system_actor) fn try_flush_from_handle(handle: &SystemHandle) {
     if let Some(shared) = handle.ballpark.drone_hydration_shared() {
-        flush_sync_with_target(handle.solar_system_id, shared, FlushTarget::Handle(handle), false);
+        flush_sync_from_handle(handle, shared, false);
     }
 }
 
 pub(in crate::system_actor) fn flush_from_handle(handle: &SystemHandle) {
     if let Some(shared) = handle.ballpark.drone_hydration_shared() {
-        flush_sync_with_target(handle.solar_system_id, shared, FlushTarget::Handle(handle), true);
+        flush_sync_from_handle(handle, shared, true);
     }
 }
 

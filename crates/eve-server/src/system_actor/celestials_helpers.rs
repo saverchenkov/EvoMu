@@ -4,9 +4,7 @@
 
 use super::{BallparkHandle, SystemHandle};
 use crate::system_actor::post_unlock;
-use eve_db::lock_rank::{
-    assert_locks_below, held_lock_ranks, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_LEAF,
-};
+use eve_db::lock_rank::{held_lock_ranks, RankedRwLock, RANK_LEAF};
 use eve_destiny::{BallId, Ballpark};
 use eve_sde::SolarSystemId;
 use glam::DVec3;
@@ -46,15 +44,8 @@ pub(crate) fn send_tick_broadcast_sequenced(
 #[derive(Clone)]
 struct DbBallparkEntry {
     ballpark: std::sync::Weak<BallparkHandle>,
-    actor_state: std::sync::Weak<RankedRwLock<crate::system_actor::SystemActorState, RANK_ACTOR_STATE>>,
-    ball_positions: std::sync::Weak<BallPositionSyncCache>,
-    scrambled_balls: std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
-    active_module_ships: std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
-    view_tx: std::sync::Weak<tokio::sync::watch::Sender<Arc<crate::system_actor::SystemView>>>,
-    tidi_factor_bits: std::sync::Weak<std::sync::atomic::AtomicU64>,
     cmd_tx: tokio::sync::mpsc::WeakSender<crate::system_actor::SystemCommand>,
-    drone_hydration: crate::system_actor::drones::ActiveDronesSharedCtx,
-    weapon_effects_coord: Option<std::sync::Weak<crate::system_actor::WeaponEffectsFlushCoord>>,
+    handle: Option<std::sync::Weak<SystemHandle>>,
 }
 
 const DB_BALLPARK_REGISTRY_SLOT: &str = "eve_server.system_actor.db_ballpark_registry";
@@ -67,10 +58,11 @@ fn db_ballpark_registry(db: &eve_db::WorldRepository) -> Arc<DbBallparkRegistry>
     })
 }
 
-pub(crate) fn register_db_system_ballpark(
+fn insert_db_system_ballpark(
     db: &Arc<eve_db::WorldRepository>,
     solar_system_id: SolarSystemId,
     handle: &SystemHandle,
+    weak_handle: Option<std::sync::Weak<SystemHandle>>,
 ) {
     let reg = db_ballpark_registry(db);
     let mut g = reg.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -81,21 +73,27 @@ pub(crate) fn register_db_system_ballpark(
         solar_system_id,
         DbBallparkEntry {
             ballpark: Arc::downgrade(&handle.ballpark),
-            actor_state: Arc::downgrade(&handle.actor_state),
-            ball_positions: Arc::downgrade(&handle.ball_positions),
-            scrambled_balls: Arc::downgrade(&handle.scrambled_balls),
-            active_module_ships: Arc::downgrade(&handle.active_module_ships),
-            view_tx: Arc::downgrade(&handle.view_tx),
-            tidi_factor_bits: Arc::downgrade(&handle.tidi_factor_bits),
             cmd_tx: handle.cmd_tx.downgrade(),
-            drone_hydration: handle.ballpark.drone_hydration_shared().cloned().unwrap_or_default(),
-            weapon_effects_coord: handle
-                .view()
-                .weapon_effects_coord
-                .as_ref()
-                .map(Arc::downgrade),
+            handle: weak_handle,
         },
     );
+}
+
+#[cfg(test)]
+pub(crate) fn register_db_system_ballpark(
+    db: &Arc<eve_db::WorldRepository>,
+    solar_system_id: SolarSystemId,
+    handle: &SystemHandle,
+) {
+    insert_db_system_ballpark(db, solar_system_id, handle, None);
+}
+
+pub(crate) fn register_db_system_ballpark_arc(
+    db: &Arc<eve_db::WorldRepository>,
+    solar_system_id: SolarSystemId,
+    handle: &Arc<SystemHandle>,
+) {
+    insert_db_system_ballpark(db, solar_system_id, handle, Some(Arc::downgrade(handle)));
 }
 
 /// Clears the DB ballpark entry for `(db, solar_system_id)` only if it still points at `handle`.
@@ -314,7 +312,7 @@ pub(crate) fn sync_ball_positions(
     leaf_write_value(&cache.tethered_balls, leaf_held, teth);
 }
 
-/// Synchronously removes `ball_id` from `solar_system_id`'s `Ballpark` if spawned for `db`.
+/// Removes `ball_id` from `solar_system_id`'s actor via mailbox if registered for `db` (`RT-101`, `#1342`).
 pub fn try_remove_ball_for_db(
     db: &Arc<eve_db::WorldRepository>,
     solar_system_id: SolarSystemId,
@@ -330,121 +328,64 @@ pub fn try_remove_ball_for_db(
                 .get(&solar_system_id)
                 .cloned()
         });
-    if let Some(entry) = entry {
-        if let (Some(bp_arc), Some(pos_arc), Some(scram_arc)) = (
-            entry.ballpark.upgrade(),
-            entry.ball_positions.upgrade(),
-            entry.scrambled_balls.upgrade(),
-        ) {
-            let st_opt = entry.actor_state.upgrade();
-            let held = held_lock_ranks();
-            let ballpark_or_higher_held = held.iter().any(|&r| r >= RANK_BALLPARK);
-            let leaf_held = held.iter().any(|&r| r >= RANK_LEAF);
-            let remove_with =
-                |bp: &mut Ballpark, mut st_opt: Option<&mut crate::system_actor::SystemActorState>| {
-                    let removed_ball = bp.remove_ball(ball_id).is_some();
-                    let (mut removed_ext, mut removed_drone) = (false, false);
-                    if let Some(st) = st_opt.as_mut() {
-                        st.protection_registry.remove(&ball_id);
-                        removed_drone = st.active_drones_in_space.contains_key(&ball_id);
-                        crate::system_actor::drones::clear_removed_ball_drones_in_state(st, ball_id);
-                        let removed_we = crate::system_actor::weapon_effects::clear_removed_ball_weapon_effects_in_state(st, ball_id);
-                        if st.active_drones_checkpoint_dirty || st.weapon_effects_dirty {
-                            st.hibernated.store(false, std::sync::atomic::Ordering::Relaxed);
-                            st.hibernated_since_unix.store(0, std::sync::atomic::Ordering::Relaxed);
-                            st.idle_ticks.store(0, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        let before = st.external_active_modules.len();
-                        st.external_active_modules.retain(|&(sid, _)| sid != ball_id);
-                        removed_ext = st.external_active_modules.len() != before;
-                        if removed_ext {
-                            if let Some(mod_arc) = entry.active_module_ships.upgrade() {
-                                let mut mods: std::collections::HashSet<BallId> =
-                                    st.active_module_cycles.iter().map(|c| c.ship_id).collect();
-                                mods.extend(st.external_active_modules.iter().map(|&(sid, _)| sid));
-                                leaf_write_value(&mod_arc, leaf_held, mods);
-                            }
-                        }
-                        removed_drone |= removed_we;
-                    }
-                    if removed_ball || removed_ext || removed_drone {
-                        if let Some(vtx) = entry.view_tx.upgrade() {
-                            let tidi = entry
-                                .tidi_factor_bits
-                                .upgrade()
-                                .map(|b| {
-                                    f64::from_bits(b.load(std::sync::atomic::Ordering::Relaxed))
-                                        .clamp(0.1, 1.0)
-                                })
-                                .unwrap_or(1.0);
-                            let prev = vtx.borrow().clone();
-                            let next = crate::system_actor::SystemView::from_ballpark(
-                                bp,
-                                st_opt.as_ref().map(|s| &**s),
-                                tidi,
-                                Some(prev.as_ref()),
-                            );
-                            let _ = vtx.send(Arc::new(next));
-                        }
-                    }
-                };
-            if ballpark_or_higher_held {
-                assert_locks_below(RANK_ACTOR_STATE + 1);
-                if let Ok(mut bp) = bp_arc.try_write_unranked() {
-                    if let Some(st_arc) = st_opt.as_ref() {
-                        let Ok(mut st) = st_arc.try_write_unranked() else {
-                            return;
-                        };
-                        remove_with(&mut bp, Some(&mut st));
-                    } else {
-                        remove_with(&mut bp, None);
-                    }
-                    sync_ball_positions(&bp, &pos_arc, &scram_arc);
-                }
-                if let Some(cmd_tx) = entry.cmd_tx.upgrade() {
-                    if let Some(we_coord) = entry
-                        .weapon_effects_coord
-                        .as_ref()
-                        .and_then(std::sync::Weak::upgrade)
-                    {
-                        crate::system_actor::weapon_effects::try_flush_from_sender(
-                            solar_system_id,
-                            &cmd_tx,
-                            &we_coord,
-                        );
-                    }
-                }
-            } else {
-                {
-                    let mut bp = bp_arc.write().unwrap_or_else(|e| e.into_inner());
-                    if let Some(st_arc) = st_opt.as_ref() {
-                        let mut st = st_arc.write().unwrap_or_else(|e| e.into_inner());
-                        remove_with(&mut bp, Some(&mut st));
-                    } else {
-                        remove_with(&mut bp, None);
-                    }
-                    sync_ball_positions(&bp, &pos_arc, &scram_arc);
-                }
-                if let Some(cmd_tx) = entry.cmd_tx.upgrade() {
-                    crate::system_actor::drones::try_flush_from_sender(
-                        solar_system_id,
-                        &cmd_tx,
-                        &entry.drone_hydration,
-                    );
-                    if let Some(we_coord) = entry
-                        .weapon_effects_coord
-                        .as_ref()
-                        .and_then(std::sync::Weak::upgrade)
-                    {
-                        crate::system_actor::weapon_effects::try_flush_from_sender(
-                            solar_system_id,
-                            &cmd_tx,
-                            &we_coord,
-                        );
-                    }
-                }
-            }
-        }
+    let Some(entry) = entry else {
+        return;
+    };
+    if let Some(handle) = entry.handle.as_ref().and_then(std::sync::Weak::upgrade) {
+        handle.try_remove_ball(ball_id);
+        return;
+    }
+    let Some(cmd_tx) = entry.cmd_tx.upgrade() else {
+        return;
+    };
+    if !held_lock_ranks().is_empty() {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let _ = cmd_tx.try_send(crate::system_actor::SystemCommand::RemoveBallSync {
+            ball_id,
+            emit_destruction_fx: false,
+            wait_for_post_unlock: false,
+            reply: tx,
+        });
+        return;
+    }
+    let _ = crate::system_actor::handle_cmds::dispatch_cmd_tx_sync_reply(
+        &cmd_tx,
+        solar_system_id,
+        "RemoveBallForDb",
+        crate::system_actor::ball_ops::ACTOR_CMD_TIMEOUT,
+        |reply| crate::system_actor::SystemCommand::RemoveBallSync {
+            ball_id,
+            emit_destruction_fx: false,
+            wait_for_post_unlock: true,
+            reply,
+        },
+    );
+}
+
+/// Non-blocking mailbox enqueue for `post_unlock_worker` (`#1170` W6, `RT-101`).
+pub(crate) fn try_enqueue_remove_ball_for_db(
+    db: &Arc<eve_db::WorldRepository>,
+    solar_system_id: SolarSystemId,
+    ball_id: BallId,
+) {
+    let cmd_tx_opt = db
+        .get_transient_runtime_slot::<DbBallparkRegistry>(DB_BALLPARK_REGISTRY_SLOT)
+        .flatten()
+        .and_then(|reg| {
+            reg.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&solar_system_id)
+                .and_then(|entry| entry.cmd_tx.upgrade())
+        });
+    if let Some(cmd_tx) = cmd_tx_opt {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let _ = cmd_tx.try_send(crate::system_actor::SystemCommand::RemoveBallSync {
+            ball_id,
+            emit_destruction_fx: false,
+            wait_for_post_unlock: false,
+            reply: tx,
+        });
     }
 }
 
@@ -1400,30 +1341,28 @@ impl SystemHandle {
     /// Stops an arriving warp before docking, optionally snapping `ball.position` to the
     /// verified `landing_pos` inside the docking perimeter so subsequent post-settle checks
     /// stay within range.
+    ///
+    /// Requires no ranked locks held by the caller (panics under held locks).
     pub(crate) fn finish_warp_for_dock(
         &self,
         ball_id: BallId,
         landing_pos: Option<DVec3>,
     ) -> Result<u64, String> {
-        let tick = {
-            let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            if let Some(pos) = landing_pos.filter(|p| p.is_finite()) {
-                if let Some(ball) = bp.balls.get_mut(&ball_id) {
-                    if matches!(ball.mode, eve_destiny::MovementMode::Warp { .. }) {
-                        ball.position = pos;
-                    }
-                }
-            }
-            bp.force_stop_warp(ball_id)?;
-            crate::system_actor::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-            bp.current_tick
-        };
+        let tick = crate::system_actor::ball_ops::dispatch_actor_sync_with_deadline(
+            self,
+            "FinishWarpForDock",
+            crate::system_actor::ball_ops::ACTOR_CMD_TIMEOUT,
+            (ball_id, landing_pos),
+            |(ball_id, landing_pos), reply| crate::system_actor::SystemCommand::FinishWarpForDock {
+                ball_id,
+                landing_pos,
+                reply,
+            },
+            |ctx, (ball_id, landing_pos)| {
+                crate::system_actor::handle_cmds::finish_warp_for_dock_in_ctx(ctx, ball_id, landing_pos)
+            },
+        )?;
         self.record_warp_stop(ball_id);
-        {
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            st.warp_state.clear_ball(ball_id, true);
-        }
-        self.publish_view();
         Ok(tick)
     }
 
@@ -1478,31 +1417,38 @@ impl SystemHandle {
 
     /// Synchronously collects dirty condition checkpoint entries and routes persistence through this
     /// system's ordered `post_unlock_worker` (`W1`, `W2`, `W3`, `W6`, `#1170`, `#919`).
+    ///
+    /// Requires no ranked locks held by the caller (panics under held locks). When invoked from
+    /// the post-unlock worker (`wait_for_post_unlock == false`), SQLite persistence runs
+    /// asynchronously on the worker and this returns `0` without blocking (invocations on
+    /// `actor_flush_thread`, where the worker is closed, refuse enqueueing and return `0`).
     pub fn flush_dirty_condition_checkpoint_sync(&self) -> usize {
-        let caller_can_wait = post_unlock::caller_can_wait_for_handle(self);
-        let written = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let ticket = {
-            let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
-            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-            let entries = collect_dirty_condition_checkpoint_entries(&mut st, &bp);
-            if !entries.is_empty() && st.db_opt.is_some() {
-                let mut ops = post_unlock::PostUnlockOps::default();
-                ops.push(post_unlock::PostUnlockIntent::ConditionCheckpoint {
-                    solar_system_id: self.solar_system_id,
-                    entries,
-                    written_out: Some(std::sync::Arc::clone(&written)),
-                });
-                post_unlock::enqueue_post_unlock_or_barrier_under_locks(
-                    self, st.db_opt.as_ref(), st.sde_opt.as_ref(), ops, caller_can_wait,
-                )
-            } else {
-                post_unlock::enqueue_post_unlock_or_barrier_under_locks(
-                    self, st.db_opt.as_ref(), st.sde_opt.as_ref(), post_unlock::PostUnlockOps::default(), caller_can_wait,
-                )
-            }
-        };
-        post_unlock::finish_post_unlock_after_unlock(self, None, None, ticket);
-        written.load(std::sync::atomic::Ordering::Acquire)
+        let wait_for_post_unlock = post_unlock::caller_can_wait_for_handle(self);
+        let written_direct = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let written_direct_clone = Arc::clone(&written_direct);
+        let actor_written = crate::system_actor::ball_ops::dispatch_actor_sync_reply_with_deadline(
+            self,
+            "FlushDirtyConditionCheckpointSync",
+            crate::system_actor::ball_ops::ACTOR_CMD_TIMEOUT,
+            (),
+            move |(), reply| crate::system_actor::SystemCommand::FlushDirtyConditionCheckpointSync {
+                wait_for_post_unlock,
+                reply,
+            },
+            move |ctx, ()| {
+                let entries = collect_dirty_condition_checkpoint_entries(ctx.actor_st, ctx.ballpark);
+                if !entries.is_empty() && ctx.actor_st.db_opt.is_some() {
+                    ctx.post_unlock_ops.push(post_unlock::PostUnlockIntent::ConditionCheckpoint {
+                        solar_system_id: ctx.solar_system_id,
+                        entries,
+                        written_out: Some(written_direct_clone),
+                    });
+                }
+                0
+            },
+        )
+        .unwrap_or(0);
+        actor_written.max(written_direct.load(std::sync::atomic::Ordering::Acquire))
     }
 
     pub(crate) async fn wait_for_post_unlock_barrier(&self) -> bool {

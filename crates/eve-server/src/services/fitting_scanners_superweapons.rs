@@ -361,7 +361,7 @@ pub(crate) fn sync_ship_dbuffs_and_destiny_sync(
         ctx.invalidate_and_push_fit(ship_id);
         if let Some(sys) = resolve_ship_system_handle_sync(ctx, ship_id) {
             let dbuffs = collect_ship_destiny_dbuffs(ctx, Some(&sys), ship_id, now_unix);
-            let _ = sys.try_emit_destiny_event(
+            let _ = sys.enqueue_destiny_event(
                 ship_id,
                 eve_destiny::DestinyEvent::OnDbuffUpdated {
                     ball_id: ship_id,

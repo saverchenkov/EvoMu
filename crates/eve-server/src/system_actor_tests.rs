@@ -1705,12 +1705,15 @@ async fn r4_try_emit_destiny_remove_cycle_and_db_ball_eviction_preserve_sync_and
             SlimItemMeta { char_id: Some(90_000_100 + bid), is_cloaked: gate, ..Default::default() },
         ).await.unwrap();
     }
-    // 1. F1486-R4-01: same-thread `try_emit_destiny_event` with `actor_state`, `ballpark`, and `RANK_LEAF` locks held.
+    // 1. F1486-R4-01: same-thread destiny emission with `actor_state`, `ballpark`, and `RANK_LEAF`
+    //    locks held never invokes blocking `cmd_sender()`, confirmed `try_emit_destiny_event` never
+    //    fabricates `true`, and `enqueue_destiny_event` delivers non-blockingly.
     {
         let st_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_ACTOR_STATE }> =
             eve_db::lock_rank::RankedRwLock::new(());
         let _st = st_lock.write().unwrap();
-        assert!(h.try_emit_destiny_event(s_emit, DestinyEvent::SetSpeedFraction { ball_id: s_emit, fraction: 0.5 }));
+        assert!(!h.try_emit_destiny_event(s_emit, DestinyEvent::SetSpeedFraction { ball_id: s_emit, fraction: 0.5 }));
+        assert!(h.enqueue_destiny_event(s_emit, DestinyEvent::SetSpeedFraction { ball_id: s_emit, fraction: 0.5 }));
     }
     let _ = h.query_current_tick().await.unwrap();
     assert!(
@@ -1726,7 +1729,8 @@ async fn r4_try_emit_destiny_remove_cycle_and_db_ball_eviction_preserve_sync_and
         let _bp = bp_lock.read().unwrap();
         let leaf = eve_db::lock_rank::RankedMutex::<(), { eve_db::lock_rank::RANK_LEAF }>::new(());
         let _leaf = leaf.lock().unwrap();
-        assert!(h.try_emit_destiny_event(s_emit, DestinyEvent::Stop { ball_id: s_emit }));
+        assert!(!h.try_emit_destiny_event(s_emit, DestinyEvent::Stop { ball_id: s_emit }));
+        assert!(h.enqueue_destiny_event(s_emit, DestinyEvent::Stop { ball_id: s_emit }));
     }
     let _ = h.query_current_tick().await.unwrap();
     assert!(matches!(
@@ -1772,6 +1776,7 @@ async fn r4_try_emit_destiny_remove_cycle_and_db_ball_eviction_preserve_sync_and
         let _st_other = st_lock.write().unwrap();
         try_remove_ball_for_db(&db, sys_id, s_db3);
     }
+    let _ = h.query_current_tick().await.unwrap();
     for bid in [s_db1, s_db2, s_db3] {
         assert!(
             !h.test_with_ballpark_async(move |bp| bp.balls.contains_key(&bid))
@@ -1917,7 +1922,7 @@ async fn protection_registry_syncs_across_remove_step_manual_disconnected_warp_a
         }));
     });
     rx1.recv().unwrap();
-    assert!(h.try_emit_destiny_event(ship_h, DestinyEvent::SetSpeedFraction { ball_id: ship_h, fraction: 0.5 }));
+    assert!(h.enqueue_destiny_event(ship_h, DestinyEvent::SetSpeedFraction { ball_id: ship_h, fraction: 0.5 }));
     assert_eq!(h.view().combat_state(ship_h).unwrap().gate_cloak_remaining_ticks, 15);
     let _ = tx2.send(());
     holder.join().unwrap();

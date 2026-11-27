@@ -809,7 +809,7 @@ async fn handle_targeted_ewar_module(
                 let _ = evaluate_effective_signature_radius(ctx, vcid, tid, sys_id).await;
             } else {
                 let tp_mult = ctx.effective_target_painter_multiplier(tid);
-                sys_handle.try_recompute_combat_attributes(tid, |t_cs| {
+                sys_handle.try_recompute_combat_attributes(tid, move |t_cs| {
                     t_cs.tp_sig_multiplier = (tp_mult > 1.0 + 1e-6).then_some(tp_mult);
                 });
             }

@@ -831,22 +831,23 @@ mod tests {
                 eve_db::lock_rank::RankedRwLock::new(());
             let _leaf_guard = leaf_lock.write().unwrap();
             sys.cancel_ship_nanite_repairs_sync(ship_meta, false);
-            assert!(!sys.has_active_nanite_repair_sync(ship_meta, mod_a));
-            assert!(!sys.has_any_active_nanite_repair_sync(ship_meta));
-            assert!(sys.has_any_active_nanite_repair_sync(ship_combat));
         }
+        let _ = sys.query_current_tick().await.unwrap();
+        assert!(!sys.has_active_nanite_repair_sync(ship_meta, mod_a));
+        assert!(!sys.has_any_active_nanite_repair_sync(ship_meta));
+        assert!(sys.has_any_active_nanite_repair_sync(ship_combat));
 
         {
             let bp_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_BALLPARK }> =
                 eve_db::lock_rank::RankedRwLock::new(());
             let _bp_guard = bp_lock.write().unwrap();
             sys.cancel_ship_nanite_repairs_sync(ship_combat, false);
-            assert!(!sys.has_active_nanite_repair_sync(ship_combat, mod_b));
-            assert!(!sys.has_any_active_nanite_repair_sync(ship_combat));
         }
+        let _ = sys.query_current_tick().await.unwrap();
+        assert!(!sys.has_active_nanite_repair_sync(ship_combat, mod_b));
+        assert!(!sys.has_any_active_nanite_repair_sync(ship_combat));
 
-        // 8. cancel_nanite_repairs_for_ship_sync and sync_asteroid_quantity patch SystemView
-        // atomically under held `st` even when >= RANK_BALLPARK lock is held.
+        // 8. cancel_nanite_repairs_for_ship_sync and sync_asteroid_quantity update SystemView via mailbox.
         let ast_id = 940_301_i64;
         let belt_id = 940_300_i64;
         sys.test_with_actor_state_mut_async(move |st| {
@@ -875,19 +876,19 @@ mod tests {
             );
         })
         .await;
+        let cancelled = sys.cancel_nanite_repairs_for_ship_sync(ship_meta);
+        assert_eq!(cancelled.len(), 1);
+        assert!(!sys.has_any_active_nanite_repair_sync(ship_meta));
         {
             let bp_lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_BALLPARK }> =
                 eve_db::lock_rank::RankedRwLock::new(());
             let _bp_guard = bp_lock.write().unwrap();
-            let cancelled = sys.cancel_nanite_repairs_for_ship_sync(ship_meta);
-            assert_eq!(cancelled.len(), 1);
-            assert!(!sys.has_any_active_nanite_repair_sync(ship_meta));
-
             sys.sync_asteroid_quantity(ast_id, 0, 12_345);
-            let ast_view = sys.view().asteroids.get(&ast_id).cloned().expect("asteroid view");
-            assert_eq!(ast_view.remaining_units, 0);
-            assert!(ast_view.depleted);
-            assert_eq!(ast_view.respawn_at_tick, Some(12_345));
         }
+        let _ = sys.query_current_tick().await.unwrap();
+        let ast_view = sys.view().asteroids.get(&ast_id).cloned().expect("asteroid view");
+        assert_eq!(ast_view.remaining_units, 0);
+        assert!(ast_view.depleted);
+        assert_eq!(ast_view.respawn_at_tick, Some(12_345));
     }
 }

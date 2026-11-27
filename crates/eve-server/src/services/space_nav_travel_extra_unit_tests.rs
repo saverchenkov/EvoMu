@@ -1195,7 +1195,7 @@ async fn nav_commands_happy_paths_and_cloak_mjfg_sync_exact_branch_mutants() {
     //        `is_covert_cloak` updates (kills L1310 `!=` -> `==`),
     //        `cloak_activated_unix` gets recorded (kills L1318 `!` deletion).
     crate::services::mobile_deployables_ext::clear_ship_cloak_activated(&ctx, ship_id);
-    sys_h.try_update_combat_state(ship_id, |c| {
+    sys_h.try_update_combat_state(ship_id, move |c| {
         c.is_cloaked = true;
         c.is_covert_cloak = !expected_covert;
         c.cloak_stabilization_remaining_s = 500.0;
@@ -1214,7 +1214,7 @@ async fn nav_commands_happy_paths_and_cloak_mjfg_sync_exact_branch_mutants() {
 
     //    (c) Already cloaked with stabilization=0.0 AND cloak_recorded=true MUST keep 0.0 (kills L1314 `&&` -> `||` and `!` deletion),
     //        and negative configured delay `-expected_delay` updates to `+expected_delay` (kills L1321 `-` -> `+`).
-    sys_h.try_update_combat_state(ship_id, |c| {
+    sys_h.try_update_combat_state(ship_id, move |c| {
         c.cloak_stabilization_remaining_s = 0.0;
         c.cloak_configured_targeting_delay_s = -expected_delay;
     });

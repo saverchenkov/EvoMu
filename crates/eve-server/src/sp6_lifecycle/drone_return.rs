@@ -918,7 +918,7 @@ pub fn disconnect_drones_for_ship_on_warp_sync(
         if eff_sys > 0 {
             let _ = sys_handle.remove_drone_miner_sync(bid);
             sys_handle.try_remove_module_cycle(bid, -bid);
-            let _ = sys_handle.try_emit_destiny_event(
+            let _ = sys_handle.enqueue_destiny_event(
                 bid,
                 eve_destiny::DestinyEvent::OnDroneStateChange {
                     drone_id: did,
@@ -993,7 +993,7 @@ pub fn abandon_drones_on_warp_sync(
             if let Some(ref sys_handle) = sys_handle_opt {
                 sys_handle.try_remove_module_cycle(bid, -bid);
                 sys_handle.try_stop_ball(bid);
-                let _ = sys_handle.try_emit_destiny_event(
+                let _ = sys_handle.enqueue_destiny_event(
                     bid,
                     eve_destiny::DestinyEvent::OnDroneStateChange {
                         drone_id: did,

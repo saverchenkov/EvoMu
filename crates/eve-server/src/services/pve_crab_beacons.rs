@@ -290,7 +290,7 @@ fn clear_crab_link_ship_effects(
         })
         .map(|(cid, tid)| ctx.build_ship_combat_state(cid, ship_id, tid));
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    sys_handle.try_recompute_combat_attributes(ship_id, |cs| {
+    sys_handle.try_recompute_combat_attributes(ship_id, move |cs| {
         if let Some(ref base) = base_cs {
             cs.base_shield_resonance = Some(base.shield_resonance);
             cs.base_armor_resonance = Some(base.armor_resonance);
@@ -462,11 +462,11 @@ fn prune_dead_crab_wave_drones(ctx: &ServerContext, beacon_id: i64) -> (u8, usiz
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let mut alive_ids = Vec::with_capacity(orig_len);
     for bid in ball_ids {
-        let mut alive = false;
-        sys_handle.try_update_combat_state(bid, |cs| {
-            alive = cs.structure_hp > 0.0;
-        });
-        if alive {
+        if sys_handle
+            .view()
+            .combat_state(bid)
+            .is_some_and(|cs| cs.structure_hp > 0.0)
+        {
             alive_ids.push(bid);
         }
     }

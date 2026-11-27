@@ -22,16 +22,6 @@ fn is_covert_cloak_cycle(
             .is_some_and(|(is_cloak, is_covert)| is_cloak && is_covert)
 }
 
-pub(in crate::system_actor) fn sync_ball_protection_under_bp(
-    handle: &SystemHandle,
-    bp: &Ballpark,
-    ball_id: BallId,
-) {
-    let mut st = handle.actor_state.write().unwrap_or_else(|e| e.into_inner());
-    sync_ball_protection_in_actor(bp, &mut st, ball_id);
-    handle.publish_view_from(bp, Some(&st));
-}
-
 /// Synchronizes `actor_st.protection_registry[ball_id]` from `ballpark.combat_states`,
 /// `ballpark.ball_slim_meta`, and `actor_st.active_module_cycles` on the actor sim clock (`#1486`).
 pub(crate) fn sync_ball_protection_in_actor(
@@ -1188,26 +1178,10 @@ impl SystemHandle {
             .any(|c| c.ship_id == ship_id && is_cloak_cycle(c))
     }
 
-    /// Synchronously applies `event` for `ball_id` or falls back to non-blocking actor dispatch
-    /// if `ballpark` is currently write-locked (for synchronous hooks inside `step_system_tick`).
-    pub fn try_emit_destiny_event(&self, ball_id: BallId, event: DestinyEvent) -> bool {
-        if !eve_db::lock_rank::held_lock_ranks()
-            .iter()
-            .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
-        {
-            if let Ok(mut bp) = self.ballpark.try_write() {
-                if let Ok(mut st) = self.actor_state.try_write() {
-                    let known = super::cycles_tackle::apply_destiny_event_in_actor(
-                        &mut bp, ball_id, event,
-                    );
-                    if known {
-                        sync_ball_protection_in_actor(&bp, &mut st, ball_id);
-                        self.publish_view_from(&bp, Some(&st));
-                    }
-                    return known;
-                }
-            }
-        }
+    /// Enqueues `event` non-blockingly onto the actor mailbox without awaiting execution.
+    ///
+    /// Returns whether the mailbox accepted the command, NOT whether `ball_id` exists in space.
+    pub fn enqueue_destiny_event(&self, ball_id: BallId, event: DestinyEvent) -> bool {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         self.cmd_tx
             .try_send(SystemCommand::EmitDestinyEvent {
@@ -1216,6 +1190,51 @@ impl SystemHandle {
                 reply: tx,
             })
             .is_ok()
+    }
+
+    /// Synchronously applies `event` for `ball_id` and returns whether `ball_id` was present.
+    ///
+    /// Returns `false` if `ball_id` is absent, synchronous confirmation is unavailable under held
+    /// ranked locks, or the actor closed/timed out.
+    pub fn try_emit_destiny_event(&self, ball_id: BallId, event: DestinyEvent) -> bool {
+        if !eve_db::lock_rank::held_lock_ranks().is_empty() {
+            return false;
+        }
+        if self.is_on_actor_flush_thread() {
+            if self.cmd_tx.is_closed() {
+                return false;
+            }
+            return super::ball_ops::run_direct_ball_op_on_current_thread(self, false, |ctx| {
+                let known =
+                    super::cycles_tackle::apply_destiny_event_in_actor(ctx.ballpark, ball_id, event);
+                if known {
+                    sync_ball_protection_in_actor(ctx.ballpark, ctx.actor_st, ball_id);
+                }
+                known
+            });
+        }
+        match super::handle_cmds::dispatch_actor_sync_try_queued_with_timeout(
+            self,
+            std::time::Duration::from_millis(150),
+            (ball_id, event),
+            |(ball_id, event), reply| SystemCommand::EmitDestinyEvent {
+                ball_id,
+                event,
+                reply,
+            },
+            |ctx, (ball_id, event)| {
+                let known =
+                    super::cycles_tackle::apply_destiny_event_in_actor(ctx.ballpark, ball_id, event);
+                if known {
+                    sync_ball_protection_in_actor(ctx.ballpark, ctx.actor_st, ball_id);
+                }
+                known
+            },
+        ) {
+            super::handle_cmds::TryQueuedReply::Ready(known) => known,
+            super::handle_cmds::TryQueuedReply::QueuedTimedOut
+            | super::handle_cmds::TryQueuedReply::FullOrClosed => false,
+        }
     }
 }
 

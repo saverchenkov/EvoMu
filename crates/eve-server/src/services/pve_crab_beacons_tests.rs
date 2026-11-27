@@ -530,7 +530,7 @@ async fn test_clear_crab_link_ship_effects_resets_all_base_resonances_filters_db
                 source_module_id: beacon_id,
             });
     });
-    assert!(sys_handle.try_update_combat_state(ship_id, |cs| {
+    assert!(sys_handle.try_update_combat_state(ship_id, move |cs| {
         cs.base_shield_resonance = Some(corrupted);
         cs.base_armor_resonance = Some(corrupted);
         cs.base_structure_resonance = Some(corrupted);
@@ -577,7 +577,7 @@ async fn test_clear_crab_link_ship_effects_resets_all_base_resonances_filters_db
                 source_module_id: beacon_id,
             });
     });
-    assert!(sys_handle.try_update_combat_state(ship_id, |cs| {
+    assert!(sys_handle.try_update_combat_state(ship_id, move |cs| {
         cs.base_shield_resonance = Some(corrupted);
         cs.base_armor_resonance = Some(corrupted);
         cs.base_structure_resonance = Some(corrupted);

@@ -36,13 +36,15 @@ pub(in crate::system_actor) struct BallOpsCtx<'a> {
     pub(in crate::system_actor) ball_positions: &'a Arc<celestials::BallPositionSyncCache>,
     pub(in crate::system_actor) scrambled_balls: &'a Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
     pub(in crate::system_actor) module_deactivation_hook: &'a Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
-    deactivation_sink_hook: Option<ModuleDeactivationHook>,
+    pub(in crate::system_actor) deactivation_sink_hook: Option<ModuleDeactivationHook>,
     explicit_update_state_guards:
         Option<&'a Arc<RankedMutex<HashMap<(u64, i64), ExplicitUpdateStateGuard>, RANK_LEAF>>>,
     ball_spawn_tokens: Option<&'a mut HashMap<BallId, u64>>,
     removed_checkpoint_ball: Option<&'a mut Option<BallId>>,
     pub(in crate::system_actor) post_unlock_ops: &'a mut super::post_unlock::PostUnlockOps,
     pub(in crate::system_actor) cooldown_persist_gate: Option<&'a Arc<CooldownPersistGate>>,
+    pub(in crate::system_actor) last_active_totals:
+        Option<&'a mut HashMap<BallId, (Option<i32>, Option<i32>)>>,
     pub(in crate::system_actor) tidi_factor: f64,
 }
 
@@ -61,6 +63,7 @@ impl<'a> BallOpsCtx<'a> {
             removed_checkpoint_ball: Some(exec_ctx.removed_checkpoint_ball),
             post_unlock_ops: exec_ctx.post_unlock_ops,
             cooldown_persist_gate: Some(exec_ctx.cooldown_persist_gate_actor),
+            last_active_totals: Some(exec_ctx.last_active_totals),
             tidi_factor: celestials::clamp_tidi_factor_bits(exec_ctx.tidi_factor_bits_actor),
         }
     }
@@ -88,7 +91,7 @@ pub(crate) async fn call_actor_reply_with_deadline<T>(
     await_actor_cmd_with_deadline(handle.cmd_sender(), handle.solar_system_id, label, timeout_dur, cmd, rx).await
 }
 
-async fn await_actor_cmd_with_deadline<T>(
+pub(in crate::system_actor) async fn await_actor_cmd_with_deadline<T>(
     cmd_sender: &tokio::sync::mpsc::Sender<SystemCommand>,
     solar_system_id: SolarSystemId,
     label: &str,
@@ -127,9 +130,18 @@ pub(crate) async fn call_actor_result_with_deadline<T>(
     call_actor_reply_with_deadline(handle, label, timeout_dur, make_cmd).await?
 }
 
-fn run_direct_ball_op_on_current_thread<R>(
+pub(in crate::system_actor) fn run_direct_ball_op_on_current_thread<R>(
     handle: &SystemHandle,
     run_post_flush: bool,
+    op: impl FnOnce(&mut BallOpsCtx<'_>) -> R,
+) -> R {
+    run_direct_ball_op_on_current_thread_inner(handle, run_post_flush, false, op)
+}
+
+fn run_direct_ball_op_on_current_thread_inner<R>(
+    handle: &SystemHandle,
+    run_post_flush: bool,
+    already_finalized_and_published: bool,
     op: impl FnOnce(&mut BallOpsCtx<'_>) -> R,
 ) -> R {
     let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(handle);
@@ -169,34 +181,37 @@ fn run_direct_ball_op_on_current_thread<R>(
             removed_checkpoint_ball: None,
             post_unlock_ops: &mut ops,
             cooldown_persist_gate: Some(&handle.cooldown_persist_gate),
+            last_active_totals: None,
             tidi_factor: tidi,
         };
         if tidi < 0.999_999 || handle.cooldown_persist_gate.has_tidi_history() {
             ctx.actor_st.has_tidi_history = true;
         }
         let out = op(&mut ctx);
-        let cmd_tx_weak = handle.cmd_tx.downgrade();
-        let _ = super::ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
-            handle.solar_system_id,
-            &mut actor_st,
-            &mut ops,
-            raw_hook,
-            post_hook,
-            &handle.cooldown_persist_gate,
-            Some(&cmd_tx_weak),
-            tidi,
-        );
-        protection::sync_active_module_ships_cache(
-            &actor_st.active_module_cycles,
-            &actor_st.external_active_modules,
-            &handle.active_module_ships,
-        );
-        celestials::update_system_hibernation_flag(
-            &actor_st,
-            &ballpark,
-            handle.event_tx.receiver_count(),
-        );
-        handle.publish_view_from(&ballpark, Some(&actor_st));
+        if !already_finalized_and_published {
+            let cmd_tx_weak = handle.cmd_tx.downgrade();
+            let _ = super::ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
+                handle.solar_system_id,
+                &mut actor_st,
+                &mut ops,
+                raw_hook,
+                post_hook,
+                &handle.cooldown_persist_gate,
+                Some(&cmd_tx_weak),
+                tidi,
+            );
+            protection::sync_active_module_ships_cache(
+                &actor_st.active_module_cycles,
+                &actor_st.external_active_modules,
+                &handle.active_module_ships,
+            );
+            celestials::update_system_hibernation_flag(
+                &actor_st,
+                &ballpark,
+                handle.event_tx.receiver_count(),
+            );
+            handle.publish_view_from(&ballpark, Some(&actor_st));
+        }
         let ticket = super::post_unlock::enqueue_tick_post_unlock_or_barrier_under_locks(
             handle,
             &mut actor_st,
@@ -243,10 +258,14 @@ fn dispatch_actor_sync_reply_with_deadline_inner<P, T: Send + 'static>(
     label: &str,
     timeout_dur: Duration,
     run_post_flush: bool,
+    already_finalized_and_published: bool,
     payload: P,
     make_cmd: impl FnOnce(P, oneshot::Sender<T>) -> SystemCommand,
     direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
 ) -> Result<T, String> {
+    if handle.is_on_actor_flush_thread() {
+        return Err(format!("refusing sync actor call {label} on sys {} flush thread", handle.solar_system_id));
+    }
     if handle.cmd_sender().is_closed() {
         return Err(format!("system {} actor closed", handle.solar_system_id));
     }
@@ -256,9 +275,12 @@ fn dispatch_actor_sync_reply_with_deadline_inner<P, T: Send + 'static>(
                 // Legacy `#[tokio::test(flavor = "current_thread")]` caller running on the
                 // actor's single thread cannot block synchronously on the mailbox; run the exact
                 // same shared actor handler directly under the actor locks + publish view.
-                Ok(run_direct_ball_op_on_current_thread(handle, run_post_flush, |ctx| {
-                    direct_fn(ctx, payload)
-                }))
+                Ok(run_direct_ball_op_on_current_thread_inner(
+                    handle,
+                    run_post_flush,
+                    already_finalized_and_published,
+                    |ctx| direct_fn(ctx, payload),
+                ))
             }
             _ => {
                 // Isolate sync waiting from Tokio's thread-local `CURRENT_PARKER` (no nested `block_on`).
@@ -306,7 +328,20 @@ pub(in crate::system_actor) fn dispatch_actor_sync_reply_with_deadline<P, T: Sen
     direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
 ) -> Result<T, String> {
     dispatch_actor_sync_reply_with_deadline_inner(
-        handle, label, timeout_dur, true, payload, make_cmd, direct_fn,
+        handle, label, timeout_dur, true, false, payload, make_cmd, direct_fn,
+    )
+}
+
+pub(in crate::system_actor) fn dispatch_actor_step_full_tick_sync<P, T: Send + 'static>(
+    handle: &SystemHandle,
+    label: &str,
+    timeout_dur: Duration,
+    payload: P,
+    make_cmd: impl FnOnce(P, oneshot::Sender<T>) -> SystemCommand,
+    direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
+) -> Result<T, String> {
+    dispatch_actor_sync_reply_with_deadline_inner(
+        handle, label, timeout_dur, false, true, payload, make_cmd, direct_fn,
     )
 }
 
@@ -319,7 +354,7 @@ pub(in crate::system_actor) fn dispatch_actor_sync_with_deadline<P, T: Send + 's
     direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> Result<T, String>,
 ) -> Result<T, String> {
     dispatch_actor_sync_reply_with_deadline_inner(
-        handle, label, timeout_dur, true, payload, make_cmd, direct_fn,
+        handle, label, timeout_dur, true, false, payload, make_cmd, direct_fn,
     )?
 }
 
@@ -332,7 +367,7 @@ pub(in crate::system_actor) fn dispatch_actor_sync_no_flush_with_deadline<P, T: 
     direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> Result<T, String>,
 ) -> Result<T, String> {
     dispatch_actor_sync_reply_with_deadline_inner(
-        handle, label, timeout_dur, false, payload, make_cmd, direct_fn,
+        handle, label, timeout_dur, false, false, payload, make_cmd, direct_fn,
     )?
 }
 
@@ -787,7 +822,7 @@ fn start_disconnected_emergency_warp_in_actor(
     Ok(warped)
 }
 
-fn prepare_disconnected_warp_in_actor(
+pub(in crate::system_actor) fn prepare_disconnected_warp_in_actor(
     ctx: &mut BallOpsCtx<'_>,
     ship_id: BallId,
     warp_speed_au_s: f64,
@@ -836,7 +871,7 @@ fn prepare_disconnected_warp_in_actor(
     }
 }
 
-fn reconcile_disconnected_warp_in_actor(
+pub(in crate::system_actor) fn reconcile_disconnected_warp_in_actor(
     ctx: &mut BallOpsCtx<'_>,
     ship_id: BallId,
     dest: DVec3,
@@ -951,6 +986,7 @@ pub(in crate::system_actor) fn remove_ball_for_post_commit(
         removed_checkpoint_ball: None,
         post_unlock_ops,
         cooldown_persist_gate,
+        last_active_totals: None,
         tidi_factor,
     };
     remove_ball_in_actor(&mut ctx, ball_id, false)
@@ -1846,60 +1882,6 @@ impl SystemHandle {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn prepare_disconnected_warp_sync(
-        &self, ship_id: BallId, _type_id: u32, _radius: f64, _mass: f64,
-        _inertia: f64, _max_velocity: f64, warp_speed_au_s: f64, current_pos: DVec3, dest: DVec3,
-    ) {
-        let _ = dispatch_actor_sync_reply_with_deadline(
-            self,
-            "PrepareDisconnectedWarp",
-            ACTOR_CMD_TIMEOUT,
-            (),
-            |(), reply| SystemCommand::PrepareDisconnectedWarp {
-                ship_id,
-                warp_speed_au_s,
-                current_pos,
-                dest,
-                reply,
-            },
-            |ctx, ()| {
-                prepare_disconnected_warp_in_actor(ctx, ship_id, warp_speed_au_s, current_pos, dest)
-            },
-        );
-    }
-
-    pub fn reconcile_disconnected_warp_sync(&self, ship_id: BallId, dest: DVec3) -> (DVec3, bool) {
-        dispatch_actor_sync_reply_with_deadline(
-            self,
-            "ReconcileDisconnectedWarp",
-            ACTOR_CMD_TIMEOUT,
-            (),
-            |(), reply| SystemCommand::ReconcileDisconnectedWarp {
-                ship_id,
-                dest,
-                reply,
-            },
-            |ctx, ()| reconcile_disconnected_warp_in_actor(ctx, ship_id, dest),
-        )
-        .unwrap_or((dest, true))
-    }
-
-    /// Removes `ball_id` synchronously with bounded [`ACTOR_CMD_TIMEOUT`] (`#1342`, `ECO-72`).
-    pub fn remove_ball_sync(&self, ball_id: BallId) -> Result<Option<Ball>, String> {
-        if self.cmd_sender().is_closed() {
-            return Err(format!("system {} actor closed", self.solar_system_id));
-        }
-        dispatch_actor_sync_reply_with_deadline(
-            self,
-            "RemoveBall",
-            ACTOR_CMD_TIMEOUT,
-            ball_id,
-            |ball_id, reply| SystemCommand::RemoveBall { ball_id, reply },
-            |ctx, ball_id| remove_ball_in_actor(ctx, ball_id, false),
-        )
-    }
-
     /// Transfers pilot observer registration and queued `observer_events` across balls (`#1342`).
     pub async fn handoff_in_space_pilot_observer(
         &self,
@@ -2248,6 +2230,7 @@ mod tests {
             target_lock_completed_hook: Arc::new(RankedRwLock::new(None)),
             system_step_hook: Arc::new(RankedRwLock::new(None)),
             post_unlock_actions: Arc::new(RankedMutex::new(Vec::new())),
+            actor_flush_thread: Arc::new(std::sync::Mutex::new(None)),
             cooldown_persist_gate: Arc::new(crate::system_actor::CooldownPersistGate::default()),
         };
         handle.ballpark.attach_actor_state(&handle.actor_state);
