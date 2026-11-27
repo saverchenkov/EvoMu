@@ -1240,7 +1240,8 @@ pub(super) fn has_omitted_object_trigger(tr: &WikiTrigger) -> bool {
         .map(str::trim)
         .unwrap_or("")
         .to_ascii_lowercase();
-    let has_tag = trimmed_opt_str(tr.target_tag.as_deref()).is_some();
+    let has_tag = trimmed_opt_str(tr.target_tag.as_deref()).is_some()
+        || trimmed_opt_str(tr.trigger_ship_tag.as_deref()).is_some();
     let has_tid = tr.target_type_id.is_some_and(|id| id > 0);
     (tr.target_object_index.is_none()
         && (matches!(

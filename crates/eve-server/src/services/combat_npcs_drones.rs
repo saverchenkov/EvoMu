@@ -236,7 +236,7 @@ fn validate_tractor_ownership_and_range_readonly(
     let (wreck_owner, is_dungeon_obj) = ctx.db.with_snapshot(|snap| {
         (
             snap.items.get(&wreck_id).map(|i| i.owner_id).unwrap_or(char_id),
-            crate::services::pve_dungeon_runtime_hooks::is_owned_dungeon_object_any_sys_in_snap(snap, wreck_id),
+            crate::services::pve_dungeon_runtime_hooks::is_any_live_dungeon_object_any_sys_in_snap(snap, wreck_id),
         )
     });
     if is_dungeon_obj {

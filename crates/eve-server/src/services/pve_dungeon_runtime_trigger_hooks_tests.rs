@@ -4297,3 +4297,82 @@ async fn own_diff_p1_10_and_11_mtu_tractor_and_scoop_cannot_touch_dungeon_contai
         assert!(!inst.completed && !inst.rooms[0].triggers[0].fired);
     });
 }
+
+#[tokio::test]
+async fn own_diff_p1_12_and_p2_new_04_post_completion_loot_container_destroy_and_prop_tractor() {
+    use crate::services::combat_crimewatch::combat_npcs_drones::precheck_tractor_beam_activation;
+    use crate::services::combat_crimewatch::{with_mut_combat_runtime, ContainerLifetimeEntry};
+    use crate::services::pve_dungeon_runtime_hooks::is_live_destructible_dungeon_object_any_sys_in_snap;
+    use eve_db::ContractRecord;
+
+    let sde = build_hooks_test_sde();
+    let tractor_type = mk_inv_type(650_002, 650, 7, "Small Tractor Beam I", 5.0, 0.0, None, &[(54, 20_000.0)]);
+    let (sys_id, char_id, inst_id) = (30_000_142u32, 95_008_901i64, 8_901_001i64);
+    let r_pos = [32_000.0, 0.0, 0.0];
+    let (ctx, _clock, _sess, ship_id) =
+        make_space_pilot_ctx(sde, sys_id, char_id, "r9_loot_kill", 587, DVec3::new(r_pos[0] + 50.0, 0.0, 0.0)).await;
+    let mut room = make_room(
+        0,
+        9_901,
+        r_pos,
+        vec![
+            DungeonRuntimeObject { type_id: 16_757, name: "Loot Bunker".into(), position: [r_pos[0] + 150.0, 0.0, 0.0], radius: 150.0, is_container: true, destructible: true, loot_items: vec![(35, 3)], ..Default::default() },
+            DungeonRuntimeObject { type_id: 16_757, name: "Core Bunker".into(), position: [r_pos[0] + 300.0, 0.0, 0.0], radius: 150.0, destructible: true, tag: Some("core".into()), ..Default::default() },
+            DungeonRuntimeObject { type_id: 16_757, name: "Static Prop".into(), position: [r_pos[0] + 450.0, 0.0, 0.0], radius: 150.0, is_container: false, destructible: false, tag: Some("prop".into()), ..Default::default() },
+        ],
+        vec![make_trig(
+            1,
+            DungeonTriggerKind::OnStructureDestroyed { target_ball_id: None, target_object_index: None, target_tag: Some("core".into()), target_type_id: None },
+            DungeonTriggerAction::CompleteDungeon,
+            false,
+        )],
+    );
+    room.entered = true;
+    room.entered_unix = Some(1_785_100_000);
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(inst_id, DungeonRuntimeInstance { instance_id: inst_id, dungeon_id: 1, solar_system_id: sys_id, owner_char_id: char_id, base_position: r_pos, rooms: vec![room], created_unix: 1_785_100_000, ..Default::default() });
+    });
+    let mat = materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 0).await.expect("mat");
+    let (loot_box, trigger_core, indestr_prop) = (mat.object_ids[0], mat.object_ids[1], mat.object_ids[2]);
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+
+    // P2-NEW-04: Tractor Beam rejects indestructible non-container dungeon props too.
+    assert_eq!(precheck_tractor_beam_activation(&ctx, &sys_h, char_id, ship_id, 0, &tractor_type, Some(indestr_prop)).await.unwrap_err().code, "TractorBeamDungeonObjectRestricted");
+
+    let (courier_item, contract_id) = (8_901_501, 8_901_601);
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(courier_item, InventoryItemRecord { item_id: courier_item, type_id: 34, owner_id: char_id, location_id: loot_box, flag: InventoryFlag::Cargo, quantity: 5, singleton: false, version: 1, ..Default::default() });
+        s.contracts.insert(contract_id, ContractRecord { contract_id, issuer_id: char_id, acceptor_id: Some(char_id), contract_type: "Courier".into(), status: "InProgress".into(), start_station_id: 60_003_760, reward: IskCents(1_000), collateral: IskCents(2_000), item_ids: vec![courier_item], ..Default::default() });
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.container_lifetimes.insert(loot_box, ContainerLifetimeEntry { item_id: loot_box, solar_system_id: sys_id, type_id: 16_757, owner_id: char_id, created_unix: 1_785_100_000, lifetime_secs: 7_200, is_abandoned: false });
+    });
+
+    // CompleteDungeon while loot_box still holds unlooted items (kept_for_loot window).
+    assert!(on_dungeon_structure_destroyed_sync(&ctx, &sys_h, sys_id, trigger_core, char_id));
+    read_dungeon_runtime_store(&ctx, |s| {
+        let inst = &s.instances[&inst_id];
+        assert!(inst.completed && !inst.despawned && inst.rooms[0].objects[0].spawned && !inst.rooms[0].objects[0].destroyed);
+    });
+    assert!(is_destructible_dungeon_object(&ctx, sys_id, loot_box));
+    assert!(is_dungeon_object_ball(&ctx, sys_id, loot_box));
+    assert!(ctx.db.with_snapshot(|s| is_live_destructible_dungeon_object_any_sys_in_snap(s, loot_box)));
+
+    // OWN-DIFF-P1-12: Destroy kept-for-loot destructible container via live damage; must clean DB/courier/lifetimes, zero destroyHostileNPC, and never resurrect.
+    let lethal = DamageVector::new(100_000.0, 100_000.0, 100_000.0, 100_000.0);
+    let (_, dead, _) = sys_h.apply_damage_with_attacker(loot_box, lethal, Some(char_id)).await.unwrap().unwrap();
+    assert!(dead);
+    read_dungeon_runtime_store(&ctx, |s| {
+        let o = &s.instances[&inst_id].rooms[0].objects[0];
+        assert!(o.destroyed && !o.spawned);
+    });
+    ctx.db.with_snapshot(|s| {
+        assert!(!s.items.contains_key(&loot_box) && !s.items.contains_key(&courier_item));
+        assert!(!s.items.values().any(|i| i.location_id == loot_box));
+        assert_eq!(s.contracts[&contract_id].status, "Failed");
+    });
+    assert!(!with_combat_runtime(&ctx, |rt| rt.container_lifetimes.contains_key(&loot_box)));
+    assert!(ctx.quasar_gateway.progression.achievements.character_achievements.read().unwrap().get(&(char_id as u32)).is_none(), "no spurious destroyHostileNPC credit");
+    assert_eq!(reconcile_and_rematerialize_dungeon_instance(&ctx, sys_id, inst_id).await, 0);
+    assert!(sys_h.get_ball_snapshot(loot_box).await.unwrap().is_none());
+}

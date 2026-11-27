@@ -5064,3 +5064,53 @@ async fn own_diff_p1_07_combat_npcs_stay_combat_on_compound_cross_target_and_shi
         "all 3 Combat Frigate/Blank spawns + Combat Sentry must remain CombatNpc in npc_groups"
     );
 }
+
+#[tokio::test]
+async fn own_diff_p1_13_structure_destroyed_trigger_ship_tag_binds_target_tag_not_objects_zero() {
+    let mk_s = |type_id: u32, name: &str| eve_sde::InvType {
+        type_id, group_id: 319, category_id: 11, name: name.into(), mass: 1_000.0, volume: 100.0, capacity: 0.0, radius: 100.0,
+        base_price: 100.0, published: true, portion_size: 100, market_group_id: None, race_id: None, faction_id: None,
+        variation_parent_type_id: None, description_id: None, icon_id: None, graphic_id: None, sound_id: None,
+        meta_group_id: None, meta_level: None, tech_level: None, default_effect_id: None, description: String::new(),
+        effect_ids: Vec::new(), default_attributes: std::collections::HashMap::new(),
+    };
+    let mut sde = (*shared_sde()).clone();
+    sde.types.entry(16_757).or_insert_with(|| mk_s(16_757, "Angel Bunker"));
+    sde.types.entry(16_758).or_insert_with(|| mk_s(16_758, "Radio Tower"));
+    let ctx = make_ctx(Arc::new(sde));
+    let (sys_id, did) = (30_000_142u32, 993_304u32);
+    let payload = format!(r#"{{
+  "header": {{ "schema_version": 2, "source": "unit-test", "license": "CC BY-SA 4.0" }},
+  "indexes": {{ "by_dungeon_id": {{ "{did}": ["p1_13_tag_bind"] }} }},
+  "entries": [{{
+    "entry_id": "p1_13_tag_bind",
+    "base_title": "Trigger Ship Tag Test",
+    "sde_matches": {{ "dungeon_ids": [{did}], "mission_ids": [] }},
+    "rooms": [{{
+      "room_index": 1, "has_acceleration_gate": true,
+      "waves": [
+        {{ "wave_index": 1, "timing": "initial_spawn", "spawns": [
+          {{ "raw_class": "Structure", "raw_name": "Front Bunker", "tag": "front_bunker", "destructible": true, "count": {{"min": 1, "max": 1}}, "resolution": {{"status": "resolved_exact", "type_ids": [16757]}} }}
+        ]}},
+        {{ "wave_index": 2, "timing": "sequential_wave",
+           "wave_trigger": {{ "kind": "structure_destroyed", "trigger_ship_tag": "radio_tower", "unlocks_gate": true }},
+           "spawns": [
+             {{ "raw_class": "Structure", "raw_name": "Radio Tower", "tag": "radio_tower", "count": {{"min": 2, "max": 2}}, "resolution": {{"status": "resolved_exact", "type_ids": [16758]}} }}
+           ]
+        }}
+      ]
+    }},
+    {{ "room_index": 2, "has_acceleration_gate": false, "waves": [] }}
+  ]
+  }}]
+}}"#);
+    let cat = parse_and_validate_wiki_pve_json(&payload).expect("valid own_diff_p1_13 catalog");
+    install_wiki_pve_catalog_for_test(&ctx, Arc::new(cat));
+    let built = build_wiki_deadspace_rooms(&ctx, sys_id, DungeonTemplateId::new(did), "Trigger Ship Tag Test", [75_000_000.0, 0.0, 0.0], false).expect("build p1_13");
+    let r = &built.rooms[0];
+    assert_eq!(r.objects.len(), 3, "Front Bunker + 2 Radio Tower copies");
+    assert!(r.objects[1].destructible && r.objects[2].destructible);
+    assert_eq!(r.objects[1].tag.as_deref(), Some("radio_tower"));
+    assert_eq!(r.objects[2].tag.as_deref(), Some("radio_tower"));
+    assert!(r.triggers.iter().any(|t| matches!(&t.kind, DungeonTriggerKind::OnStructureDestroyed { target_object_index: None, target_tag: Some(tag), .. } if tag == "radio_tower") && matches!(t.action, DungeonTriggerAction::UnlockGate)));
+}

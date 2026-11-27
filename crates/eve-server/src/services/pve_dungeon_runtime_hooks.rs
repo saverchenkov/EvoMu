@@ -57,12 +57,16 @@ fn has_live_destructible_dungeon_object_in_snap(
         return false;
     }
     snap.dungeon_runtime.instances.values().any(|inst| {
-        !instance_is_finished(inst)
+        !inst.despawned
             && sys_id_opt.is_none_or(|sid| inst.solar_system_id == sid)
             && inst.rooms.iter().any(|r| {
-                r.objects
-                    .iter()
-                    .any(|o| o.ball_id == ball_id && o.spawned && !o.destroyed && o.destructible)
+                r.objects.iter().any(|o| {
+                    (!instance_is_finished(inst) || o.is_container)
+                        && o.ball_id == ball_id
+                        && o.spawned
+                        && !o.destroyed
+                        && o.destructible
+                })
             })
     })
 }
@@ -163,17 +167,35 @@ pub fn is_owned_dungeon_object_any_sys_in_snap(
     is_owned_dungeon_object_matching_in_snap(snap, None, ball_id, false)
 }
 
+/// Returns `true` if `ball_id` belongs to any live (`spawned && !destroyed`) dungeon object in any
+/// solar system, including indestructible non-container dungeon props (`P2-NEW-04`).
+pub fn is_any_live_dungeon_object_any_sys_in_snap(
+    snap: &WorldStateSnapshot,
+    ball_id: i64,
+) -> bool {
+    ball_id > 0
+        && snap.dungeon_runtime.instances.values().any(|inst| {
+            !inst.despawned
+                && inst.rooms.iter().any(|r| {
+                    r.objects
+                        .iter()
+                        .any(|o| o.ball_id == ball_id && o.spawned && !o.destroyed)
+                })
+        })
+}
+
 pub fn is_dungeon_object_ball(ctx: &ServerContext, sys_id: SolarSystemId, ball_id: i64) -> bool {
     if ball_id <= 0 || !has_dungeon_runtime_store(ctx) {
         return false;
     }
     ctx.db.with_snapshot(|snap| {
         snap.dungeon_runtime.instances.values().any(|inst| {
-            !instance_is_finished(inst)
+            !inst.despawned
                 && inst.solar_system_id == sys_id
                 && inst.rooms.iter().any(|r| {
                     r.objects.iter().any(|o| {
-                        o.ball_id == ball_id
+                        (!instance_is_finished(inst) || o.is_container)
+                            && o.ball_id == ball_id
                             && o.spawned
                             && !o.destroyed
                             && (o.destructible
@@ -335,9 +357,6 @@ pub fn on_dungeon_structure_destroyed_sync(
         return false;
     }
 
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.container_lifetimes.remove(&ball_id);
-    });
     let now_unix = ctx.db.clock().now_unix_secs();
     let matched_effects: Option<TriggerTxEffects> = ctx.db.with_mut_snapshot(|snap| {
         let candidate_ids: Vec<i64> = snap
@@ -345,11 +364,15 @@ pub fn on_dungeon_structure_destroyed_sync(
             .instances
             .values()
             .filter(|inst| {
-                !instance_is_finished(inst)
+                !inst.despawned
                     && inst.solar_system_id == sys_id
                     && inst.rooms.iter().any(|r| {
                         r.objects.iter().any(|o| {
-                            o.ball_id == ball_id && o.spawned && !o.destroyed && o.destructible
+                            (!instance_is_finished(inst) || o.is_container)
+                                && o.ball_id == ball_id
+                                && o.spawned
+                                && !o.destroyed
+                                && o.destructible
                         })
                     })
             })
@@ -364,17 +387,22 @@ pub fn on_dungeon_structure_destroyed_sync(
             let Some(mut inst) = snap.dungeon_runtime.instances.remove(&inst_id) else {
                 continue;
             };
-            if instance_is_finished(&inst) || inst.solar_system_id != sys_id {
+            if inst.despawned || inst.solar_system_id != sys_id {
                 snap.dungeon_runtime.instances.insert(inst_id, inst);
                 continue;
             }
+            let inst_finished = instance_is_finished(&inst);
             let mut ie = TriggerTxEffects::default();
             for r_idx in 0..inst.rooms.len() {
                 if ie.fail_reason.is_some() || ie.complete_now {
                     break;
                 }
                 let Some(obj_idx) = inst.rooms[r_idx].objects.iter().position(|o| {
-                    o.ball_id == ball_id && o.spawned && !o.destroyed && o.destructible
+                    (!inst_finished || o.is_container)
+                        && o.ball_id == ball_id
+                        && o.spawned
+                        && !o.destroyed
+                        && o.destructible
                 }) else {
                     continue;
                 };
@@ -382,6 +410,9 @@ pub fn on_dungeon_structure_destroyed_sync(
                 let (obj_tag, obj_type_id) = {
                     let obj = &mut inst.rooms[r_idx].objects[obj_idx];
                     obj.destroyed = true;
+                    if inst_finished {
+                        obj.spawned = false;
+                    }
                     (obj.tag.clone(), obj.type_id)
                 };
                 crate::combat::death_pipeline::cleanup_destroyed_item_tree_in_snap(
@@ -389,37 +420,43 @@ pub fn on_dungeon_structure_destroyed_sync(
                 );
                 ie.despawn_other_balls.push(ball_id);
 
-                if room_is_entered(&inst.rooms[r_idx]) {
-                    let ev = DungeonEvent::StructureDestroyed {
-                        target_ball_id: ball_id,
-                        object_index: obj_idx,
-                        object_tag: obj_tag.as_deref(),
-                        object_type_id: obj_type_id,
-                    };
-                    let _ = evaluate_room_triggers_in_inst(
-                        snap,
-                        sys_id,
-                        &mut inst,
-                        Some(&ctx.sde),
-                        r_idx,
-                        &ev,
-                        killer_char_id,
-                        now_unix,
-                        false,
-                        false,
-                        &mut ie,
-                    );
-                } else {
-                    let tag_str = obj_tag.as_deref().unwrap_or("");
-                    inst.rooms[r_idx].armed_timers.insert(
-                        format!(
-                            "__pre_struct_destroy:{r_idx}:{obj_idx}:{ball_id}:{obj_type_id}:{tag_str}"
-                        ),
-                        now_unix,
-                    );
+                if !inst_finished {
+                    if room_is_entered(&inst.rooms[r_idx]) {
+                        let ev = DungeonEvent::StructureDestroyed {
+                            target_ball_id: ball_id,
+                            object_index: obj_idx,
+                            object_tag: obj_tag.as_deref(),
+                            object_type_id: obj_type_id,
+                        };
+                        let _ = evaluate_room_triggers_in_inst(
+                            snap,
+                            sys_id,
+                            &mut inst,
+                            Some(&ctx.sde),
+                            r_idx,
+                            &ev,
+                            killer_char_id,
+                            now_unix,
+                            false,
+                            false,
+                            &mut ie,
+                        );
+                    } else {
+                        let tag_str = obj_tag.as_deref().unwrap_or("");
+                        inst.rooms[r_idx].armed_timers.insert(
+                            format!(
+                                "__pre_struct_destroy:{r_idx}:{obj_idx}:{ball_id}:{obj_type_id}:{tag_str}"
+                            ),
+                            now_unix,
+                        );
+                    }
                 }
             }
-            finalize_terminal_in_snap(snap, inst, killer_char_id, now_unix, &mut ie);
+            if inst_finished {
+                snap.dungeon_runtime.instances.insert(inst_id, inst);
+            } else {
+                finalize_terminal_in_snap(snap, inst, killer_char_id, now_unix, &mut ie);
+            }
             merge_effects(&mut total_effects, ie);
         }
         if !handled_any {
@@ -433,6 +470,9 @@ pub fn on_dungeon_structure_destroyed_sync(
     let Some(effects) = matched_effects else {
         return false;
     };
+    with_mut_combat_runtime(ctx, |rt| {
+        rt.container_lifetimes.remove(&ball_id);
+    });
     let _ = sys_handle.remove_ball_sync(ball_id);
     flush_trigger_effects_sync(DungeonRuntimeDeps::from_ctx(ctx), sys_id, effects);
     true

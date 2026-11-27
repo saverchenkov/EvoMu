@@ -768,7 +768,8 @@ fn translate_trigger_kind_inner(
         | "onstructuredestroyed"
         | "destroy_structure"
         | "object_destroyed" => {
-            let target_tag = trimmed_opt(tr.target_tag.as_deref());
+            let target_tag = trimmed_opt(tr.target_tag.as_deref())
+                .or_else(|| trimmed_opt(tr.trigger_ship_tag.as_deref()));
             let target_type_id = tr.target_type_id.filter(|&id| id > 0);
             let target_object_index = tr.target_object_index.or_else(|| {
                 (target_tag.is_none() && target_type_id.is_none())
