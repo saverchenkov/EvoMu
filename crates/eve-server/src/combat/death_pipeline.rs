@@ -2120,6 +2120,66 @@ pub fn cleanup_destroyed_non_ship_ball_sync(ctx: &ServerContext, sys_id: u32, ba
     }
 }
 
+/// Recursively removes `root_ball_id` and any nested child items in `snap.items`, fails any
+/// `InProgress` courier contracts referencing removed items, and clears space-object metadata
+/// (`P2-3` shared between `combat_missiles_aoe` and `pve_dungeon_runtime_hooks`).
+pub(crate) fn cleanup_destroyed_item_tree_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    root_ball_id: i64,
+    require_root_item: bool,
+    now_unix: u64,
+) {
+    snap.combat_crimewatch_state
+        .record_destroyed_item_id(root_ball_id);
+    snap.sp6_lifecycle.space_object_meta.remove(&root_ball_id);
+    snap.sp6_lifecycle.ship_combat_hp.remove(&root_ball_id);
+
+    let has_root = snap.items.contains_key(&root_ball_id);
+    if require_root_item && !has_root {
+        return;
+    }
+
+    let mut to_visit = vec![root_ball_id];
+    let mut to_remove: Vec<i64> = if has_root { vec![root_ball_id] } else { Vec::new() };
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::from([root_ball_id]);
+    while let Some(parent_id) = to_visit.pop() {
+        let children: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == parent_id && i.item_id != parent_id)
+            .map(|i| i.item_id)
+            .collect();
+        for cid in children {
+            if seen.insert(cid) {
+                to_remove.push(cid);
+                to_visit.push(cid);
+            }
+        }
+    }
+    if to_remove.is_empty() {
+        return;
+    }
+    let removed_set: std::collections::HashSet<i64> = to_remove.iter().copied().collect();
+    let courier_cids: Vec<i64> = snap
+        .contracts
+        .values()
+        .filter(|c| {
+            c.contract_type == "Courier"
+                && c.status == "InProgress"
+                && c.item_ids.iter().any(|iid| removed_set.contains(iid))
+        })
+        .map(|c| c.contract_id)
+        .collect();
+    for cid in courier_cids {
+        snap.fail_courier_contract(cid, now_unix);
+    }
+    for rid in to_remove {
+        snap.remove_system_cleanup_item(rid);
+        snap.sp6_lifecycle.space_object_meta.remove(&rid);
+        snap.sp6_lifecycle.ship_combat_hp.remove(&rid);
+    }
+}
+
 /// Removes a destroyed non-capsuleer space object (deployable, container, MTO site ball, or NPC hull)
 /// from combat runtime tracking, inventory snapshot state (`items`, `item_positions`,
 /// `space_object_meta`, `ship_combat_hp`, and direct child items), and the `Ballpark`.

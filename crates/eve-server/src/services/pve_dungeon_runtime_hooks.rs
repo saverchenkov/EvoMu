@@ -20,7 +20,7 @@ use crate::services::pve_exploration_seeding::build_type_combat_state_from_sde;
 use eve_db::WorldStateSnapshot;
 use eve_destiny::CombatState;
 use eve_sde::{SolarSystemId, TypeId};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 pub(crate) fn build_destructible_object_combat_state(
     sde: &eve_sde::SdeRegistry,
@@ -110,6 +110,24 @@ pub fn is_owned_destructible_dungeon_object(
     }
     ctx.db
         .with_snapshot(|snap| is_owned_destructible_dungeon_object_in_snap(snap, sys_id, ball_id))
+}
+
+/// System-agnostic sibling of [`is_owned_destructible_dungeon_object_in_snap`] for paths that
+/// resolve CrimeWatch ownership by `ball_id` without a `SolarSystemId` parameter (`OWN-DIFF-P1-02`).
+pub fn is_owned_destructible_dungeon_object_any_sys_in_snap(
+    snap: &WorldStateSnapshot,
+    ball_id: i64,
+) -> bool {
+    if ball_id <= 0 {
+        return false;
+    }
+    snap.dungeon_runtime.instances.values().any(|inst| {
+        inst.rooms.iter().any(|r| {
+            r.objects
+                .iter()
+                .any(|o| o.ball_id == ball_id && o.destructible && (o.spawned || o.destroyed))
+        })
+    })
 }
 
 pub fn is_dungeon_object_ball(ctx: &ServerContext, sys_id: SolarSystemId, ball_id: i64) -> bool {
@@ -359,24 +377,9 @@ pub fn on_dungeon_structure_destroyed_sync(
                     obj.destroyed = true;
                     (obj.tag.clone(), obj.type_id)
                 };
-                snap.combat_crimewatch_state.record_destroyed_item_id(ball_id);
-                let mut to_remove: HashSet<i64> = HashSet::from([ball_id]);
-                loop {
-                    let prev_len = to_remove.len();
-                    for it in snap.items.values() {
-                        if to_remove.contains(&it.location_id) {
-                            to_remove.insert(it.item_id);
-                        }
-                    }
-                    if to_remove.len() == prev_len {
-                        break;
-                    }
-                }
-                for &rid in &to_remove {
-                    snap.remove_system_cleanup_item(rid);
-                    snap.sp6_lifecycle.space_object_meta.remove(&rid);
-                    snap.sp6_lifecycle.ship_combat_hp.remove(&rid);
-                }
+                crate::combat::death_pipeline::cleanup_destroyed_item_tree_in_snap(
+                    snap, ball_id, false, now_unix,
+                );
                 ie.despawn_other_balls.push(ball_id);
 
                 if room_is_entered(&inst.rooms[r_idx]) {

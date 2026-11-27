@@ -76,46 +76,9 @@ pub(crate) async fn cleanup_destroyed_non_ship_ball(
         }) {
             return;
         }
-        snap.combat_crimewatch_state
-            .record_destroyed_item_id(ball_id);
-        snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
-        snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
-        if snap.items.remove(&ball_id).is_some() {
-            snap.item_positions.remove(&ball_id);
-            let mut to_visit = vec![ball_id];
-            let mut all_descendants = Vec::new();
-            while let Some(parent_id) = to_visit.pop() {
-                let children: Vec<i64> = snap
-                    .items
-                    .values()
-                    .filter(|i| i.location_id == parent_id && i.item_id != parent_id)
-                    .map(|i| i.item_id)
-                    .collect();
-                for cid in children {
-                    if !all_descendants.contains(&cid) {
-                        all_descendants.push(cid);
-                        to_visit.push(cid);
-                    }
-                }
-            }
-            let courier_cids: Vec<i64> = snap
-                .contracts
-                .values()
-                .filter(|c| {
-                    c.contract_type == "Courier"
-                        && c.status == "InProgress"
-                        && c.item_ids.iter().any(|iid| all_descendants.contains(iid))
-                })
-                .map(|c| c.contract_id)
-                .collect();
-            for cid in courier_cids {
-                snap.fail_courier_contract(cid, now_unix);
-            }
-            for cid in all_descendants {
-                snap.items.remove(&cid);
-                snap.item_positions.remove(&cid);
-            }
-        }
+        crate::combat::death_pipeline::cleanup_destroyed_item_tree_in_snap(
+            snap, ball_id, true, now_unix,
+        );
     });
 }
 
@@ -342,8 +305,10 @@ pub async fn step_missiles_and_breachers(
             if let Ok(Some((applied, destroyed, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, mstate.solar_system_id, mstate.attacker_char_id, mstate.target_ball_id, scaled, mstate.flight_time_s.max(1.0), ctx.now_unix()).await {
                 mstate.applied_damage = applied;
                 let victim_char_opt = ctx.db.with_snapshot(|snap| {
-                    snap.characters.values().find(|c| c.active_ship_id == mstate.target_ball_id).map(|c| c.character_id)
-                        .or_else(|| snap.items.get(&mstate.target_ball_id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
+                    super::resolve_pvp_target_info_in_snap(
+                        snap, Some(mstate.solar_system_id), mstate.target_ball_id, false, false,
+                    )
+                    .map(|(vcid, _)| vcid)
                 });
                 let now_unix = ctx.now_unix();
                 if applied > 0.0 {
@@ -893,8 +858,8 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                             continue;
                         }
                         let victim_char_opt = ctx.db.with_snapshot(|snap| {
-                            snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
-                                .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|&oid| snap.characters.contains_key(&oid)))
+                            super::resolve_pvp_target_info_in_snap(snap, Some(sys_id), b.id, false, false)
+                                .map(|(vcid, _)| vcid)
                         })
                         .or_else(|| sys_handle.active_drone(b.id).map(|d| d.owner_char_id))
                         .or_else(|| sys_handle.view().fighters.active_fighters.get(&b.id).map(|f| f.owner_char_id))
@@ -1074,8 +1039,8 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                     }
                     if b.position.distance(detonation_pos) <= blast_radius {
                         let bomb_vic = ctx.db.with_snapshot(|snap| {
-                            snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
-                                .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
+                            super::resolve_pvp_target_info_in_snap(snap, Some(sys_id), b.id, false, false)
+                                .map(|(vcid, _)| vcid)
                         })
                         .or_else(|| sys_handle.view().fighters.active_fighters.get(&b.id).map(|f| f.owner_char_id));
                         if sys_handle
@@ -1497,9 +1462,10 @@ pub(crate) async fn activate_missile_or_breacher_launcher_on_handle(
                 }
 
                 let victim_char_opt = ctx.db.with_snapshot(|snap| {
-                    snap.characters.get(&target_ball_id).map(|c| c.character_id)
-                        .or_else(|| snap.characters.values().find(|c| c.active_ship_id == target_ball_id).map(|c| c.character_id))
-                        .or_else(|| snap.items.get(&target_ball_id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
+                    super::resolve_pvp_target_info_in_snap(
+                        snap, Some(sys_id), target_ball_id, true, false,
+                    )
+                    .map(|(vcid, _)| vcid)
                 });
                 if let Some(vcid) = victim_char_opt.filter(|&v| v != char_id) {
                     ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_weapon_timer(char_id, now_unix);

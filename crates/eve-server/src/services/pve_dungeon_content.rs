@@ -909,15 +909,13 @@ pub(super) fn classify_dungeon_object_spawn(sp: &WikiSpawn) -> Option<ObjectSpaw
     let cls = sp.raw_class.trim().to_ascii_lowercase();
     let is_explicit_container = matches!(
         cls.as_str(),
-        "container"
-            | "wreck"
-            | "cache"
-            | "hackable"
-            | "hacking"
-            | "destructible object"
-            | "large collidable object"
-            | "hangar array"
+        "container" | "wreck" | "cache" | "hackable" | "hacking" | "hangar array"
     );
+    let is_explicit_object = is_explicit_container
+        || matches!(
+            cls.as_str(),
+            "destructible object" | "large collidable object" | "destructible"
+        );
     let has_loot = has_non_empty_loot_val(&sp.loot);
     let is_structure_cls = matches!(
         cls.as_str(),
@@ -936,7 +934,7 @@ pub(super) fn classify_dungeon_object_spawn(sp: &WikiSpawn) -> Option<ObjectSpaw
             | "starbase"
             | "destructible"
     );
-    if is_explicit_container || (is_structure_cls && (has_loot || sp.destructible == Some(true))) {
+    if is_explicit_object || (is_structure_cls && (has_loot || sp.destructible == Some(true))) {
         let is_container = is_explicit_container || has_loot;
         let default_name = if is_container {
             "Cargo Container"
@@ -947,10 +945,58 @@ pub(super) fn classify_dungeon_object_spawn(sp: &WikiSpawn) -> Option<ObjectSpaw
             default_type_id: if is_container { 23 } else { 16_757 },
             default_name,
             is_container,
-            destructible: sp.destructible.unwrap_or(false),
+            destructible: sp
+                .destructible
+                .unwrap_or(matches!(cls.as_str(), "destructible object" | "destructible")),
         });
     }
     None
+}
+
+fn is_object_trigger_kind_str(kind_raw: Option<&str>) -> bool {
+    let kind_lc = kind_raw
+        .map(str::trim)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        kind_lc.as_str(),
+        "ship_approached"
+            | "approach"
+            | "on_approach"
+            | "onapproach"
+            | "loot_taken"
+            | "on_loot"
+            | "onloot"
+            | "cargo_delivered"
+            | "on_cargo_delivered"
+            | "oncargodelivered"
+            | "deliver_cargo"
+            | "structure_destroyed"
+            | "on_structure_destroyed"
+            | "onstructuredestroyed"
+            | "destroy_structure"
+            | "object_destroyed"
+    )
+}
+
+pub(super) fn trigger_has_object_kind(tr: &WikiTrigger) -> bool {
+    is_object_trigger_kind_str(tr.kind.as_deref())
+        || tr.clauses.iter().any(trigger_has_object_kind)
+}
+
+pub(super) fn trigger_binds_spawn_tag_to_object_kind(
+    tr: &WikiTrigger,
+    spawn_tag_lc: &str,
+) -> bool {
+    let tag_matches = [tr.target_tag.as_deref(), tr.trigger_ship_tag.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|t| !t.trim().is_empty() && t.trim().eq_ignore_ascii_case(spawn_tag_lc));
+    (tag_matches && is_object_trigger_kind_str(tr.kind.as_deref()))
+        || tr
+            .clauses
+            .iter()
+            .any(|c| trigger_binds_spawn_tag_to_object_kind(c, spawn_tag_lc))
 }
 
 pub(super) fn bind_spawn_object_index_if_omitted(

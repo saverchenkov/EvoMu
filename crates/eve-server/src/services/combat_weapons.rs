@@ -666,17 +666,8 @@ async fn handle_targeted_ewar_module(
         };
         let target_ball = Box::new(target_ball);
         let victim_char_opt = ctx.db.with_snapshot(|snap| {
-            if snap.characters.contains_key(&tid) {
-                Some(tid)
-            } else if let Some(ch) = snap.characters.values().find(|c| c.active_ship_id == tid) {
-                Some(ch.character_id)
-            } else if let Some(it) = snap.items.get(&tid) {
-                snap.characters.get(&it.owner_id).map(|c| c.character_id).or_else(|| {
-                    snap.corporations.get(&it.owner_id).and_then(|corp| snap.characters.get(&corp.ceo_id)).map(|c| c.character_id)
-                })
-            } else {
-                None
-            }
+            super::resolve_pvp_target_info_in_snap(snap, Some(sys_id), tid, true, true)
+                .map(|(vcid, _)| vcid)
         });
         if sys_handle
             .get_combat_state(tid)
@@ -1165,29 +1156,7 @@ async fn prepare_direct_weapon_shot(
         Err(e) => return std::ops::ControlFlow::Break(Some(Err(e))),
     };
     let player_target_info = ctx.db.with_snapshot(|snap| {
-        if snap.structures.contains_key(&resolved_target_id) {
-            None
-        } else if let Some(ch) = snap.characters.get(&resolved_target_id) {
-            Some((ch.character_id, ch.active_ship_id))
-        } else if let Some(ch) = snap
-            .characters
-            .values()
-            .find(|c| c.active_ship_id == resolved_target_id)
-        {
-            Some((ch.character_id, ch.active_ship_id))
-        } else if let Some(it) = snap.items.get(&resolved_target_id) {
-            snap.characters
-                .get(&it.owner_id)
-                .map(|c| (c.character_id, resolved_target_id))
-                .or_else(|| {
-                    snap.corporations
-                        .get(&it.owner_id)
-                        .and_then(|corp| snap.characters.get(&corp.ceo_id))
-                        .map(|c| (c.character_id, resolved_target_id))
-                })
-        } else {
-            None
-        }
+        super::resolve_pvp_target_info_in_snap(snap, Some(sys_id), resolved_target_id, true, true)
     });
     let target_ball_id = player_target_info
         .map(|(_, sid)| sid)

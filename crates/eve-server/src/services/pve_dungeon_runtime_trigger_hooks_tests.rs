@@ -111,7 +111,7 @@ fn build_hooks_test_sde() -> Arc<SdeRegistry> {
         16_757,
         mk_inv_type(
             16_757,
-            186,
+            319,
             11,
             "Angel Relay Bunker",
             5_000.0,
@@ -2647,8 +2647,8 @@ async fn p2_pre_entry_struct_destroy_semantics_rpc_zero_type_filter_and_same_roo
         DungeonTriggerKind::OnStructureDestroyed { target_type_id: None, target_tag: Some(t), .. } if t == "relay"
     ));
 
-    // P2-1 & P2-4: Pre-entry destroy replay matches live semantics (no auto-unlock without UnlockGate),
-    // and same-room src->dst transfer stops before dst when src withdrawal completes dungeon.
+    // P2-1 & P2-4: Pre-entry TriggerMessage structure destruction preserves gate lock without UnlockGate,
+    // and same-room src->dst container transfer debits src_cont net while crediting dst_cont to complete.
     let (sys_id, char_id, inst_a, inst_b) = (30_000_142u32, 90_070_320i64, 995_320i64, 995_321i64);
     let r_pos = [68_000_000.0, 0.0, 0.0];
     let (ctx, _clock, _sess, _ship_id) = make_space_pilot_ctx(
@@ -2782,6 +2782,574 @@ async fn p2_pre_entry_struct_destroy_semantics_rpc_zero_type_filter_and_same_roo
         assert!(inst.completed && inst.rooms[0].triggers[0].fired);
         assert_eq!(inst.rooms[0].cargo_delivered_net.get(&format!("{src_cont}:34")), Some(&5));
         assert_eq!(inst.rooms[0].cargo_delivered_net.get(&format!("{dst_cont}:34")), Some(&5));
+    });
+}
+
+#[tokio::test]
+async fn own_diff_p1_02_dogma_activate_on_destructible_dungeon_container_has_no_pvp_safety_or_timers_and_fails_nested_courier(
+) {
+    use crate::services::combat_crimewatch::combat_weapons::handle_weapons;
+    use crate::services::combat_crimewatch::{is_npc_timer_active, set_char_safety_level, SafetyLevel};
+    use eve_db::ContractRecord;
+    use eve_destiny::{CombatState, TargetLock};
+
+    let (sys_id, owner_char, fleet_char, inst_id) =
+        (30_000_142u32, 90_070_401i64, 90_070_402i64, 995_401i64);
+    let r_pos = [72_000_000.0, 0.0, 0.0];
+
+    let mut sde = (*build_hooks_test_sde()).clone();
+    sde.types.insert(
+        55_401,
+        mk_inv_type(
+            55_401,
+            55,
+            7,
+            "Test AutoCannon",
+            5.0,
+            1.0,
+            None,
+            &[
+                (6, 0.0),
+                (51, 500.0),
+                (54, 15_000.0),
+                (64, 1.0),
+                (128, 1.0),
+                (158, 5_000.0),
+                (160, 100.0),
+                (604, 83.0),
+                (620, 40_000.0),
+            ],
+        ),
+    );
+    sde.types.insert(
+        83_401,
+        mk_inv_type(
+            83_401,
+            83,
+            8,
+            "Test Projectile Charge",
+            0.01,
+            0.0,
+            None,
+            &[
+                (114, 120.0),
+                (116, 120.0),
+                (117, 120.0),
+                (118, 120.0),
+                (120, 1.0),
+                (128, 1.0),
+            ],
+        ),
+    );
+
+    let (ctx, clock, mut owner_sess, owner_ship) = make_space_pilot_ctx(
+        Arc::new(sde),
+        sys_id,
+        owner_char,
+        "p102_owner",
+        587,
+        DVec3::from_array([r_pos[0] + 1_000.0, 0.0, 0.0]),
+    )
+    .await;
+    assert!(
+        ctx.sde
+            .solar_systems
+            .get(&sys_id)
+            .is_some_and(|s| s.security_status >= 0.45),
+        "test must run in high-sec so Green/Yellow safety gates are active"
+    );
+
+    // Seed Green-safety fleetmate pilot in the same solar system.
+    ctx.db
+        .provision_gm_account("p102_fleetmate", "pw", fleet_char, "p102_fleetmate");
+    let (fleet_uid, fleet_ship) = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&fleet_char).unwrap();
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        let sid = ch.active_ship_id;
+        let uid = ch.user_id;
+        if let Some(it) = snap.items.get_mut(&sid) {
+            it.type_id = 587;
+            it.location_id = i64::from(sys_id);
+            it.flag = InventoryFlag::None;
+        }
+        (uid, sid)
+    });
+    let _ = ctx.db.acquire_online_lock_with_computer_hash(
+        fleet_uid,
+        fleet_char as u64,
+        Some(fleet_char),
+        None,
+        true,
+        1_785_100_000,
+    );
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h
+        .spawn_ball_with_combat(
+            Ball {
+                id: fleet_ship,
+                type_id: 587,
+                position: DVec3::from_array([r_pos[0] + 1_200.0, 0.0, 0.0]),
+                velocity: DVec3::ZERO,
+                max_velocity: 2_500.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 500.0,
+                max_armor_hp: 500.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                capacitor: 500.0,
+                max_capacitor: 500.0,
+                is_tethered: false,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut fleet_sess = SessionState::new(fleet_char as u64);
+    fleet_sess.user_id = Some(fleet_uid);
+    fleet_sess.character_id = Some(fleet_char);
+    fleet_sess.solar_system_id = Some(sys_id);
+    fleet_sess.ship_id = Some(fleet_ship);
+
+    // Ensure both ships are untethered with active projectile turrets and charges.
+    let mut owner_cs = sys_h.get_combat_state(owner_ship).await.unwrap().unwrap();
+    owner_cs.is_tethered = false;
+    owner_cs.capacitor = 500.0;
+    owner_cs.max_capacitor = 500.0;
+    sys_h.set_combat_state(owner_ship, owner_cs).await.unwrap();
+
+    let (owner_gun, owner_ammo, fleet_gun, fleet_ammo) =
+        (881_001i64, 881_002i64, 881_003i64, 881_004i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        for (char_id, ship_id, gun_id, ammo_id) in [
+            (owner_char, owner_ship, owner_gun, owner_ammo),
+            (fleet_char, fleet_ship, fleet_gun, fleet_ammo),
+        ] {
+            snap.items.insert(
+                gun_id,
+                InventoryItemRecord {
+                    item_id: gun_id,
+                    type_id: 55_401,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                ammo_id,
+                InventoryItemRecord {
+                    item_id: ammo_id,
+                    type_id: 83_401,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 50,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.module_active_charges.insert(gun_id, 83_401);
+        }
+    });
+    ctx.invalidate_ship_fitting(owner_ship);
+    ctx.invalidate_ship_fitting(fleet_ship);
+    set_char_safety_level(&ctx, owner_char, SafetyLevel::Red);
+    set_char_safety_level(&ctx, fleet_char, SafetyLevel::Green);
+
+    // Destructible container (16_757, is_container: true, destructible: true) with OnStructureDestroyed -> CompleteDungeon.
+    let mut room = make_room(
+        1,
+        9710,
+        r_pos,
+        vec![DungeonRuntimeObject {
+            type_id: 16_757,
+            name: "Angel Relay Cache".into(),
+            position: [r_pos[0] + 400.0, 0.0, 0.0],
+            radius: 150.0,
+            is_container: true,
+            destructible: true,
+            ..Default::default()
+        }],
+        vec![make_trig(
+            1,
+            DungeonTriggerKind::OnStructureDestroyed {
+                target_ball_id: None,
+                target_object_index: Some(0),
+                target_tag: None,
+                target_type_id: None,
+            },
+            DungeonTriggerAction::CompleteDungeon,
+            false,
+        )],
+    );
+    room.entered = true;
+    room.entered_unix = Some(1_785_100_000);
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(
+            inst_id,
+            DungeonRuntimeInstance {
+                instance_id: inst_id,
+                dungeon_id: 1,
+                solar_system_id: sys_id,
+                owner_char_id: owner_char,
+                base_position: r_pos,
+                rooms: vec![room],
+                created_unix: 1_785_100_000,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mat = materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 0)
+        .await
+        .unwrap();
+    let cont_id = mat.object_ids[0];
+
+    // Seed a child item & nested courier contract inside the container to verify P2-3 cleanup sharing.
+    let nested_cargo_id = 881_999i64;
+    let contract_id = 771_999i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            nested_cargo_id,
+            InventoryItemRecord {
+                item_id: nested_cargo_id,
+                type_id: 34,
+                owner_id: owner_char,
+                location_id: cont_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 10,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.contracts.insert(
+            contract_id,
+            ContractRecord {
+                contract_id,
+                issuer_id: owner_char,
+                acceptor_id: Some(fleet_char),
+                contract_type: "Courier".into(),
+                status: "InProgress".into(),
+                start_station_id: 60_003_760,
+                reward: IskCents(1_000),
+                collateral: IskCents(2_000),
+                item_ids: vec![nested_cargo_id],
+                ..Default::default()
+            },
+        );
+    });
+
+    for ship_id in [owner_ship, fleet_ship] {
+        sys_h
+            .add_target_lock(
+                ship_id,
+                TargetLock {
+                    target_id: cont_id,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(50_000.0),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let kwargs = HashMap::new();
+    // 1. Solo owner (Red safety) shoots destructible dungeon container: must hit with NPC timer ONLY, 0 PvP timers.
+    let owner_shot = handle_weapons(
+        &ctx,
+        &mut owner_sess,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(owner_gun),
+            PyRep::String("projectileFired".into()),
+            PyRep::Integer(cont_id),
+        ],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("owner dogmaIM.Activate must succeed");
+    assert!(
+        owner_shot
+            .dict_get("appliedDamage")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+            > 0.0
+    );
+
+    // 2. Green-safety fleetmate fires repeatedly via dogmaIM.Activate to finish off the container:
+    // must NEVER be rejected by CantDoInCurrentSafetyLevel and must apply NPC aggression + OnStructureDestroyed.
+    let mut cont_destroyed = false;
+    for shot_idx in 0..4 {
+        clock.advance_secs(1);
+        ctx.clear_all_reactivation_delays();
+        let fleet_shot = handle_weapons(
+            &ctx,
+            &mut fleet_sess,
+            "dogmaIM",
+            "Activate",
+            &[
+                PyRep::Integer(fleet_gun),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(cont_id),
+            ],
+            &kwargs,
+        )
+        .await
+        .unwrap()
+        .unwrap_or_else(|e| panic!("Green-safety fleetmate shot {shot_idx} must not fail: {e:?}"));
+        if fleet_shot
+            .dict_get("destroyed")
+            .and_then(|v| v.as_bool())
+            == Some(true)
+        {
+            cont_destroyed = true;
+            break;
+        }
+    }
+    assert!(cont_destroyed, "Green-safety fleetmate dogmaIM.Activate shots must destroy container");
+
+    let now_unix = ctx.now_unix();
+    for pilot in [owner_char, fleet_char] {
+        assert!(
+            is_npc_timer_active(&ctx, pilot, now_unix),
+            "attacking destructible dungeon container must set NPC timer for {pilot}"
+        );
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let st = cw.get_or_create(pilot);
+        assert_eq!(st.pvp_timer_until_unix, 0, "no PvP timer on dungeon container");
+        assert_eq!(st.suspect_flag_until_unix, 0, "no Suspect flag on dungeon container");
+        assert_eq!(st.criminal_flag_until_unix, 0, "no Criminal flag on dungeon container");
+    }
+
+    read_dungeon_runtime_store(&ctx, |s| {
+        let inst = &s.instances[&inst_id];
+        assert!(inst.completed && inst.rooms[0].triggers[0].fired, "OnStructureDestroyed must complete dungeon");
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&cont_id));
+        assert!(!snap.items.contains_key(&nested_cargo_id));
+        assert_eq!(
+            snap.contracts.get(&contract_id).map(|c| c.status.as_str()),
+            Some("Failed"),
+            "P2-3: destroying container holding courier cargo must fail the courier contract"
+        );
+    });
+}
+
+#[tokio::test]
+async fn own_diff_p1_03_repeatable_cargo_threshold_and_wildcard_compound_and_latches() {
+    let (sys_id, char_id, inst_rep, inst_wild) =
+        (30_000_142u32, 90_070_410i64, 995_410i64, 995_411i64);
+    let r_pos = [75_000_000.0, 0.0, 0.0];
+    let (ctx, _clock, _sess, _ship_id) = make_space_pilot_ctx(
+        build_hooks_test_sde(),
+        sys_id,
+        char_id,
+        "p103_pilot",
+        587,
+        DVec3::from_array(r_pos),
+    )
+    .await;
+
+    let mut room_rep = make_room(
+        1,
+        9720,
+        r_pos,
+        vec![DungeonRuntimeObject {
+            type_id: DEFAULT_CONTAINER_TYPE_ID,
+            name: "Repeatable Dropoff".into(),
+            position: [r_pos[0] + 200.0, 0.0, 0.0],
+            radius: 150.0,
+            is_container: true,
+            ..Default::default()
+        }],
+        vec![make_trig(
+            1,
+            DungeonTriggerKind::OnCargoDelivered {
+                container_ball_id: None,
+                target_object_index: Some(0),
+                item_type_id: Some(34),
+                required_quantity: 10,
+            },
+            DungeonTriggerAction::GrantReward {
+                isk: 1_000_000,
+                lp: 0,
+                corp_id: 0,
+                faction_id: 0,
+                standing_milli: 0,
+            },
+            true,
+        )],
+    );
+    room_rep.entered = true;
+    room_rep.entered_unix = Some(1_785_100_000);
+
+    let mut room_wild = make_room(
+        1,
+        9721,
+        [r_pos[0] + 20_000.0, 0.0, 0.0],
+        vec![
+            DungeonRuntimeObject {
+                type_id: DEFAULT_CONTAINER_TYPE_ID,
+                name: "Wildcard Cont 1".into(),
+                position: [r_pos[0] + 20_100.0, 0.0, 0.0],
+                radius: 150.0,
+                is_container: true,
+                ..Default::default()
+            },
+            DungeonRuntimeObject {
+                type_id: DEFAULT_CONTAINER_TYPE_ID,
+                name: "Wildcard Cont 2".into(),
+                position: [r_pos[0] + 20_300.0, 0.0, 0.0],
+                radius: 150.0,
+                is_container: true,
+                ..Default::default()
+            },
+            DungeonRuntimeObject {
+                type_id: 16_757,
+                name: "Guard Pylon".into(),
+                position: [r_pos[0] + 20_500.0, 0.0, 0.0],
+                radius: 150.0,
+                destructible: true,
+                ..Default::default()
+            },
+        ],
+        vec![make_trig(
+            1,
+            DungeonTriggerKind::CompoundAnd {
+                clauses: vec![
+                    DungeonTriggerKind::OnCargoDelivered {
+                        container_ball_id: None,
+                        target_object_index: None,
+                        item_type_id: Some(34),
+                        required_quantity: 10,
+                    },
+                    DungeonTriggerKind::OnStructureDestroyed {
+                        target_ball_id: None,
+                        target_object_index: Some(2),
+                        target_tag: None,
+                        target_type_id: None,
+                    },
+                ],
+            },
+            DungeonTriggerAction::CompleteDungeon,
+            false,
+        )],
+    );
+    room_wild.entered = true;
+    room_wild.entered_unix = Some(1_785_100_000);
+
+    let start_isk = ctx.db.with_snapshot(|s| s.characters[&char_id].balance);
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(
+            inst_rep,
+            DungeonRuntimeInstance {
+                instance_id: inst_rep,
+                dungeon_id: 1,
+                solar_system_id: sys_id,
+                owner_char_id: char_id,
+                base_position: r_pos,
+                rooms: vec![room_rep],
+                created_unix: 1_785_100_000,
+                ..Default::default()
+            },
+        );
+        s.instances.insert(
+            inst_wild,
+            DungeonRuntimeInstance {
+                instance_id: inst_wild,
+                dungeon_id: 1,
+                solar_system_id: sys_id,
+                owner_char_id: char_id,
+                base_position: [r_pos[0] + 20_000.0, 0.0, 0.0],
+                rooms: vec![room_wild],
+                created_unix: 1_785_100_000,
+                ..Default::default()
+            },
+        );
+    });
+
+    // Part A: Repeatable OnCargoDelivered (15 -> 14 -> 15 must NOT re-fire; 15 -> 9 -> 10 DOES re-fire).
+    let mat_rep = materialize_dungeon_room_entities(&ctx, sys_id, inst_rep, 0)
+        .await
+        .unwrap();
+    let rep_cont = mat_rep.object_ids[0];
+    on_dungeon_container_cargo_changed(&ctx, char_id, Some(sys_id), 9_001, rep_cont, 34, 15).await;
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters[&char_id].balance),
+        IskCents(start_isk.0 + IskCents::from_isk(1_000_000).0),
+        "first delivery 15 >= 10 fires GrantReward once"
+    );
+    // Withdraw 1 (net 14 >= 10) then re-deposit 1 (net 15): latch must stay set, no second GrantReward.
+    on_dungeon_container_cargo_changed(&ctx, char_id, Some(sys_id), rep_cont, 9_001, 34, 1).await;
+    on_dungeon_container_cargo_changed(&ctx, char_id, Some(sys_id), 9_001, rep_cont, 34, 1).await;
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters[&char_id].balance),
+        IskCents(start_isk.0 + IskCents::from_isk(1_000_000).0),
+        "1-unit bounce above required_quantity (15 -> 14 -> 15) must NOT re-fire repeatable trigger"
+    );
+    // Withdraw 6 (net 9 < 10) clears latch, then re-deposit 1 (net 10 >= 10) legitimately re-fires!
+    on_dungeon_container_cargo_changed(&ctx, char_id, Some(sys_id), rep_cont, 9_001, 34, 6).await;
+    on_dungeon_container_cargo_changed(&ctx, char_id, Some(sys_id), 9_001, rep_cont, 34, 1).await;
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters[&char_id].balance),
+        IskCents(start_isk.0 + 2 * IskCents::from_isk(1_000_000).0),
+        "dropping below required_quantity (15 -> 9) and re-delivering to 10 must re-fire repeatable trigger"
+    );
+
+    // Part B: Two-container wildcard CompoundAnd: deposit into C1 & C2, drain C1 then C2,
+    // re-deposit into C1 + destroy Guard Pylon -> must complete without stale C1 latch!
+    let mat_wild = materialize_dungeon_room_entities(&ctx, sys_id, inst_wild, 0)
+        .await
+        .unwrap();
+    let (c1, c2, pylon) = (mat_wild.object_ids[0], mat_wild.object_ids[1], mat_wild.object_ids[2]);
+    on_dungeon_container_cargo_changed(&ctx, char_id, Some(sys_id), 9_001, c1, 34, 10).await;
+    on_dungeon_container_cargo_changed(&ctx, char_id, Some(sys_id), 9_001, c2, 34, 10).await;
+    on_dungeon_container_cargo_changed(&ctx, char_id, Some(sys_id), c1, 9_001, 34, 10).await;
+    on_dungeon_container_cargo_changed(&ctx, char_id, Some(sys_id), c2, 9_001, 34, 10).await;
+    read_dungeon_runtime_store(&ctx, |s| {
+        let r = &s.instances[&inst_wild].rooms[0];
+        assert!(
+            !r.armed_timers
+                .keys()
+                .any(|k| k.starts_with("__latch:") || k.starts_with("__and:")),
+            "emptying both containers in wildcard CompoundAnd must leave zero stale __latch/__and keys: {:?}",
+            r.armed_timers
+        );
+    });
+    on_dungeon_container_cargo_changed(&ctx, char_id, Some(sys_id), 9_001, c1, 34, 10).await;
+    let _ = crate::combat::death_pipeline::on_ball_destroyed_sync(
+        &ctx,
+        sys_id,
+        pylon,
+        Some(char_id),
+        DVec3::ZERO,
+    );
+    read_dungeon_runtime_store(&ctx, |s| {
+        let inst = &s.instances[&inst_wild];
+        assert!(
+            inst.completed && inst.rooms[0].triggers[0].fired,
+            "re-depositing into C1 after draining C1 & C2 plus destroying pylon must complete CompoundAnd"
+        );
     });
 }
 

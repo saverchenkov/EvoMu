@@ -8,8 +8,9 @@
 use super::{
     bind_spawn_object_index_if_omitted, classify_dungeon_object_spawn, get_active_wiki_pve_catalog,
     has_omitted_object_trigger, rebind_auto_object_targets, select_entry_index_for_dungeon,
-    wiki_faction_name_to_id, WikiBuildStats, WikiDungeonBuild, WikiLootItemSpec, WikiObjective,
-    WikiPveEntry, WikiSpawn, WikiTrigger, WikiTriggerActionSpec, WikiWave, WikiWaveDistance,
+    trigger_binds_spawn_tag_to_object_kind, trigger_has_object_kind, wiki_faction_name_to_id,
+    WikiBuildStats, WikiDungeonBuild, WikiLootItemSpec, WikiObjective, WikiPveEntry, WikiSpawn,
+    WikiTrigger, WikiTriggerActionSpec, WikiWave, WikiWaveDistance,
 };
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_legacy_ess::{
@@ -1141,6 +1142,7 @@ enum ResolvedSpawn {
     DungeonObject {
         type_id: u32,
         name: String,
+        count: usize,
         is_concrete: bool,
         is_container: bool,
         destructible: bool,
@@ -1154,36 +1156,46 @@ fn resolve_spawn_entry(
     sys_id: u32,
     dungeon_id: DungeonTemplateId,
     sp: &WikiSpawn,
+    explicit_object_trigger: bool,
 ) -> ResolvedSpawn {
-    if is_zero_spawn_count(sp.count.min, sp.count.max) {
+    let count = pick_spawn_count(ctx, sp.count.min, sp.count.max);
+    if count == 0 {
         return ResolvedSpawn::Skipped;
     }
-    if let Some(flags) = classify_dungeon_object_spawn(sp) {
-        let concrete_tid = sp
+
+    let has_valid_combat_npc_type = !ctx.sde.types.is_empty()
+        && sp
             .resolution
             .type_ids
             .iter()
             .chain(sp.resolution.candidate_type_ids.iter())
             .copied()
-            .find(|&tid| tid > 0);
-        let type_id = concrete_tid.unwrap_or(flags.default_type_id);
-        let name = if sp.raw_name.trim().is_empty() {
-            flags.default_name.to_string()
-        } else {
-            sp.raw_name.trim().to_string()
-        };
-        return ResolvedSpawn::DungeonObject {
-            type_id,
-            name,
-            is_concrete: concrete_tid.is_some(),
-            is_container: flags.is_container,
-            destructible: flags.destructible,
-        };
-    }
+            .any(|tid| is_valid_combat_npc_type(&ctx.sde, tid));
 
-    let count = pick_spawn_count(ctx, sp.count.min, sp.count.max);
-    if count == 0 {
-        return ResolvedSpawn::Skipped;
+    if !has_valid_combat_npc_type || explicit_object_trigger {
+        if let Some(flags) = classify_dungeon_object_spawn(sp) {
+            let concrete_tid = sp
+                .resolution
+                .type_ids
+                .iter()
+                .chain(sp.resolution.candidate_type_ids.iter())
+                .copied()
+                .find(|&tid| tid > 0);
+            let type_id = concrete_tid.unwrap_or(flags.default_type_id);
+            let name = if sp.raw_name.trim().is_empty() {
+                flags.default_name.to_string()
+            } else {
+                sp.raw_name.trim().to_string()
+            };
+            return ResolvedSpawn::DungeonObject {
+                type_id,
+                name,
+                count,
+                is_concrete: concrete_tid.is_some(),
+                is_container: flags.is_container,
+                destructible: flags.destructible,
+            };
+        }
     }
 
     let concrete_tids: Vec<u32> = sp
@@ -1735,8 +1747,26 @@ pub(crate) fn build_wiki_deadspace_rooms(
                     .or_else(|| trimmed_opt(sp.trigger.as_ref().and_then(|t| t.trigger_ship_tag.as_deref())))
                     .or_else(|| backref_tags.get(&(wwave.wave_index, sp_idx + 1)).cloned());
                 let custom_name = trimmed_opt(Some(sp.raw_name.as_str()));
+                let spawn_tag_lc = tag.as_deref().map(str::to_ascii_lowercase);
+                let room_triggers_bind_tag = spawn_tag_lc.as_deref().is_some_and(|tlc| {
+                    wroom.waves.iter().any(|w| {
+                        w.wave_trigger
+                            .as_ref()
+                            .is_some_and(|wtr| trigger_binds_spawn_tag_to_object_kind(wtr, tlc))
+                            || w.spawns.iter().any(|osp| {
+                                osp.trigger
+                                    .as_ref()
+                                    .is_some_and(|strig| trigger_binds_spawn_tag_to_object_kind(strig, tlc))
+                            })
+                    })
+                });
+                let explicit_object_trigger = sp
+                    .trigger
+                    .as_ref()
+                    .is_some_and(trigger_has_object_kind)
+                    || room_triggers_bind_tag;
 
-                match resolve_spawn_entry(ctx, entry, sys_id, dungeon_id, sp) {
+                match resolve_spawn_entry(ctx, entry, sys_id, dungeon_id, sp, explicit_object_trigger) {
                     ResolvedSpawn::CombatNpc {
                         type_id,
                         count,
@@ -1786,6 +1816,7 @@ pub(crate) fn build_wiki_deadspace_rooms(
                     ResolvedSpawn::DungeonObject {
                         type_id,
                         name,
+                        count,
                         is_concrete,
                         is_container,
                         destructible,
@@ -1794,33 +1825,37 @@ pub(crate) fn build_wiki_deadspace_rooms(
                         if is_concrete {
                             stats.concrete_rows += 1;
                         }
-                        if is_container {
-                            stats.container_objects += 1;
+                        for dup_i in 0..count {
+                            if is_container {
+                                stats.container_objects += 1;
+                            }
+                            let obj_idx = objects.len();
+                            if dup_i == 0 {
+                                spawn_object_index.insert((wwave.wave_index, sp_idx), obj_idx);
+                            }
+                            let dist = wwave
+                                .distance_m
+                                .map(WikiWaveDistance::effective_m)
+                                .unwrap_or(2_200.0 + (obj_idx as f64) * 500.0);
+                            let angle = (obj_idx as f64) * 1.1;
+                            objects.push(DungeonRuntimeObject {
+                                ball_id: 0,
+                                type_id,
+                                name: name.clone(),
+                                position: [
+                                    room_pos[0] + angle.cos() * dist,
+                                    room_pos[1],
+                                    room_pos[2] + angle.sin() * dist,
+                                ],
+                                radius: 350.0,
+                                is_container,
+                                loot_items: Vec::new(),
+                                spawned: false,
+                                destructible,
+                                tag: tag.clone(),
+                                ..Default::default()
+                            });
                         }
-                        let obj_idx = objects.len();
-                        spawn_object_index.insert((wwave.wave_index, sp_idx), obj_idx);
-                        let dist = wwave
-                            .distance_m
-                            .map(WikiWaveDistance::effective_m)
-                            .unwrap_or(2_200.0 + (obj_idx as f64) * 500.0);
-                        let angle = (obj_idx as f64) * 1.1;
-                        objects.push(DungeonRuntimeObject {
-                            ball_id: 0,
-                            type_id,
-                            name,
-                            position: [
-                                room_pos[0] + angle.cos() * dist,
-                                room_pos[1],
-                                room_pos[2] + angle.sin() * dist,
-                            ],
-                            radius: 350.0,
-                            is_container,
-                            loot_items: Vec::new(),
-                            spawned: false,
-                            destructible,
-                            tag,
-                            ..Default::default()
-                        });
                     }
                     ResolvedSpawn::Skipped => {
                         stats.skipped_rows += 1;

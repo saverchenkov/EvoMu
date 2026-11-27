@@ -1007,8 +1007,6 @@ pub struct DungeonRuntimeInstance {
     pub despawn_after_unix: Option<u64>,
     #[serde(default)]
     pub escalation_instance_id: Option<i64>,
-    #[serde(default)]
-    pub mission_instance_id: Option<i64>,
 }
 
 impl DungeonRuntimeInstance {

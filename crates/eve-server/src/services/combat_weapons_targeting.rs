@@ -154,20 +154,8 @@ pub(crate) async fn apply_vorton_arc_secondary_hits(
                     arc_ball.velocity.length(),
                 );
                 let arc_vic_opt = ctx.db.with_snapshot(|snap| {
-                    if snap.characters.contains_key(&arc_id) {
-                        Some(arc_id)
-                    } else {
-                        snap.characters
-                            .values()
-                            .find(|c| c.active_ship_id == arc_id)
-                            .map(|c| c.character_id)
-                            .or_else(|| {
-                                snap.items
-                                    .get(&arc_id)
-                                    .map(|i| i.owner_id)
-                                    .filter(|oid| snap.characters.contains_key(oid))
-                            })
-                    }
+                    super::resolve_pvp_target_info_in_snap(snap, Some(sys_id), arc_id, true, false)
+                        .map(|(vcid, _)| vcid)
                 });
                 if let Some(vcid) = arc_vic_opt {
                     if vcid != char_id {

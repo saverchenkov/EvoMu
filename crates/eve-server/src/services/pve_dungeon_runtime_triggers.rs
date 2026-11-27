@@ -563,10 +563,16 @@ fn eval_leaf_outcome(
             };
             let req = i64::from((*required_quantity).max(1));
             let subject = format!("cargo:{cont_id}:{}", item_type_id.unwrap_or(0));
-            if *is_deposit && net_delivered >= req {
-                LeafOccurrence::Active {
-                    subject,
-                    discrete_event: false,
+            if net_delivered >= req {
+                if *is_deposit {
+                    LeafOccurrence::Active {
+                        subject,
+                        discrete_event: false,
+                    }
+                } else {
+                    // Preserve the occurrence latch while net delivered cargo remains >= `required_quantity`
+                    // so partial withdrawals cannot bounce-fire repeatable triggers (`OWN-DIFF-P1-03`).
+                    LeafOccurrence::Irrelevant
                 }
             } else {
                 LeafOccurrence::Inactive {
@@ -822,6 +828,13 @@ fn evaluate_trigger_with_occurrence_latch(
                 if matches!(leaf, DungeonTriggerKind::OnCargoDelivered { .. }) {
                     let ok = cargo_delivered_clause_satisfied_in_room(room, leaf);
                     if !ok {
+                        let cargo_latch_pfx =
+                            format!("__latch:{room_vec_idx}:{trig_idx}:{path}:cargo:");
+                        armed_timers.retain(|k, _| !k.starts_with(&cargo_latch_pfx));
+                        let _ = evaluate_leaf_clause_with_latch(
+                            leaf, inst, room, armed_timers, room_vec_idx, trig_idx, path, event, now_unix,
+                        );
+                    } else if matches!(event, DungeonEvent::CargoDelivered { is_deposit: false, .. }) {
                         let _ = evaluate_leaf_clause_with_latch(
                             leaf, inst, room, armed_timers, room_vec_idx, trig_idx, path, event, now_unix,
                         );

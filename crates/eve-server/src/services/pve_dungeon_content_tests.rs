@@ -4311,3 +4311,214 @@ async fn r6_bf01_on_npc_damaged_tags_and_bf02_on_approach_object_binding() {
     assert!(r0_b2.triggers.iter().any(|t| matches!(t.kind, DungeonTriggerKind::OnApproach { target_object_index: Some(1), anchor_pos, .. } if anchor_pos == r0_b2.objects[1].position)));
     assert!(r0_b2.triggers.iter().any(|t| matches!(t.kind, DungeonTriggerKind::OnLoot { target_object_index: Some(1), .. })));
 }
+
+#[tokio::test]
+async fn own_diff_p1_01_combat_sentries_object_counts_and_destructible_defaults() {
+    let mk_t = |type_id: u32, group_id: u32, category_id: u32, name: &str| eve_sde::InvType {
+        type_id,
+        group_id,
+        category_id,
+        name: name.into(),
+        mass: 1_000.0,
+        volume: 100.0,
+        capacity: 0.0,
+        radius: 100.0,
+        base_price: 100.0,
+        published: true,
+        portion_size: 100,
+        market_group_id: None,
+        race_id: None,
+        faction_id: None,
+        variation_parent_type_id: None,
+        description_id: None,
+        icon_id: None,
+        graphic_id: None,
+        sound_id: None,
+        meta_group_id: None,
+        meta_level: None,
+        tech_level: None,
+        default_effect_id: None,
+        description: String::new(),
+        effect_ids: Vec::new(),
+        default_attributes: std::collections::HashMap::new(),
+    };
+    let mut sde = (*shared_sde()).clone();
+    sde.types
+        .entry(16_739)
+        .or_insert_with(|| mk_t(16_739, 383, 11, "Tower Sentry Angel I"));
+    sde.types
+        .entry(10_005)
+        .or_insert_with(|| mk_t(10_005, 550, 11, "Gistii Ambusher"));
+    sde.types
+        .entry(16_757)
+        .or_insert_with(|| mk_t(16_757, 319, 11, "Angel Bunker"));
+    sde.types
+        .entry(23)
+        .or_insert_with(|| mk_t(23, 12, 2, "Cargo Container"));
+    let ctx = make_ctx(Arc::new(sde));
+    let sys_id = 30_000_142u32;
+    let did_mixed = 993_101u32;
+    let did_sentry_only = 993_102u32;
+
+    let payload = format!(
+        r#"{{
+  "header": {{ "schema_version": 2, "source": "unit-test", "license": "CC BY-SA 4.0" }},
+  "indexes": {{
+    "by_dungeon_id": {{
+      "{did_mixed}": ["p1_01_mixed"],
+      "{did_sentry_only}": ["p1_01_sentry_only"]
+    }}
+  }},
+  "entries": [
+    {{
+      "entry_id": "p1_01_mixed",
+      "base_title": "Mixed Sentries And Structures",
+      "sde_matches": {{ "dungeon_ids": [{did_mixed}], "mission_ids": [] }},
+      "rooms": [{{
+        "room_index": 1,
+        "has_acceleration_gate": true,
+        "waves": [{{
+          "wave_index": 1,
+          "timing": "initial_spawn",
+          "spawns": [
+            {{
+              "raw_class": "Sentry",
+              "raw_name": "Tower Sentry Angel I",
+              "destructible": true,
+              "loot": "Scrap",
+              "count": {{"min": 2, "max": 2}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16739]}}
+            }},
+            {{
+              "raw_class": "",
+              "raw_name": "Gistii Ambusher",
+              "destructible": true,
+              "loot": "9th Tier",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [10005]}}
+            }},
+            {{
+              "raw_class": "Sentry",
+              "raw_name": "Triggered Relay Sentry",
+              "destructible": true,
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16739]}},
+              "trigger": {{"kind": "structure_destroyed"}}
+            }},
+            {{
+              "raw_class": "Structure",
+              "raw_name": "Relay Pylon",
+              "tag": "pylon",
+              "destructible": true,
+              "count": {{"min": 2, "max": 2}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16757]}}
+            }},
+            {{
+              "raw_class": "Destructible Object",
+              "raw_name": "Omitted Flag Core",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "unresolved", "type_ids": []}}
+            }},
+            {{
+              "raw_class": "Destructible",
+              "raw_name": "Short Destructible Core",
+              "count": {{"min": 1, "max": 1}},
+              "resolution": {{"status": "unresolved", "type_ids": []}}
+            }}
+          ]
+        }}]
+      }}]
+    }},
+    {{
+      "entry_id": "p1_01_sentry_only",
+      "base_title": "Sentry Only Wave",
+      "sde_matches": {{ "dungeon_ids": [{did_sentry_only}], "mission_ids": [] }},
+      "rooms": [{{
+        "room_index": 1,
+        "has_acceleration_gate": true,
+        "waves": [{{
+          "wave_index": 1,
+          "timing": "initial_spawn",
+          "wave_trigger": {{"kind": "group_destroyed", "source_wave_index": 1, "unlocks_gate": true}},
+          "spawns": [
+            {{
+              "raw_class": "Sentry",
+              "raw_name": "Tower Sentry Angel I",
+              "destructible": true,
+              "count": {{"min": 3, "max": 3}},
+              "resolution": {{"status": "resolved_exact", "type_ids": [16739]}}
+            }}
+          ]
+        }}]
+      }}]
+    }}
+  ]
+}}"#
+    );
+    let cat = parse_and_validate_wiki_pve_json(&payload).expect("valid own_diff_p1_01 catalog");
+    install_wiki_pve_catalog_for_test(&ctx, Arc::new(cat));
+
+    let built_mixed = build_wiki_deadspace_rooms(
+        &ctx,
+        sys_id,
+        DungeonTemplateId::new(did_mixed),
+        "Mixed Sentries And Structures",
+        [50_000_000.0, 0.0, 0.0],
+        false,
+    )
+    .expect("mixed build");
+    let r_mixed = &built_mixed.rooms[0];
+    assert_eq!(r_mixed.npc_groups.len(), 1);
+    assert_eq!(
+        r_mixed.npc_groups[0].npc_specs,
+        vec![(16_739, 2), (10_005, 1)],
+        "Cat-11 combat NPC sentry and blank-class NPC must remain CombatNpc instead of inert DungeonObject"
+    );
+    // Expected objects: 1 triggered relay sentry + 2 Relay Pylon copies + 1 Omitted Flag Core + 1 Short Destructible Core = 5.
+    assert_eq!(r_mixed.objects.len(), 5, "multi-count objects and explicit triggered object must materialize");
+    let triggered_sentry = r_mixed
+        .objects
+        .iter()
+        .find(|o| o.name == "Triggered Relay Sentry")
+        .expect("explicit structure_destroyed sentry object");
+    assert!(triggered_sentry.destructible && triggered_sentry.type_id == 16_739);
+
+    let pylons: Vec<&DungeonRuntimeObject> = r_mixed
+        .objects
+        .iter()
+        .filter(|o| o.name == "Relay Pylon")
+        .collect();
+    assert_eq!(pylons.len(), 2, "sp.count=2 must materialize 2 DungeonRuntimeObjects");
+    assert!(pylons.iter().all(|p| p.type_id == 16_757 && p.destructible && !p.is_container && p.tag.as_deref() == Some("pylon")));
+    assert_ne!(pylons[0].position, pylons[1].position);
+
+    for omitted_name in ["Omitted Flag Core", "Short Destructible Core"] {
+        let obj = r_mixed
+            .objects
+            .iter()
+            .find(|o| o.name == omitted_name)
+            .expect(omitted_name);
+        assert!(
+            obj.destructible && !obj.is_container,
+            "{omitted_name} with omitted destructible must default destructible=true, is_container=false"
+        );
+    }
+
+    let built_sentry = build_wiki_deadspace_rooms(
+        &ctx,
+        sys_id,
+        DungeonTemplateId::new(did_sentry_only),
+        "Sentry Only Wave",
+        [60_000_000.0, 0.0, 0.0],
+        false,
+    )
+    .expect("sentry-only build");
+    let r_sentry = &built_sentry.rooms[0];
+    assert!(
+        !r_sentry.objects.iter().any(|o| o.type_id == 16_739),
+        "Cat-11 combat NPC sentry must NOT become an inert DungeonRuntimeObject"
+    );
+    assert_eq!(r_sentry.npc_groups.len(), 1, "sentry-only wave must NOT be dropped");
+    assert_eq!(r_sentry.npc_groups[0].npc_specs, vec![(16_739, 3)]);
+    assert!(r_sentry.triggers.iter().any(|t| matches!(t.kind, DungeonTriggerKind::OnKill { target_npc_group: Some(1), .. })));
+}
