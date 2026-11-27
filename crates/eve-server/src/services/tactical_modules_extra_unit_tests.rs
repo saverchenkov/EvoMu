@@ -137,9 +137,20 @@ fn test_navigation_lock_entosis_unlock_and_remote_repair_boundaries() {
     assert!((incoming_remote_repair_multiplier(&ctx, ship_id) - 1.0).abs() < 1e-6);
     assert!(check_ship_navigation_lock(&ctx, ship_id, "warp").is_ok());
 
-    tactical_test_helpers::mark_clone_vat_bay_activated(&ctx, ship_id);
+    let cvb_mod_id = 910_002_i64;
+    insert_item(&ctx, ship_id, 28_352, 9001, 30_000_142, InventoryFlag::None, 1, true);
+    insert_item(&ctx, cvb_mod_id, 23_735, 9001, ship_id, InventoryFlag::HiSlot0, 1, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(cvb_mod_id, true);
+        snap.module_active_states.insert(cvb_mod_id);
+        snap.cluster_and_runtime
+            .clone_vat_bay_state
+            .active_by_ship
+            .insert(ship_id, (cvb_mod_id, now + 300));
+    });
     tactical_test_helpers::set_lance_caster_lock_until(&ctx, ship_id, now + 120);
     assert!(is_clone_vat_bay_active_required(&ctx, ship_id));
+    assert!(!is_clone_vat_bay_active_at(&ctx, ship_id, now + 300));
     assert!(has_lance_caster_lock(&ctx, ship_id));
     assert_eq!(check_ship_navigation_lock(&ctx, ship_id, "warp").unwrap_err().code, "LanceFiringLockActive");
 

@@ -1434,12 +1434,19 @@ pub fn safe_logoff_blocking_space_conditions(
     sys_id: u32,
 ) -> Vec<&'static str> {
     let mut conds = Vec::new();
-    let has_persisted_active_mods = ctx.db.with_snapshot(|snap| {
-        snap.module_active_states.iter().any(|&mid| {
+    let (has_persisted_active_mods, has_active_clone_vat_bay) = ctx.db.with_snapshot(|snap| {
+        let active_mods = snap.module_active_states.iter().any(|&mid| {
             snap.items
                 .get(&mid)
                 .is_some_and(|i| i.location_id == ship_id)
-        })
+        });
+        let active_cvb = crate::services::character_clone_jump_rules::is_ship_clone_vat_bay_active(
+            ctx,
+            snap,
+            ship_id,
+            ctx.now_unix(),
+        );
+        (active_mods, active_cvb)
     });
     let has_nav_lock = !crate::services::structure_control_ops::is_structure_vessel(ctx, ship_id)
         && (crate::services::tactical_modules::check_ship_navigation_lock(
@@ -1448,7 +1455,7 @@ pub fn safe_logoff_blocking_space_conditions(
             "safe logoff",
         )
         .is_err()
-            || crate::services::tactical_modules::is_clone_vat_bay_active_required(ctx, ship_id));
+            || has_active_clone_vat_bay);
     let has_active_mods = has_persisted_active_mods
         || has_nav_lock
         || ctx.systems.has_active_modules_or_cloak_sync(sys_id, ship_id)

@@ -64,8 +64,8 @@ pub(super) fn compute_disconnect_hold_until_unix(
     let cycle_exp = ctx
         .systems
         .max_active_module_cycle_expiry_unix_sync(sys_id, ship_id, cyno_exp, now_unix);
-    let immobilize_hold = if crate::services::tactical_modules::is_clone_vat_bay_active_required(
-        ctx, ship_id,
+    let immobilize_hold = if crate::services::tactical_modules::is_clone_vat_bay_active_at(
+        ctx, ship_id, now_unix,
     ) || crate::services::space_navigation_advanced::check_immobilizing_module_active(
         ctx, ship_id, "warp",
     )

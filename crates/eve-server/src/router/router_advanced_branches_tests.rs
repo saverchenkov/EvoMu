@@ -435,7 +435,6 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
         ctx_db_keys_differ, get_lance_caster_lock_until_for_scope,
         get_lance_victim_debuff_until_for_scope, get_system_sim_time_for_scope,
         get_tsb_self_penalty_until_for_scope, has_any_entosis_target_cycles,
-        has_clone_vat_bay_activated_for_scope, mark_clone_vat_bay_activated_for_scope,
         set_entosis_target_cycles_for_scope, set_lance_caster_lock_until_for_scope,
         set_lance_victim_debuff_until_for_scope, set_system_sim_time_for_scope,
         set_tsb_self_penalty_until_for_scope, TacticalKeyScope,
@@ -472,8 +471,6 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
     set_lance_victim_debuff_until_for_scope(&ctx1, TacticalKeyScope::Db, ship_b, 2_002);
     set_tsb_self_penalty_until_for_scope(&ctx1, TacticalKeyScope::Instance, ship_a, 3_001);
     set_tsb_self_penalty_until_for_scope(&ctx1, TacticalKeyScope::Db, ship_b, 3_002);
-    mark_clone_vat_bay_activated_for_scope(&ctx1, TacticalKeyScope::Instance, ship_a);
-    mark_clone_vat_bay_activated_for_scope(&ctx1, TacticalKeyScope::Db, ship_b);
     set_entosis_target_cycles_for_scope(&ctx1, TacticalKeyScope::Instance, ship_a, 99, 4);
     set_entosis_target_cycles_for_scope(&ctx1, TacticalKeyScope::Db, ship_b, 98, 5);
     set_system_sim_time_for_scope(&ctx1, TacticalKeyScope::Instance, 30_000_142, 12.5);
@@ -716,16 +713,6 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
         get_tsb_self_penalty_until_for_scope(&ctx2, TacticalKeyScope::Db, ship_b),
         Some(3_002)
     );
-    assert!(has_clone_vat_bay_activated_for_scope(
-        &ctx2,
-        TacticalKeyScope::Instance,
-        ship_a
-    ));
-    assert!(has_clone_vat_bay_activated_for_scope(
-        &ctx2,
-        TacticalKeyScope::Db,
-        ship_b
-    ));
     assert!(!has_any_entosis_target_cycles(&ctx2));
     assert_eq!(
         get_system_sim_time_for_scope(&ctx2, TacticalKeyScope::Instance, 30_000_142),
