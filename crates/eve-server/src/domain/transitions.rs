@@ -219,18 +219,60 @@ async fn wake_destination_handle(
     })
 }
 
+struct TransitionDbRollbackSnapshot {
+    db: eve_db::characters::SpaceTransitionDbRollbackSnapshot,
+    prev_ship_fitting: Option<eve_dogma::ShipFittingEngine>,
+    deactivated: bool,
+}
+
+fn capture_transition_db_rollback(
+    ctx: &ServerContext,
+    req: &RelocateInSpaceRequest,
+) -> TransitionDbRollbackSnapshot {
+    let db = ctx.db.capture_space_transition_rollback(
+        req.char_id,
+        req.ship_id,
+        req.old_sys_id,
+        &ctx.sde,
+    );
+    let prev_ship_fitting = (db.effective_ship_id > 0)
+        .then(|| {
+            ctx.ship_fittings
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&db.effective_ship_id)
+                .cloned()
+        })
+        .flatten();
+    TransitionDbRollbackSnapshot {
+        db,
+        prev_ship_fitting,
+        deactivated: false,
+    }
+}
+
 async fn rollback_failed_destination(
     ctx: &ServerContext,
     req: &RelocateInSpaceRequest,
+    rollback_opt: Option<&TransitionDbRollbackSnapshot>,
     old_handle: Option<&SystemHandle>,
     taken: Option<crate::system_actor::TakenBall>,
 ) {
-    if let Some((dock_id, is_structure)) = req.old_dock {
-        let _ = ctx.db.dock_character(req.char_id, dock_id, is_structure);
-    } else if req.old_sys_id > 0 {
-        let _ = ctx
-            .db
-            .set_character_solar_system(req.char_id, req.old_sys_id, &ctx.sde);
+    let _ = ctx.db.rollback_space_transition(
+        req.char_id,
+        req.ship_id,
+        req.old_sys_id,
+        req.old_dock,
+        rollback_opt.map(|rb| &rb.db),
+        &ctx.sde,
+    );
+    if let Some(rb) = rollback_opt {
+        if rb.db.effective_ship_id > 0 {
+            match &rb.prev_ship_fitting {
+                Some(prev_fit) => ctx.store_ship_fitting(rb.db.effective_ship_id, prev_fit.clone()),
+                None => ctx.invalidate_ship_fitting_cache_only(rb.db.effective_ship_id),
+            }
+        }
     }
     if let (Some(oh), Some(ball)) = (old_handle, taken) {
         let _ = oh.restore_ball(ball).await;
@@ -435,9 +477,11 @@ pub async fn relocate_character_in_space(
     Ok(outcome)
 }
 
-/// Variant of [`relocate_character_in_space`] invoking `pre_spawn_hook` after departure cleanups
-/// (such as `deactivate_ship_modules_on_leave_space`) and immediately before destination
+/// Variant of [`relocate_character_in_space`] invoking `pre_spawn_hook` after rollbackable
+/// pre-spawn module DB/fit-cache preparation and immediately before destination
 /// `spawn_arrival_ship_ball` / `build_ship_combat_state` so fitting heat/damage state stays synced.
+/// Non-combat departure mutations (`abort_self_destruct_for_ship`, drone/probe abandonment,
+/// runtime EWAR cleanup, `leave_space_in_snap`, and `item_positions`) run only after spawn succeeds.
 pub async fn relocate_character_in_space_with_pre_spawn<F, T>(
     ctx: &ServerContext,
     mut session: Option<&mut SessionState>,
@@ -471,6 +515,7 @@ where
             false
         };
 
+        let db_rollback = capture_transition_db_rollback(ctx, &req);
         let updated_ch = ctx
             .db
             .set_character_solar_system(req.char_id, req.dest_sys_id, &ctx.sde)
@@ -490,7 +535,7 @@ where
             match wake_destination_handle(ctx, req.dest_sys_id, &req.destination_wake).await {
                 Ok(h) => h,
                 Err(err) => {
-                    rollback_failed_destination(ctx, &req, None, None).await;
+                    rollback_failed_destination(ctx, &req, Some(&db_rollback), None, None).await;
                     return Err(err);
                 }
             };
@@ -524,7 +569,8 @@ where
                 {
                     Ok(v) => v,
                     Err(err) => {
-                        rollback_failed_destination(ctx, &req, None, None).await;
+                        rollback_failed_destination(ctx, &req, Some(&db_rollback), None, None)
+                            .await;
                         return Err(err);
                     }
                 };
@@ -572,7 +618,11 @@ where
             if req.cleanup.stop_and_flush_warp_on_cross_system {
                 stopped_mid_warp = detect_and_stop_warp(oh, req.ship_id, true).await;
             }
-            let ball = oh.take_ball(req.ship_id).await;
+            let ball = if req.cleanup.deactivate_modules {
+                oh.take_ball_preserving_db(req.ship_id).await
+            } else {
+                oh.take_ball(req.ship_id).await
+            };
             if req.require_take_ball && ball.is_none() {
                 return Err(DomainError::precondition_failed(
                     req.take_ball_missing_code,
@@ -603,6 +653,7 @@ where
         None
     };
 
+    let mut db_rollback = capture_transition_db_rollback(ctx, &req);
     let updated_ch = match ctx
         .db
         .set_character_solar_system(req.char_id, req.dest_sys_id, &ctx.sde)
@@ -623,7 +674,14 @@ where
         match wake_destination_handle(ctx, req.dest_sys_id, &req.destination_wake).await {
             Ok(h) => h,
             Err(err) => {
-                rollback_failed_destination(ctx, &req, old_handle.as_ref(), taken).await;
+                rollback_failed_destination(
+                    ctx,
+                    &req,
+                    Some(&db_rollback),
+                    old_handle.as_ref(),
+                    taken,
+                )
+                .await;
                 return Err(err);
             }
         };
@@ -634,6 +692,53 @@ where
         req.ship_id
     };
     let spawn_pos = req.arrival_position.unwrap_or(req.fallback_arrival_position);
+
+    if effective_ship_id > 0 && req.cleanup.deactivate_modules {
+        let deact = ctx.db.with_mut_snapshot(|snap| {
+            crate::services::space_navigation_advanced::deactivate_ship_modules_in_snap(
+                snap,
+                effective_ship_id,
+            )
+        });
+        if !deact.active_mods.is_empty() || deact.cleared_overloads {
+            ctx.invalidate_ship_fitting_cache_only(effective_ship_id);
+        }
+        db_rollback.db.prev_active_mods = deact.active_mods;
+        db_rollback.db.prev_active_charges = deact.prev_active_charges;
+        db_rollback.db.prev_ship_fit_inputs = deact.prev_ship_fit_inputs;
+        db_rollback.db.cleared_overloads = deact.cleared_overloads;
+        db_rollback.deactivated = true;
+    }
+
+    let hook_out = pre_spawn_hook();
+
+    let (dest_tick, ship_type_id) = if effective_ship_id > 0 {
+        match spawn_arrival_ship_ball(
+            ctx,
+            &dest_handle,
+            &req,
+            effective_ship_id,
+            spawn_pos,
+            taken.as_ref(),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(err) => {
+                rollback_failed_destination(
+                    ctx,
+                    &req,
+                    Some(&db_rollback),
+                    old_handle.as_ref(),
+                    taken,
+                )
+                .await;
+                return Err(err);
+            }
+        }
+    } else {
+        (0, 0)
+    };
 
     if effective_ship_id > 0 {
         if req.cleanup.abort_self_destruct && req.was_in_space {
@@ -647,12 +752,21 @@ where
                 req.old_sys_id,
             );
         }
-        if req.cleanup.deactivate_modules {
-            crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
+        if db_rollback.deactivated {
+            let active_mods = std::mem::take(&mut db_rollback.db.prev_active_mods);
+            let deact_touched = !active_mods.is_empty() || db_rollback.db.cleared_overloads;
+            crate::services::space_navigation_advanced::finish_deactivate_ship_modules_effects(
                 ctx,
                 req.char_id,
+                (req.old_sys_id > 0).then_some(req.old_sys_id),
                 effective_ship_id,
+                active_mods,
+                db_rollback.db.cleared_overloads,
+                false,
             );
+            if deact_touched {
+                let _ = ctx.push_fit_projection_for_ship(effective_ship_id);
+            }
         }
 
         let should_leave_space = match req.cleanup.leave_space_in_snap {
@@ -683,29 +797,6 @@ where
             });
         }
     }
-
-    let hook_out = pre_spawn_hook();
-
-    let (dest_tick, ship_type_id) = if effective_ship_id > 0 {
-        match spawn_arrival_ship_ball(
-            ctx,
-            &dest_handle,
-            &req,
-            effective_ship_id,
-            spawn_pos,
-            taken.as_ref(),
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err(err) => {
-                rollback_failed_destination(ctx, &req, old_handle.as_ref(), taken).await;
-                return Err(err);
-            }
-        }
-    } else {
-        (0, 0)
-    };
     drop(taken);
 
     if req.sync_local_chat && req.old_sys_id > 0 {
@@ -735,7 +826,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eve_db::InventoryItemRecord;
+    use eve_db::{InventoryFlag, InventoryItemRecord};
 
     const JITA: u32 = 30_000_142;
     const PERIMETER: u32 = 30_000_144;
@@ -991,5 +1082,492 @@ mod tests {
             .expect("origin snapshot")
             .expect("taken ball must be restored to origin on wake failure");
         assert!((restored.position - DVec3::new(750.0, 0.0, 0.0)).length() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn cross_system_npc_station_and_upwell_structure_rollbacks_restore_system_and_dock() {
+        let ctx = ServerContext::new();
+        let old_sys = JITA;
+        let (orig_const, orig_reg) = ctx
+            .sde
+            .solar_systems
+            .get(&old_sys)
+            .map(|s| (s.constellation_id, s.region_id))
+            .expect("Jita in SDE");
+        let dest_sys = ctx
+            .sde
+            .solar_systems
+            .values()
+            .find(|s| s.solar_system_id != old_sys && s.region_id != orig_reg)
+            .map(|s| s.solar_system_id)
+            .expect("cross-region system in SDE");
+
+        // 1. NPC station wake failure atomically restores solar_system_id, constellation_id,
+        //    region_id, station_id, and ship.location_id/flag (`T2E-R2-01`).
+        let cid_npc = 90_992_001_i64;
+        let ship_npc = 91_992_001_i64;
+        let station_id = 60_003_760_i64;
+        seed_test_pilot(&ctx, cid_npc, ship_npc, old_sys);
+        ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&cid_npc).unwrap();
+            ch.constellation_id = orig_const;
+            ch.region_id = orig_reg;
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            let ship = snap.items.get_mut(&ship_npc).unwrap();
+            ship.location_id = station_id;
+            ship.flag = InventoryFlag::Hangar;
+        });
+
+        let npc_err = relocate_character_in_space(
+            &ctx,
+            None,
+            RelocateInSpaceRequest {
+                char_id: cid_npc,
+                ship_id: ship_npc,
+                old_sys_id: old_sys,
+                old_dock: Some((station_id, false)),
+                dest_sys_id: dest_sys,
+                was_in_space: false,
+                arrival_position: Some(DVec3::ZERO),
+                fallback_arrival_position: DVec3::ZERO,
+                arrival_velocity: DVec3::ZERO,
+                require_take_ball: false,
+                take_ball_missing_code: "TeleportFailed",
+                db_transition_failed_code: "TeleportFailed",
+                destination_wake: DestinationWakePolicy::GmCommand(String::new()),
+                transition_kind: SpaceTransitionKind::Teleport,
+                transition_reason: "slash_teleport",
+                combat_state_preservation: CombatStatePreservation::Fresh,
+                gate_cloak_invuln: GateCloakInvulnPolicy::none(),
+                cleanup: LeaveSpaceCleanupPolicy::gm_teleport(),
+                sync_local_chat: true,
+                persist_item_position: true,
+                record_session_change_timer: false,
+                record_solar_system_jump: false,
+                bind_beyonce: false,
+                push_set_state: false,
+            },
+        )
+        .await
+        .expect_err("empty GM wake command must reject and roll back NPC station");
+        assert_eq!(npc_err.code, "SystemTransitionFailed");
+        ctx.db.with_snapshot(|snap| {
+            let ch = &snap.characters[&cid_npc];
+            assert_eq!(ch.solar_system_id, old_sys);
+            assert_eq!(ch.constellation_id, orig_const);
+            assert_eq!(ch.region_id, orig_reg);
+            assert_eq!(ch.station_id, Some(station_id));
+            assert_eq!(ch.structure_id, None);
+            assert_eq!(snap.items[&ship_npc].location_id, station_id);
+            assert_eq!(snap.items[&ship_npc].flag, InventoryFlag::Hangar);
+        });
+
+        // 2. Upwell structure wake failure AND spawn failure must atomically restore
+        //    solar_system_id, constellation_id, region_id, structure_id, and Hangar ship (`T2E-R2-01`).
+        let cid_st = 90_992_002_i64;
+        let ship_st = 91_992_002_i64;
+        let struct_id = 1_000_992_002_i64;
+        seed_test_pilot(&ctx, cid_st, ship_st, old_sys);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.structures.insert(
+                struct_id,
+                eve_db::UpwellStructureRecord {
+                    structure_id: struct_id,
+                    type_id: 35_832,
+                    owner_corp_id: 1_000_167,
+                    solar_system_id: old_sys,
+                    name: "Rollback Astrahus".into(),
+                    position: [1_000.0, 0.0, 0.0],
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 100,
+                    shield_hp: 1.0,
+                    armor_hp: 1.0,
+                    hull_hp: 1.0,
+                    reinforced_until_unix: 0,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                    self_destruct_at_unix: None,
+                },
+            );
+            let ch = snap.characters.get_mut(&cid_st).unwrap();
+            ch.constellation_id = orig_const;
+            ch.region_id = orig_reg;
+            ch.station_id = None;
+            ch.structure_id = Some(struct_id);
+            let ship = snap.items.get_mut(&ship_st).unwrap();
+            ship.location_id = struct_id;
+            ship.flag = InventoryFlag::Hangar;
+        });
+
+        // 2a. Destination wake failure on Upwell structure dock.
+        let st_wake_err = relocate_character_in_space(
+            &ctx,
+            None,
+            RelocateInSpaceRequest {
+                char_id: cid_st,
+                ship_id: ship_st,
+                old_sys_id: old_sys,
+                old_dock: Some((struct_id, true)),
+                dest_sys_id: dest_sys,
+                was_in_space: false,
+                arrival_position: Some(DVec3::ZERO),
+                fallback_arrival_position: DVec3::ZERO,
+                arrival_velocity: DVec3::ZERO,
+                require_take_ball: false,
+                take_ball_missing_code: "TeleportFailed",
+                db_transition_failed_code: "TeleportFailed",
+                destination_wake: DestinationWakePolicy::GmCommand(String::new()),
+                transition_kind: SpaceTransitionKind::Teleport,
+                transition_reason: "slash_teleport",
+                combat_state_preservation: CombatStatePreservation::Fresh,
+                gate_cloak_invuln: GateCloakInvulnPolicy::none(),
+                cleanup: LeaveSpaceCleanupPolicy::gm_teleport(),
+                sync_local_chat: true,
+                persist_item_position: true,
+                record_session_change_timer: false,
+                record_solar_system_jump: false,
+                bind_beyonce: false,
+                push_set_state: false,
+            },
+        )
+        .await
+        .expect_err("empty GM wake command must reject and roll back structure dock");
+        assert_eq!(st_wake_err.code, "SystemTransitionFailed");
+        ctx.db.with_snapshot(|snap| {
+            let ch = &snap.characters[&cid_st];
+            assert_eq!(ch.solar_system_id, old_sys);
+            assert_eq!(ch.constellation_id, orig_const);
+            assert_eq!(ch.region_id, orig_reg);
+            assert_eq!(ch.station_id, None);
+            assert_eq!(ch.structure_id, Some(struct_id));
+            assert_eq!(snap.items[&ship_st].location_id, struct_id);
+            assert_eq!(snap.items[&ship_st].flag, InventoryFlag::Hangar);
+        });
+
+        // 2b. Destination spawn_ball_with_meta failure on Upwell structure dock.
+        let dest_handle = ctx
+            .systems
+            .wake_for_gm_command_async(dest_sys, "/tr")
+            .await
+            .expect("wake dest");
+        dest_handle
+            .panic_next_command_for_test
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let st_spawn_err = relocate_character_in_space(
+            &ctx,
+            None,
+            RelocateInSpaceRequest {
+                char_id: cid_st,
+                ship_id: ship_st,
+                old_sys_id: old_sys,
+                old_dock: Some((struct_id, true)),
+                dest_sys_id: dest_sys,
+                was_in_space: false,
+                arrival_position: Some(DVec3::ZERO),
+                fallback_arrival_position: DVec3::ZERO,
+                arrival_velocity: DVec3::ZERO,
+                require_take_ball: false,
+                take_ball_missing_code: "TeleportFailed",
+                db_transition_failed_code: "TeleportFailed",
+                destination_wake: DestinationWakePolicy::GmCommand("/tr".to_string()),
+                transition_kind: SpaceTransitionKind::Teleport,
+                transition_reason: "slash_teleport",
+                combat_state_preservation: CombatStatePreservation::Fresh,
+                gate_cloak_invuln: GateCloakInvulnPolicy::none(),
+                cleanup: LeaveSpaceCleanupPolicy::gm_teleport(),
+                sync_local_chat: true,
+                persist_item_position: true,
+                record_session_change_timer: false,
+                record_solar_system_jump: false,
+                bind_beyonce: false,
+                push_set_state: false,
+            },
+        )
+        .await
+        .expect_err("spawn_arrival_ship_ball failure must roll back structure dock");
+        assert_eq!(st_spawn_err.code, "TeleportFailed");
+        ctx.db.with_snapshot(|snap| {
+            let ch = &snap.characters[&cid_st];
+            assert_eq!(ch.solar_system_id, old_sys);
+            assert_eq!(ch.constellation_id, orig_const);
+            assert_eq!(ch.region_id, orig_reg);
+            assert_eq!(ch.station_id, None);
+            assert_eq!(ch.structure_id, Some(struct_id));
+            assert_eq!(snap.items[&ship_st].location_id, struct_id);
+            assert_eq!(snap.items[&ship_st].flag, InventoryFlag::Hangar);
+        });
+    }
+
+    #[tokio::test]
+    async fn spawn_arrival_ship_ball_failure_rolls_back_cleanups_modules_damage_and_fit_cache() {
+        let ctx = ServerContext::new();
+        let cid = 90_993_001_i64;
+        let ship_id = 91_993_001_i64;
+        let mod_id = 92_993_001_i64;
+        let drone_id = 100_993_001_i64;
+        let probe_id = 555_993_001_i64;
+        let mod_type_id = 440_u32;
+        let old_pos = DVec3::new(1_250.0, -50.0, 25.0);
+        let old_saved_pos = [old_pos.x, old_pos.y, old_pos.z];
+
+        seed_test_pilot(&ctx, cid, ship_id, JITA);
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut module = InventoryItemRecord::default();
+            module.item_id = mod_id;
+            module.type_id = mod_type_id;
+            module.owner_id = cid;
+            module.location_id = ship_id;
+            module.flag = InventoryFlag::MedSlot0;
+            module.quantity = 1;
+            module.singleton = true;
+            snap.items.insert(mod_id, module);
+
+            for tid in [587_u32, mod_type_id] {
+                for (sk_tid, _) in ctx.sde.required_skills_for_type(tid) {
+                    snap.skills.entry(cid).or_default().insert(
+                        sk_tid,
+                        eve_db::TrainedSkillRecord {
+                            type_id: sk_tid,
+                            level: 5,
+                            skill_points: 256_000.0,
+                        },
+                    );
+                }
+            }
+
+            snap.module_online_states.insert(mod_id, true);
+            snap.module_active_states.insert(mod_id);
+            snap.module_active_charges.insert(mod_id, 185);
+            snap.ship_fit_inputs.insert(
+                ship_id,
+                eve_db::ShipFitInputsRecord {
+                    active_stance_type_id: None,
+                    last_stance_switch_ms: None,
+                    overloaded_modules: std::collections::BTreeSet::from([mod_id]),
+                },
+            );
+            snap.item_positions.insert(ship_id, old_saved_pos);
+            snap.sp6_lifecycle.ship_combat_hp.insert(
+                -ship_id,
+                eve_db::PersistedCombatHp {
+                    shield_hp: 0.0,
+                    armor_hp: f64::from(JITA),
+                    hull_hp: 3.0,
+                },
+            );
+        });
+        crate::sp6_lifecycle::register_self_destruct_countdown(
+            &ctx,
+            ship_id,
+            cid,
+            JITA,
+            ctx.now_unix(),
+            ctx.now_unix() + 120,
+        );
+
+        let mut primed = ctx.fit(cid, ship_id).expect("prime fit");
+        primed.rack_heat = [14.0, 0.0, 0.0];
+        primed
+            .modules
+            .get_mut(&mod_id)
+            .expect("module fitted")
+            .damage_hp = 22.5;
+        ctx.ship_fittings.write().unwrap().insert(ship_id, primed);
+        assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&mod_id)));
+
+        let origin_handle = ctx
+            .systems
+            .wake_for_session_arrival_async(JITA, SessionArrivalWakeReason::Undock)
+            .await
+            .expect("wake jita");
+        origin_handle
+            .spawn_ball_with_meta(
+                Ball {
+                    id: ship_id,
+                    type_id: 587,
+                    position: old_pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 0.5,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState::default(),
+                ctx.build_ship_slim_meta(cid, 587),
+            )
+            .await
+            .expect("spawn ship in origin");
+
+        crate::services::drone_test_helpers::seed_active_drones(
+            &ctx,
+            [crate::system_actor::DroneSpaceState {
+                ball_id: drone_id,
+                drone_item_id: drone_id,
+                type_id: 2454,
+                group_id: 100,
+                owner_char_id: cid,
+                original_owner_char_id: cid,
+                parent_ship_id: ship_id,
+                solar_system_id: JITA,
+                target_id: None,
+                activity_state: 1,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 1_500.0,
+                optimal_range: 5_000.0,
+                damage_vector: eve_destiny::DamageVector::default(),
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 1.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            }],
+        );
+        crate::probe_test_helpers::seed_probe(
+            &ctx,
+            crate::router::ActiveScannerProbe {
+                probe_id,
+                probe_type_id: 30013,
+                owner_char_id: cid,
+                ship_id,
+                launcher_module_id: 555_993_000,
+                solar_system_id: JITA,
+                position: [0.0; 3],
+                destination: [0.0; 3],
+                range_step: 2,
+                scan_range_m: 1_000_000.0,
+                base_sensor_strength: 10.0,
+                max_flight_time_s: 300.0,
+                launched_at_unix: 1_000,
+                state: 1,
+                warp_end_ft: None,
+            },
+        );
+
+        let dest_handle = ctx
+            .systems
+            .wake_for_session_arrival_async(PERIMETER, SessionArrivalWakeReason::Jump)
+            .await
+            .expect("wake perimeter");
+        dest_handle
+            .panic_next_command_for_test
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let mut sess = make_session(cid, 1_000_167, JITA);
+        let err = relocate_character_in_space_with_pre_spawn(
+            &ctx,
+            Some(&mut sess),
+            RelocateInSpaceRequest {
+                char_id: cid,
+                ship_id,
+                old_sys_id: JITA,
+                old_dock: None,
+                dest_sys_id: PERIMETER,
+                was_in_space: true,
+                arrival_position: Some(DVec3::new(9_000.0, 9_000.0, 0.0)),
+                fallback_arrival_position: DVec3::new(9_000.0, 9_000.0, 0.0),
+                arrival_velocity: DVec3::ZERO,
+                require_take_ball: true,
+                take_ball_missing_code: "SystemTransitionFailed",
+                db_transition_failed_code: "SystemTransitionFailed",
+                destination_wake: DestinationWakePolicy::SessionArrival(
+                    SessionArrivalWakeReason::Jump,
+                ),
+                transition_kind: SpaceTransitionKind::JumpSystem,
+                transition_reason: "shipcaster",
+                combat_state_preservation: CombatStatePreservation::PreserveClamped {
+                    fallback: None,
+                },
+                gate_cloak_invuln: GateCloakInvulnPolicy::standard_jump_cloak(),
+                cleanup: LeaveSpaceCleanupPolicy::gameplay_jump(),
+                sync_local_chat: true,
+                persist_item_position: true,
+                record_session_change_timer: true,
+                record_solar_system_jump: true,
+                bind_beyonce: true,
+                push_set_state: false,
+            },
+            || {
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.items
+                        .get_mut(&mod_id)
+                        .unwrap()
+                        .dynamic_attributes
+                        .insert(eve_sde::attr_ids::DAMAGE, 22.5);
+                });
+                ctx.invalidate_ship_fitting_cache_only(ship_id);
+                ctx.update_ship_rack_heat(cid, ship_id, [14.0, 0.0, 0.0], false);
+            },
+        )
+        .await
+        .expect_err("spawn_arrival_ship_ball failure must return Err and roll back");
+
+        assert_eq!(err.code, "SystemTransitionFailed");
+        assert_eq!(sess.solar_system_id, Some(JITA));
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.characters[&cid].solar_system_id, JITA);
+            assert_eq!(snap.items[&ship_id].location_id, i64::from(JITA));
+            assert_eq!(snap.item_positions.get(&ship_id), Some(&old_saved_pos));
+            let meta = snap
+                .sp6_lifecycle
+                .ship_combat_hp
+                .get(&(-ship_id))
+                .expect("ship_combat_hp meta must stay intact");
+            assert_eq!(meta.armor_hp.round() as u32, JITA);
+            assert!(snap.sp6_lifecycle.self_destructs.contains_key(&ship_id));
+            assert!(snap.module_active_states.contains(&mod_id));
+            assert_eq!(snap.module_active_charges.get(&mod_id), Some(&185));
+            assert!(snap.ship_fit_inputs[&ship_id]
+                .overloaded_modules
+                .contains(&mod_id));
+            assert!(snap.items[&mod_id]
+                .dynamic_attributes
+                .get(&eve_sde::attr_ids::DAMAGE)
+                .is_none());
+        });
+        assert!(ctx
+            .combat_ephemeral
+            .read()
+            .unwrap()
+            .self_destruct_countdowns
+            .contains_key(&ship_id));
+        assert!(
+            !crate::services::drone_test_helpers::active_drone(&ctx, drone_id)
+                .unwrap()
+                .is_abandoned
+        );
+        assert_eq!(
+            crate::probe_test_helpers::get_probe(&ctx, probe_id)
+                .unwrap()
+                .state,
+            1
+        );
+        let restored_fit = ctx
+            .ship_fittings
+            .read()
+            .unwrap()
+            .get(&ship_id)
+            .cloned()
+            .expect("cached ship_fittings restored");
+        assert_eq!(restored_fit.rack_heat, [14.0, 0.0, 0.0]);
+        assert_eq!(
+            restored_fit.modules.get(&mod_id).map(|m| m.damage_hp),
+            Some(22.5)
+        );
+        let (_, restored_ball) = origin_handle
+            .get_ball_snapshot(ship_id)
+            .await
+            .unwrap()
+            .expect("origin ship ball restored");
+        assert!((restored_ball.position - old_pos).length() < 1e-6);
     }
 }

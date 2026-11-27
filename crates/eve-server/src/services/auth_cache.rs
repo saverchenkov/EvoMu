@@ -1501,6 +1501,8 @@ async fn handle_slash_teleport(
         });
     };
 
+    // Release structure control before reading `active_ship_id` so relocation transfers the
+    // pilot's actual ship/pod rather than treating the controlled Upwell structure ID as a ship.
     if old_structure_id.is_some()
         || ctx
             .db

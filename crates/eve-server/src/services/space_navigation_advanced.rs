@@ -319,37 +319,64 @@ pub fn validate_npc_station_docking(
     Ok(())
 }
 
-pub fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64, ship_id: i64) {
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DeactivatedShipModules {
+    pub active_mods: Vec<i64>,
+    pub cleared_overloads: bool,
+    pub prev_active_charges: Vec<(i64, u32)>,
+    pub prev_ship_fit_inputs: Option<eve_db::ShipFitInputsRecord>,
+}
+
+pub(crate) fn deactivate_ship_modules_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    ship_id: i64,
+) -> DeactivatedShipModules {
+    let active_mods: Vec<i64> = snap
+        .items
+        .values()
+        .filter(|it| {
+            it.location_id == ship_id && snap.module_active_states.contains(&it.item_id)
+        })
+        .map(|it| it.item_id)
+        .collect();
+    let mut prev_active_charges = Vec::new();
+    for &mid in &active_mods {
+        snap.module_active_states.remove(&mid);
+        if let Some(charge_tid) = snap.module_active_charges.remove(&mid) {
+            prev_active_charges.push((mid, charge_tid));
+        }
+    }
+    let prev_ship_fit_inputs = snap.ship_fit_inputs.get(&ship_id).cloned();
+    let cleared_overloads =
+        crate::router::ServerContext::clear_all_persisted_ship_overloads(snap, ship_id);
+    DeactivatedShipModules {
+        active_mods,
+        cleared_overloads,
+        prev_active_charges,
+        prev_ship_fit_inputs,
+    }
+}
+
+pub(crate) fn finish_deactivate_ship_modules_effects(
+    ctx: &ServerContext,
+    char_id: i64,
+    solar_system_id: Option<u32>,
+    ship_id: i64,
+    active_mods: Vec<i64>,
+    cleared_overloads: bool,
+    invalidate_cache: bool,
+) {
     crate::services::doomsday_aoe_ops::cancel_aoe_superweapon_cycles_for_ship(ctx, ship_id);
     for (_, handle) in ctx.systems.active_system_handles() {
         handle.cancel_ship_nanite_repairs_sync(ship_id, true);
     }
-    let (solar_system_id, active_mods, cleared_overloads): (Option<u32>, Vec<i64>, bool) =
-        ctx.db.with_mut_snapshot(|snap| {
-            let sys_id = snap.characters.get(&char_id).map(|c| c.solar_system_id);
-            let mods: Vec<i64> = snap
-                .items
-                .values()
-                .filter(|it| {
-                    it.location_id == ship_id && snap.module_active_states.contains(&it.item_id)
-                })
-                .map(|it| it.item_id)
-                .collect();
-            for mid in &mods {
-                snap.module_active_states.remove(mid);
-                snap.module_active_charges.remove(mid);
-            }
-            let had_overloads =
-                crate::router::ServerContext::clear_all_persisted_ship_overloads(snap, ship_id);
-            (sys_id, mods, had_overloads)
-        });
     let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(
         ctx,
         char_id,
         solar_system_id,
         ship_id,
     );
-    if !active_mods.is_empty() || cleared_overloads {
+    if invalidate_cache && (!active_mods.is_empty() || cleared_overloads) {
         ctx.invalidate_ship_fitting(ship_id);
     }
     if !active_mods.is_empty() {
@@ -389,6 +416,22 @@ pub fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64,
             );
         }
     }
+}
+
+pub fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64, ship_id: i64) {
+    let (solar_system_id, deact) = ctx.db.with_mut_snapshot(|snap| {
+        let sys_id = snap.characters.get(&char_id).map(|c| c.solar_system_id);
+        (sys_id, deactivate_ship_modules_in_snap(snap, ship_id))
+    });
+    finish_deactivate_ship_modules_effects(
+        ctx,
+        char_id,
+        solar_system_id,
+        ship_id,
+        deact.active_mods,
+        deact.cleared_overloads,
+        true,
+    );
 }
 
 fn is_zarzakh_toll_exempt_pirate(ctx: &ServerContext, char_id: i64) -> bool {
