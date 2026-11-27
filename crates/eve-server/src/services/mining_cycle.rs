@@ -961,11 +961,23 @@ pub async fn activate(
     let module_type_id = ctx
         .db
         .with_snapshot(|s| s.items.get(&module_id).filter(|i| i.location_id == ship_id).map(|i| i.type_id))
-        .ok_or_else(|| BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module {module_id} is not fitted"), client_error: None })?;
-    let module = ctx.sde.types.get(&module_type_id).ok_or_else(|| BridgeRpcError {
-        code: "ModuleNotFound".into(),
-        message: format!("Unknown module type {module_type_id}"),
-        client_error: None,
+        .ok_or_else(|| {
+            BridgeRpcError::module_not_found(
+                module_id,
+                Some(ship_id),
+                None,
+                false,
+                format!("Module {module_id} is not fitted"),
+            )
+        })?;
+    let module = ctx.sde.types.get(&module_type_id).ok_or_else(|| {
+        BridgeRpcError::module_not_found(
+            module_id,
+            Some(ship_id),
+            Some(i64::from(module_type_id)),
+            false,
+            format!("Unknown module type {module_type_id}"),
+        )
     })?;
     let kind = mining_kind_of(&ctx.sde, module).ok_or_else(|| BridgeRpcError {
         code: "NotAMiningModule".into(),
@@ -1075,11 +1087,13 @@ pub async fn deactivate(
 ) -> Option<Result<Option<MiningCycleOutcome>, BridgeRpcError>> {
     let cycle = ctx.mining_cycles.read().unwrap_or_else(|e| e.into_inner()).get(&module_id).cloned()?;
     if cycle.char_id != char_id || Some(cycle.ship_id) != ship_id {
-        return Some(Err(BridgeRpcError {
-            code: "ModuleNotFound".into(),
-            message: format!("Module {module_id} is not fitted to the caller's active ship"),
-            client_error: None,
-        }));
+        return Some(Err(BridgeRpcError::module_not_found(
+            module_id,
+            ship_id,
+            None,
+            false,
+            format!("Module {module_id} is not fitted to the caller's active ship"),
+        )));
     }
     let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, cycle.solar_system_id).clamp(0.1, 1.0);
     let effective_duration_ms = ((cycle.duration_ms as f64) / tidi).round().max(1.0);

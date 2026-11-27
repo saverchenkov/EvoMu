@@ -1352,11 +1352,13 @@ pub(crate) async fn handle_scanning_and_wormholes(
             };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let Some(ship_ball) = validated_gate.ball else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: "Ship is not in space".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    session.solar_system_id,
+                    "activate_acceleration_gate",
+                    "Ship is not in space",
+                )));
             };
             let ship_group_id = validated_gate.ship_group_id;
             let ship_rig_size = ctx

@@ -1315,20 +1315,20 @@ pub(crate) fn dispatch_fit_slash(
                 match explicit_flag {
                     None | Some(InventoryFlag::DroneBay) => InventoryFlag::DroneBay,
                     Some(other) => {
-                        return Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: format!("Drone type {type_id} cannot be fitted into slot flag {}", other as u16), client_error: None });
+                        return Err(BridgeRpcError::fitting_validation_failed(Some(ship_id), None, Some(i64::from(type_id)), &mod_type.name, format!("Drone type {type_id} cannot be fitted into slot flag {}", other as u16)));
                     }
                 }
             } else if ship_cat_id == 6 && mod_type.category_id == 8 {
                 match explicit_flag {
                     Some(ef) if matches!(ef as u16, 11..=34) => ef,
                     _ => {
-                        return Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: format!("Charge type {type_id} ({}) requires an explicit module slot or Cargo flag", mod_type.name), client_error: None });
+                        return Err(BridgeRpcError::fitting_validation_failed(Some(ship_id), None, Some(i64::from(type_id)), &mod_type.name, format!("Charge type {type_id} ({}) requires an explicit module slot or Cargo flag", mod_type.name)));
                     }
                 }
             } else if ship_cat_id == 6 && matches!(mod_type.category_id, 7 | 32) && has_slot_effect
             {
                 if mod_type.category_id == 32 && ship_group_id != Some(963) {
-                    return Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: format!("Subsystem type {type_id} ({}) can only be fitted to Strategic Cruisers", mod_type.name), client_error: None });
+                    return Err(BridgeRpcError::fitting_validation_failed(Some(ship_id), None, Some(i64::from(type_id)), &mod_type.name, format!("Subsystem type {type_id} ({}) can only be fitted to Strategic Cruisers", mod_type.name)));
                 }
                 if let Some(ef) = explicit_flag {
                     let raw = ef as u16;
@@ -1341,7 +1341,7 @@ pub(crate) fn dispatch_fit_slash(
                         _ => false,
                     };
                     if !slot_matches {
-                        return Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: format!("Type {type_id} ({}) is incompatible with slot flag {raw}", mod_type.name), client_error: None });
+                        return Err(BridgeRpcError::fitting_validation_failed(Some(ship_id), None, Some(i64::from(type_id)), &mod_type.name, format!("Type {type_id} ({}) is incompatible with slot flag {raw}", mod_type.name)));
                     }
                     ef
                 } else {
@@ -1377,7 +1377,7 @@ pub(crate) fn dispatch_fit_slash(
                         }
                     }
                     let Some(valid_flag) = chosen else {
-                        return Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: first_err.unwrap_or_else(|| format!("No free compatible fitting slot for module type {type_id} on ship {ship_id}")), client_error: None });
+                        return Err(BridgeRpcError::fitting_validation_failed(Some(ship_id), None, Some(i64::from(type_id)), &mod_type.name, first_err.unwrap_or_else(|| format!("No free compatible fitting slot for module type {type_id} on ship {ship_id}"))));
                     };
                     valid_flag
                 }
@@ -1387,7 +1387,7 @@ pub(crate) fn dispatch_fit_slash(
             {
                 if let Some(ef) = explicit_flag {
                     if !matches!(ef as u16, 11..=34 | 92..=94 | 164..=171) {
-                        return Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: format!("Structure module type {type_id} is incompatible with slot flag {}", ef as u16), client_error: None });
+                        return Err(BridgeRpcError::fitting_validation_failed(Some(ship_id), None, Some(i64::from(type_id)), &mod_type.name, format!("Structure module type {type_id} is incompatible with slot flag {}", ef as u16)));
                     }
                     ef
                 } else if effects.contains(&6306) {
@@ -1403,7 +1403,7 @@ pub(crate) fn dispatch_fit_slash(
                         .unwrap_or(candidate_flags[0])
                 }
             } else {
-                return Err(BridgeRpcError { code: "FittingValidationFailed".into(), message: format!("Type {type_id} ({}) cannot be fitted onto target {ship_id}", mod_type.name), client_error: None });
+                return Err(BridgeRpcError::fitting_validation_failed(Some(ship_id), None, Some(i64::from(type_id)), &mod_type.name, format!("Type {type_id} ({}) cannot be fitted onto target {ship_id}", mod_type.name)));
             };
 
             snap.next_entity_id += 1;

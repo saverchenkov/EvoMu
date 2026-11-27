@@ -1726,11 +1726,13 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 .unwrap_or(0);
             if method == "SetShipKillCounter" {
                 if !session.has_gm_role() {
-                    return Some(Err(BridgeRpcError {
-                        code: "GMRoleRequired".into(),
-                        message: "SetShipKillCounter requires GM role".into(),
-                        client_error: None,
-                    }));
+                    return Some(Err(BridgeRpcError::insufficient_role_with_code(
+                        "GMRoleRequired",
+                        eve_machonet::service_roles::ROLE_GM_MASK,
+                        session.role,
+                        "SetShipKillCounter",
+                        "SetShipKillCounter requires GM role",
+                    )));
                 }
                 let kills = match crate::router::RpcArgs::positional(args).opt_i64(1, "kills") {
                     Ok(v) => v.unwrap_or(1).max(0),

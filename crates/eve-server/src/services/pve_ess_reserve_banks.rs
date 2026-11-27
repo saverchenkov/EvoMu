@@ -991,11 +991,13 @@ pub async fn try_activate_ess_acceleration_gate(
     ensure_ess_intrusion_site_balls(ctx, sys_id).await;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let Some((current_tick, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
-        return Some(Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Ship is not in space".into(),
-            client_error: None,
-        }));
+        return Some(Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "ess_reserve_bank",
+            "Ship is not in space",
+        )));
     };
     if crate::services::space_destiny::check_session_change_timer_active(
         ctx,

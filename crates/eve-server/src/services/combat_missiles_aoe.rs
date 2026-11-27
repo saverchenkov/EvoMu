@@ -818,11 +818,13 @@ async fn activate_aoe_or_defender_module_with_cap_inner(
                 if deduct_capacitor {
                     if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
                         if cs.capacitor < cap_need {
-                            return Some(Err(BridgeRpcError {
-                                code: "NotEnoughCapacitor".into(),
-                                message: format!("Smartbomb requires {cap_need:.1} GJ capacitor (have {:.1} GJ)", cs.capacitor),
-                                client_error: None,
-                            }));
+                            return Some(Err(BridgeRpcError::not_enough_capacitor(
+                                Some(ship_id),
+                                "smartbomb",
+                                cap_need,
+                                cs.capacitor,
+                                format!("Smartbomb requires {cap_need:.1} GJ capacitor (have {:.1} GJ)", cs.capacitor),
+                            )));
                         }
                         cs.capacitor -= cap_need;
                         let new_cap = cs.capacitor;

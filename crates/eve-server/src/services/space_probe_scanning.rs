@@ -384,11 +384,7 @@ pub async fn activate_scan_probe_launcher(
                 || ch.solar_system_id != sys_id
                 || ch.active_ship_id != ship_id
             {
-                return Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
-                    client_error: None,
-                });
+                return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "activate_scan_probe_launcher", format!("Active ship {ship_id} is not in space in solar system {sys_id}")));
             }
         }
         Ok(snap.items.values().filter(|i| {
@@ -466,11 +462,7 @@ pub async fn activate_scan_probe_launcher(
     let db_res = ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get(&char_id) {
             if ch.station_id.is_some() || ch.structure_id.is_some() || ch.solar_system_id != sys_id || ch.active_ship_id != ship_id {
-                return Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
-                    client_error: None,
-                });
+                return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "activate_scan_probe_launcher", format!("Active ship {ship_id} is not in space in solar system {sys_id}")));
             }
         }
         let ci = snap
@@ -831,11 +823,7 @@ fn handle_qa_override_probe_expiry(
         Err(e) => return Some(Err(e)),
     };
     if !session.has_gm_role() {
-        return Some(Err(BridgeRpcError {
-            code: "GMRoleRequired".into(),
-            message: "scanMgr.QAOverrideProbeExpiry requires GM/QA role".into(),
-            client_error: None,
-        }));
+        return Some(Err(BridgeRpcError::insufficient_role_with_code("GMRoleRequired", eve_machonet::service_roles::ROLE_GM_MASK, session.role, "scanMgr.QAOverrideProbeExpiry", "scanMgr.QAOverrideProbeExpiry requires GM/QA role")));
     }
     if args.len() > 1 {
         let msg = "scanMgr.QAOverrideProbeExpiry accepts at most 1 argument";
@@ -885,11 +873,7 @@ async fn handle_qa_scan_sites(
         Err(e) => return Some(Err(e)),
     };
     if !session.has_gm_role() {
-        return Some(Err(BridgeRpcError {
-            code: "GMRoleRequired".into(),
-            message: "scanMgr.QAScanSites requires GM/QA role".into(),
-            client_error: None,
-        }));
+        return Some(Err(BridgeRpcError::insufficient_role_with_code("GMRoleRequired", eve_machonet::service_roles::ROLE_GM_MASK, session.role, "scanMgr.QAScanSites", "scanMgr.QAScanSites requires GM/QA role")));
     }
     let Some(sys_id) = bound_entry
         .map(|b| b.object_id as u32)

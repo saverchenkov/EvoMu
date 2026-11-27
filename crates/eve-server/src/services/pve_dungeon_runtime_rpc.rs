@@ -81,7 +81,13 @@ pub async fn try_activate_dungeon_runtime_gate(
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
-        return Some(Err(BridgeRpcError::user_error("ShipNotInSpace")));
+        return Some(Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "dungeon_gate_activate",
+            "Active ship is not spawned in space",
+        )));
     };
     if let Err(e) = ctx
         .validate_ship_movement(

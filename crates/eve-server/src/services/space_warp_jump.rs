@@ -639,18 +639,10 @@ async fn handle_cmd_warp_to_stuff(
         });
     }
     if target_id <= 0 && target_str_opt.is_none() {
-        return Err(BridgeRpcError {
-            code: "InvalidTarget".into(),
-            message: "Warp target ID must be a positive integer".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::invalid_navigation_target(Some(target_id), "non_positive_target", "Warp target ID must be a positive integer"));
     }
     if target_id == ship_id {
-        return Err(BridgeRpcError {
-            code: "InvalidTarget".into(),
-            message: "Cannot warp to own ship".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::invalid_target_self(target_id, "warp_to_self", "Cannot warp to own ship"));
     }
     let default_min_range = if is_autopilot { 15_000.0 } else { 0.0 };
     let candidate_min_range = raw_min_range.or_else(|| {
@@ -693,11 +685,7 @@ async fn handle_cmd_warp_to_stuff(
             })
         }
     }) else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship is not spawned in Ballpark".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "warp_to_stuff", "Active ship is not spawned in Ballpark"));
     };
 
     // Resolve read-only bookmark targets (Zarzakh ban, expiry, ACL lookup) before ship movement
@@ -1037,14 +1025,7 @@ async fn handle_cmd_warp_to_stuff(
                 requested_dist_m
             };
             if affordable_dist_m < 150_000.0 {
-                return Err(BridgeRpcError {
-                    code: "NotEnoughCapacitor".into(),
-                    message: format!(
-                        "Insufficient capacitor ({:.3} GJ) to initiate minimum 150 km warp (affordable distance {:.1} m)",
-                        cs.capacitor, affordable_dist_m
-                    ),
-                    client_error: None,
-                });
+                return Err(BridgeRpcError::not_enough_capacitor(Some(ship_id), "warp_150km", 150_000.0 * cap_per_m, cs.capacitor, format!("Insufficient capacitor ({:.3} GJ) to initiate minimum 150 km warp (affordable distance {:.1} m)", cs.capacitor, affordable_dist_m)));
             }
             dest_pos = current_ball.position + warp_dir * affordable_dist_m;
             cs.capacitor = 0.0;
@@ -2067,11 +2048,7 @@ async fn handle_cmd_stargate_jump(
             })
         }
     }) else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship ball is not in space".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(old_sys), "stargate_jump", "Active ship ball is not in space"));
     };
 
     if let Some(active_timer) =
@@ -2734,7 +2711,7 @@ fn evaluate_surface_perimeter(
     ball: &eve_destiny::Ball,
     target_pos: DVec3,
     target_radius: f64,
-    on_in_warp: impl FnOnce() -> BridgeRpcError,
+    on_in_warp: impl FnOnce(Option<String>) -> BridgeRpcError,
     on_outside: impl FnOnce(f64, f64, f64) -> BridgeRpcError,
 ) -> Result<bool, BridgeRpcError> {
     let target_r = target_radius.max(0.0);
@@ -2742,14 +2719,17 @@ fn evaluate_surface_perimeter(
     let max_dist = max_center_dist_for_perimeter(ball, target_r);
     let dist = ball.position.distance(target_pos);
     match ball.mode {
-        MovementMode::Warp { destination, .. } => {
+        MovementMode::Warp { destination, phase, .. } => {
             if destination.distance(target_pos) <= max_dist
                 && (dist <= max_dist
                     || eve_destiny::physics::is_warp_finishing_within(ball, 4.0))
             {
                 Ok(true)
             } else {
-                Err(on_in_warp())
+                let phase_str = crate::services::nav_warp_interdiction::warp_phase_kind(phase)
+                    .as_str()
+                    .to_owned();
+                Err(on_in_warp(Some(phase_str)))
             }
         }
         _ => {
@@ -2782,11 +2762,7 @@ pub(crate) fn evaluate_stargate_jump_perimeter(
         ball,
         gate_pos,
         gate_radius,
-        || BridgeRpcError {
-            code: "ShipInWarp".into(),
-            message: "Cannot jump stargate while ship is still in warp".into(),
-            client_error: None,
-        },
+        |warp_phase| BridgeRpcError::ship_in_warp(Some(ball.id), "stargate_jump", warp_phase, "Cannot jump stargate while ship is still in warp"),
         |dist, max_dist, surface_dist| {
             BridgeRpcError::not_close_enough_to_jump(
                 surface_dist,
@@ -2819,11 +2795,7 @@ pub(crate) fn evaluate_dock_perimeter(
         ball,
         target_pos,
         target_radius,
-        || BridgeRpcError {
-            code: "ShipInWarp".into(),
-            message: "Cannot dock while ship is still in warp".into(),
-            client_error: None,
-        },
+        |warp_phase| BridgeRpcError::ship_in_warp(Some(ball.id), "dock", warp_phase, "Cannot dock while ship is still in warp"),
         |dist, max_dock_dist, _surface_dist| {
             BridgeRpcError::outside_docking_perimeter(dist, max_dock_dist)
         },
@@ -2920,11 +2892,7 @@ async fn handle_dock(
         });
     }
     let Some((cur_tick, ball)) = ball_snap else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: format!("Ship {ship_id} is not spawned in solar system {sys_id} Ballpark"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "dock", format!("Ship {ship_id} is not spawned in solar system {sys_id} Ballpark")));
     };
 
     let sys_sec = ctx

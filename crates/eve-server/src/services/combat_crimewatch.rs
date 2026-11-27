@@ -1860,12 +1860,15 @@ pub fn gm_admin_bounty_action(
     target_id: i64,
     amount_isk: f64,
 ) -> Result<f64, BridgeRpcError> {
-    if !session.has_gm_role() && (session.role & eve_machonet::service_roles::ROLE_QA) == 0 {
-        return Err(BridgeRpcError {
-            code: "InsufficientRole".into(),
-            message: "GM bounty tools require a GM/Admin/QA role".into(),
-            client_error: None,
-        });
+    let required_role_mask =
+        eve_machonet::service_roles::ROLE_GM_MASK | eve_machonet::service_roles::ROLE_QA;
+    if (session.role & required_role_mask) == 0 {
+        return Err(BridgeRpcError::insufficient_role(
+            required_role_mask,
+            session.role,
+            "gm_admin_bounty_action",
+            "GM bounty tools require a GM/Admin/QA role",
+        ));
     }
     match action {
         "set" => {

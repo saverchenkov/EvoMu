@@ -480,14 +480,16 @@ async fn validate_pre_agency_warp(
                 cs.capacitor = sde_max_cap;
             }
             if (cs.capacitor / cap_per_m) < 150_000.0 {
-                return Err(BridgeRpcError {
-                    code: "NotEnoughCapacitor".into(),
-                    message: format!(
+                return Err(BridgeRpcError::not_enough_capacitor(
+                    Some(ship_id),
+                    "warp_150km",
+                    150_000.0 * cap_per_m,
+                    cs.capacitor,
+                    format!(
                         "Insufficient capacitor ({:.3} GJ) to initiate minimum 150 km warp",
                         cs.capacitor
                     ),
-                    client_error: None,
-                });
+                ));
             }
         }
     }
@@ -843,11 +845,12 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "dungeon.DEGetArchetypes requires GM/Content role".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "dungeon.DEGetArchetypes",
+                    "dungeon.DEGetArchetypes requires GM/Content role",
+                )));
             }
             let mut by_aid: BTreeMap<u32, (u32, &str)> = BTreeMap::new();
             for d in ctx.sde.dungeons.values() {
@@ -881,11 +884,12 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "dungeon.DEGetDungeons requires GM/Content role".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "dungeon.DEGetDungeons",
+                    "dungeon.DEGetDungeons requires GM/Content role",
+                )));
             }
             let req_dungeon_id = kwargs
                 .get("dungeonID")
@@ -961,11 +965,12 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "dungeon.DEGetFactions requires GM/Content role".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "dungeon.DEGetFactions",
+                    "dungeon.DEGetFactions requires GM/Content role",
+                )));
             }
             let mut factions: Vec<_> = ctx.sde.factions.values().collect();
             factions.sort_by_key(|f| f.faction_id);
@@ -987,11 +992,12 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "dungeon.DEGetRoomObjectPaletteData requires GM/Content role".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "dungeon.DEGetRoomObjectPaletteData",
+                    "dungeon.DEGetRoomObjectPaletteData requires GM/Content role",
+                )));
             }
             // Populate object palette dynamically across all SDE dungeon-placeable categories:
             // celestials/gates/beacons/LCOs, asteroids/ice/gas clouds, deployables, structures, and NPC entities.
@@ -1041,11 +1047,12 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "dungeon.DEGetRooms requires GM/Content role".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "dungeon.DEGetRooms",
+                    "dungeon.DEGetRooms requires GM/Content role",
+                )));
             }
             let Some(dungeon_id) = kwargs
                 .get("dungeonID")
@@ -1171,11 +1178,12 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "keeper.GetLevelEditor requires GM role".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "keeper.GetLevelEditor",
+                    "keeper.GetLevelEditor requires GM role",
+                )));
             }
             let target_oid = session.solar_system_id.map(i64::from).unwrap_or(char_id);
             let bound_id = match ctx.bind_object(session, "keeper", target_oid) {
@@ -1392,16 +1400,22 @@ pub async fn handle(
                 )));
             }
             let Some(pre_handle) = ctx.systems.get_handle(sys_id) else {
-                return Some(Err(rpc_msg_err(
-                    "ShipNotInSpace",
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "agency_warp",
                     "Active ship is not spawned in Ballpark",
                 )));
             };
             let pre_ball = match pre_handle.get_ball_snapshot(ship_id).await {
                 Ok(Some((_, ball))) => ball,
                 Ok(None) => {
-                    return Some(Err(rpc_msg_err(
-                        "ShipNotInSpace",
+                    return Some(Err(BridgeRpcError::ship_not_in_space(
+                        ship_id,
+                        Some(char_id),
+                        Some(sys_id),
+                        "agency_warp",
                         "Active ship is not spawned in Ballpark",
                     )));
                 }
@@ -1458,21 +1472,25 @@ pub async fn handle(
         };
 
         let Some(handle) = ctx.systems.get_handle(sys_id) else {
-            return Some(Err(BridgeRpcError {
-                code: "ShipNotInSpace".into(),
-                message: "Active ship is not spawned in Ballpark".into(),
-                client_error: None,
-            }));
+            return Some(Err(BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "agency_warp",
+                "Active ship is not spawned in Ballpark",
+            )));
         };
         let Some((_, current_ball)) = (match handle.get_ball_snapshot(ship_id).await {
             Ok(v) => v,
             Err(e) => return Some(Err(BridgeRpcError { code: "DestinyCommandFailed".into(), message: e, client_error: None })),
         }) else {
-            return Some(Err(BridgeRpcError {
-                code: "ShipNotInSpace".into(),
-                message: "Active ship is not spawned in Ballpark".into(),
-                client_error: None,
-            }));
+            return Some(Err(BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "agency_warp",
+                "Active ship is not spawned in Ballpark",
+            )));
         };
 
         let warp_dist = current_ball.position.distance(dest_pos);
