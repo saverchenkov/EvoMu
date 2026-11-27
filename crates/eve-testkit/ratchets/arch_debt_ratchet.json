@@ -965,8 +965,7 @@
       "description": "Remaining sync ballpark/actor_state lock acquisitions (.read/.write/.try_read/.try_write/.lock) after Track 4C mailbox-backed sync writers and RT-101 retirement (#1342).",
       "files": {
         "system_actor/ball_ops.rs": 1,
-        "system_actor/celestials.rs": 4,
-        "system_actor/post_unlock.rs": 1
+        "system_actor/celestials.rs": 4
       }
     },
     "handwritten_item_change_emitters": {

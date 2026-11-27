@@ -1051,6 +1051,98 @@ async fn e1_p1_03_try_remove_ball_for_db_flushes_weapon_effects_and_hibernates()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e1_p1_03_try_remove_ball_for_db_sqlite_busy_falls_back_to_post_unlock_and_hibernates() {
+    let (tmp, _guard) = temp_sqlite_db("e1_p1_03_sqlite_busy_fallback");
+    let db = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite p1_03_busy"));
+    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let reg = Arc::new(SystemRegistry::with_sde_and_db(sde, Arc::clone(&db)));
+    let sys_id = 30_000_142u32;
+    let (ship_id, mod_id, tgt_id) = (967_101i64, 767_101i64, 367_101i64);
+
+    let h = reg.get_or_spawn(sys_id);
+    let _ = h
+        .spawn_ball_with_combat(make_ship_ball(ship_id), CombatState::default())
+        .await
+        .unwrap();
+    h.upsert_entropic_spool_activation_sync(make_spool(sys_id, ship_id, mod_id, tgt_id), false)
+        .unwrap();
+    h.flush_weapon_effects_checkpoint().await.unwrap();
+    assert!(!h.is_hibernated());
+
+    // Hold the SQLite writer connection across `try_remove_ball_for_db` so the nonblocking
+    // fast-path in `flush_actor_weapon_effects` returns `false` ("sqlite writer busy").
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (rel_tx, rel_rx) = std::sync::mpsc::channel();
+    let db_hold = Arc::clone(&db);
+    let writer_holder = std::thread::spawn(move || {
+        db_hold.with_sqlite_conn(|_conn| {
+            held_tx.send(()).unwrap();
+            let _ = rel_rx.recv();
+        });
+    });
+    held_rx.recv().unwrap();
+
+    let db_rm = Arc::clone(&db);
+    let rm_thread = std::thread::spawn(move || {
+        crate::system_actor::try_remove_ball_for_db(&db_rm, sys_id, ship_id);
+    });
+
+    for _ in 0..200 {
+        let busy_hit = h.entropic_spool(ship_id, mod_id).is_none()
+            && h.view()
+                .weapon_effects_coord
+                .as_ref()
+                .is_some_and(|c| c.retry_needed.load(Ordering::Acquire));
+        if busy_hit {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(h.entropic_spool(ship_id, mod_id).is_none());
+    assert!(
+        h.view()
+            .weapon_effects_coord
+            .as_ref()
+            .is_some_and(|c| c.retry_needed.load(Ordering::Acquire)),
+        "held SQLite writer must trigger nonblocking busy fallback"
+    );
+    assert!(!h.is_hibernated(), "must stay awake while weapon_effects flush is pending");
+
+    rel_tx.send(()).unwrap();
+    writer_holder.join().unwrap();
+    rm_thread.join().unwrap();
+
+    // Send NO second command: the `post_unlock_tx` fallback must persist and invoke
+    // `ClearWeaponEffectsDirty` via `worker_cb_tx`, clearing dirty state and hibernating.
+    for _ in 0..100 {
+        let pending = h
+            .view()
+            .weapon_effects_coord
+            .as_ref()
+            .is_some_and(|c| c.has_pending_work());
+        if !pending && h.is_hibernated() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        h.is_hibernated(),
+        "post_unlock_tx fallback under SQLite writer contention must flush weapon_effects and hibernate without a second command"
+    );
+    assert!(
+        !h.view()
+            .weapon_effects_coord
+            .as_ref()
+            .is_some_and(|c| c.has_pending_work())
+    );
+    let rows = db
+        .with_sqlite_conn(|c| load_system_checkpoints::<WeaponEffectCheckpointEntry>(c, sys_id, KIND_WEAPON_EFFECTS))
+        .unwrap();
+    assert!(rows.is_empty(), "cleared spool checkpoint must be deleted from SQLite");
+    assert!(reg.stop_system(sys_id).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e1_r1_01_legacy_prune_snapshot_failure_holds_flush_hibernation_and_recovers_on_retry() {
     let (tmp, _guard) = temp_sqlite_db("e1_r1_01_legacy_prune_retry");
     let db = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite e1_r1_01"));

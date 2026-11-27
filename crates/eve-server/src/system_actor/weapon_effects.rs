@@ -1181,8 +1181,10 @@ pub(in crate::system_actor) fn flush_actor_weapon_effects(
     };
     let persisted = if blocking {
         persist_and_prune_checkpoint_op(db, &op)
-    } else if op.legacy_prune.as_ref().is_none_or(|p| p.is_empty()) {
-        persist_checkpoint_op_to_sqlite_inner(db, &op, true)
+    } else if op.legacy_prune.as_ref().is_none_or(|p| p.is_empty())
+        && persist_checkpoint_op_to_sqlite_inner(db, &op, true)
+    {
+        true
     } else if let Some((tx, in_flight)) = post_unlock_tx {
         let mut ops = post_unlock::PostUnlockOps::default();
         ops.intents.push(post_unlock::PostUnlockIntent::WeaponEffectsCheckpoint(Box::new(op)));
