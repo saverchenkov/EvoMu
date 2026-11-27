@@ -1515,15 +1515,16 @@ fn t() {
             ad_still = ratchet_checks._read_json(os.path.join(tmp, "crates/eve-testkit/ratchets/arch_debt_ratchet.json"))
             self.assertEqual(ad_still["patterns"]["items_insert"]["files"], {"services/beta.rs": 1})
 
-        # 5. Live repo verification: dump-counts-json & check_all_ratchets & stringly_error_bypass v2 tight
+        # 5. Live repo verification: dump-counts-json & check_all_ratchets & zero regressions
         live_counts = tighten_ratchets.collect_all_counts(REPO_ROOT)
         self.assertGreaterEqual(len(live_counts["arch_debt"]), 19)
         self.assertEqual(set(live_counts["client_compat"]["counters"].keys()), set(ratchet_checks.CLIENT_COMPAT_COUNTER_KEYS))
         self.assertGreater(sum(live_counts["untyped_user_error"].values()), 0)
         self.assertEqual(set(live_counts["test_fixture"].keys()), set(ratchet_checks.TEST_FIXTURE_PATTERNS))
         self.assertEqual(ratchet_checks.check_all_ratchets(REPO_ROOT), [])
-        _, sb_slack, sb_regs = tighten_ratchets.tighten_ratchets(REPO_ROOT, write=False, targets=("stringly_error_bypass",))
-        self.assertEqual((sb_slack, sb_regs), (0, []))
+        # Feature branches cannot edit .agents/ ratchets, so debt-reducing branches legitimately have sb_slack > 0 until post-merge tightening.
+        _, _, sb_regs = tighten_ratchets.tighten_ratchets(REPO_ROOT, write=False, targets=("stringly_error_bypass",))
+        self.assertEqual(sb_regs, [])
 
     def test_1540_test_fixture_ratchet_parity_enforcement_and_tightening(self):
         import tighten_ratchets  # noqa: E402
