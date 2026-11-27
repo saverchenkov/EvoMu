@@ -317,10 +317,28 @@ async fn reprocessing_quotes_and_reprocess_npc_structure_and_error_paths() {
     .await
     .expect("handled")
     .expect("reprocess succeeds");
-    assert!(matches!(out, PyRep::KeyVal(_)));
+    let PyRep::Tuple(out_parts) = out else {
+        panic!("expected V24 2-tuple from Reprocess, got {out:?}");
+    };
+    assert_eq!(out_parts.len(), 2);
+    assert_eq!(out_parts[0], PyRep::List(vec![PyRep::Integer(ore_stack_id)]));
+    let PyRep::Dict(out_map) = &out_parts[1] else {
+        panic!("expected outputByTypeID Dict, got {:?}", out_parts[1]);
+    };
+    let out_trit = out_map
+        .iter()
+        .find_map(|(k, v)| (k.as_i64() == Some(34)).then(|| v.as_i64()).flatten())
+        .unwrap_or(0);
+    assert!(out_trit > 0);
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&ore_stack_id].quantity, 50);
-        assert!(snap.items.values().any(|i| i.owner_id == char_id && i.type_id == 34 && i.quantity > 0));
+        let minted_trit: i64 = snap
+            .items
+            .values()
+            .filter(|i| i.owner_id == char_id && i.type_id == 34)
+            .map(|i| i64::from(i.quantity))
+            .sum();
+        assert_eq!(minted_trit, out_trit);
     });
 
     // 6. Undocked Reprocess rejected

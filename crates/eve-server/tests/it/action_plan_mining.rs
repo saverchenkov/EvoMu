@@ -703,9 +703,23 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
     // Rigged Tatara reprocessing of 1,000 Veldspar -> 0.53 * 1.055 * 1.15 * 1.10 * 1.10 = 0.77820125 yield (3,112 Tritanium) > station yield (2,783), and 4% structure service tax (NOT 15% corp.tax_rate)
     let tatara_veld_id = 800_000_616i64;
     ctx.db.with_mut_snapshot(|snap| { snap.items.insert(tatara_veld_id, make_item(tatara_veld_id, 1230, char_id, comp_structure_id, InventoryFlag::Hangar, 1_000, false)); });
+    let PyRep::Tuple(tatara_q) = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[PyRep::List(vec![PyRep::Integer(tatara_veld_id)])], &kw, None).await.expect("GetQuotes in rigged Tatara") else { panic!("Expected 3-tuple from GetQuotes") };
+    assert!((tatara_q[0].as_f64().unwrap() - 0.04).abs() < 1e-6, "Structure reprocessing tax must use per-structure service setting (4%), not corp.tax_rate (15%)");
+    let tatara_bal_before = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.0);
     let tatara_rep = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(tatara_veld_id)], &kw, None).await.expect("Reprocess in rigged Tatara");
-    assert_eq!(get_dict_val(&tatara_rep, "tritaniumQuantity").and_then(|v| v.as_i64()), Some(3_112));
-    assert!((get_dict_val(&tatara_rep, "stationTaxRate").unwrap().as_f64().unwrap() - 0.04).abs() < 1e-6, "Structure reprocessing tax must use per-structure service setting (4%), not corp.tax_rate (15%)");
+    assert_eq!(
+        tatara_rep,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(tatara_veld_id)]),
+            PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(3_112))]),
+        ])
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&tatara_veld_id));
+        let minted: i64 = snap.items.values().filter(|i| i.owner_id == char_id && i.location_id == comp_structure_id && i.type_id == 34).map(|i| i64::from(i.quantity)).sum();
+        assert_eq!(minted, 3_112);
+        assert!(snap.characters[&char_id].balance.0 < tatara_bal_before, "4% structure reprocessing tax must debit pilot balance");
+    });
 
     // 4. plan:MN-12 & plan:C-6: Station reprocessing (V24 GetQuotes 3-tuple, 5-arg Reprocess list, implant 27174, tax standing curve, Scrapmetal & rejection)
     let (station_id, reprocess_item_id, scordite_item_id, pyrox_item_id, veld_imp_id, scrap_mod_id, non_reprocess_item) =
@@ -737,30 +751,70 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
     assert!(raw_quotes[0].1.dict_get("recoverables").is_some_and(PyRep::is_crowset));
     ctx.drain_notifications_for_char(char_id);
     let reprocess_res = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(reprocess_item_id)], &kw, None).await.expect("Reprocess 1,050 Veldspar");
-    assert!((get_dict_val(&reprocess_res, "yieldRate").unwrap().as_f64().unwrap() - expected_yield).abs() < 1e-6 && (get_dict_val(&reprocess_res, "stationTaxRate").unwrap().as_f64().unwrap() - expected_tax).abs() < 1e-6);
-    assert_eq!(get_dict_val(&reprocess_res, "tritaniumQuantity").and_then(|v| v.as_i64()), Some(expected_trit));
+    assert_eq!(
+        reprocess_res,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(reprocess_item_id)]),
+            PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(expected_trit))]),
+        ])
+    );
     assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnReprocessingMaterialsChanged" && n.args.is_empty()), "OnReprocessingMaterialsChanged (arity 0) must fire");
 
-    // Standing >= 6.67 eliminates station tax (0%) and 5-arg batch Reprocess(itemIDs, fromLocation, ownerID, flag, skipChecks) returns List for Scordite + Pyroxeres
+    // Standing >= 6.67 eliminates station tax (0%) and 5-arg batch Reprocess(itemIDs, fromLocation, ownerID, flag, skipChecks) returns V24 2-tuple for Scordite + Pyroxeres
     ctx.db.with_mut_snapshot(|snap| { snap.characters.get_mut(&char_id).unwrap().standings.insert(1000035, 6.67); });
-    let PyRep::List(batch_res) = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::List(vec![PyRep::Integer(scordite_item_id), PyRep::Integer(pyrox_item_id)]), PyRep::Integer(station_id), PyRep::Integer(char_id), PyRep::Integer(4), PyRep::List(vec![])], &kw, None).await.expect("5-arg Reprocess Scordite + Pyroxeres") else { panic!("Expected List from 5-arg Reprocess") };
-    assert_eq!(batch_res.len(), 2);
-    assert_eq!(get_dict_val(&batch_res[0], "stationTaxRate").and_then(|v| v.as_f64()), Some(0.0));
-    for (idx, tid) in [(0usize, 1228u32), (1usize, 1224u32)] {
-        let PyRep::List(mats) = get_dict_val(&batch_res[idx], "outputs").unwrap() else { panic!() };
+    let PyRep::Tuple(zero_tax_q) = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[PyRep::List(vec![PyRep::Integer(scordite_item_id), PyRep::Integer(pyrox_item_id)]), PyRep::Integer(ship_id)], &kw, None).await.expect("GetQuotes 0% tax") else { panic!("Expected 3-tuple from GetQuotes") };
+    assert_eq!(zero_tax_q[0].as_f64(), Some(0.0));
+    let bal_zero_tax_before = ctx.db.with_snapshot(|s| s.characters[&char_id].balance);
+    let PyRep::Tuple(batch_tup) = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::List(vec![PyRep::Integer(scordite_item_id), PyRep::Integer(pyrox_item_id)]), PyRep::Integer(station_id), PyRep::Integer(char_id), PyRep::Integer(4), PyRep::List(vec![])], &kw, None).await.expect("5-arg Reprocess Scordite + Pyroxeres") else { panic!("Expected 2-tuple from 5-arg Reprocess") };
+    assert_eq!(batch_tup.len(), 2);
+    assert_eq!(batch_tup[0], PyRep::List(vec![PyRep::Integer(scordite_item_id), PyRep::Integer(pyrox_item_id)]));
+    let mut expected_batch_mats = std::collections::BTreeMap::<i64, i64>::new();
+    for tid in [1228u32, 1224u32] {
         for mat in &ctx.sde.type_materials[&tid] {
             let exp = ((10 * mat.quantity) as f64 * expected_yield).floor() as i64;
-            assert!(mats.iter().any(|m| get_dict_val(m, "typeID").and_then(|v| v.as_i64()) == Some(mat.material_type_id as i64) && get_dict_val(m, "quantity").and_then(|v| v.as_i64()) == Some(exp)));
+            if exp > 0 {
+                *expected_batch_mats.entry(i64::from(mat.material_type_id)).or_insert(0) += exp;
+            }
         }
     }
+    let expected_batch_dict: Vec<(PyRep, PyRep)> = expected_batch_mats
+        .into_iter()
+        .map(|(tid, qty)| (PyRep::Integer(tid), PyRep::Integer(qty)))
+        .collect();
+    assert_eq!(batch_tup[1], PyRep::Dict(expected_batch_dict));
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&char_id].balance), bal_zero_tax_before, "Standing >= 6.67 must eliminate station tax");
 
     // Implant factor: Zainou 'Beancounter' Reprocessing RX-804 (27174, +4% attr 379) -> 0.69575 * 1.04 = 0.72358 (2,894 Tritanium)
     ctx.db.with_mut_snapshot(|snap| { snap.active_implants.entry(char_id).or_default().push(27174); });
     let imp_res = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(veld_imp_id)], &kw, None).await.expect("Reprocess with RX-804 implant");
-    assert_eq!(get_dict_val(&imp_res, "tritaniumQuantity").and_then(|v| v.as_i64()), Some((10.0 * 400.0 * expected_yield * 1.04).floor() as i64));
+    assert_eq!(
+        imp_res,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(veld_imp_id)]),
+            PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer((10.0 * 400.0 * expected_yield * 1.04).floor() as i64))]),
+        ])
+    );
 
     let scrap_res = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(scrap_mod_id)], &kw, None).await.expect("Reprocess Miner I module with Scrapmetal Processing V");
-    assert!((get_dict_val(&scrap_res, "yieldRate").unwrap().as_f64().unwrap() - 0.55).abs() < 1e-6, "Scrapmetal Processing V yields 0.50 * 1.10 = 0.55");
+    let mut expected_scrap_map = std::collections::BTreeMap::<i64, i64>::new();
+    for mat in &ctx.sde.type_materials[&483] {
+        let q = ((mat.quantity as f64) * 0.55).floor() as i64;
+        if q > 0 {
+            *expected_scrap_map.entry(i64::from(mat.material_type_id)).or_insert(0) += q;
+        }
+    }
+    let expected_scrap_dict: Vec<(PyRep, PyRep)> = expected_scrap_map
+        .into_iter()
+        .map(|(tid, q)| (PyRep::Integer(tid), PyRep::Integer(q)))
+        .collect();
+    assert_eq!(
+        scrap_res,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(scrap_mod_id)]),
+            PyRep::Dict(expected_scrap_dict),
+        ]),
+        "Scrapmetal Processing V yields 0.50 * 1.10 = 0.55"
+    );
 
     let (rem_veld, has_tax_journal) = ctx.db.with_snapshot(|snap| {
         let rem = snap.items.get(&reprocess_item_id).map(|i| i.quantity).unwrap_or(0);
@@ -1028,6 +1082,7 @@ async fn test_gh1183_reprocess_destination_and_capacity_enforcement() {
     });
 
     // 4. Positive reprocessing into (station_id, Hangar), (office_id, CorpSAG2), and (station_cont_id, Hangar).
+    let pre_hangar_ids: std::collections::HashSet<i64> = ctx.db.with_snapshot(|s| s.items.keys().copied().collect());
     let hangar_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1046,11 +1101,18 @@ async fn test_gh1183_reprocess_destination_and_capacity_enforcement() {
         )
         .await
         .expect("Reprocess into station Hangar");
-    let PyRep::List(hangar_list) = hangar_res else { panic!() };
-    let hangar_trit_id = get_dict_val(&hangar_list[0], "tritaniumItemID")
-        .and_then(|v| v.as_i64())
-        .expect("hangar trit id");
+    let PyRep::Tuple(hangar_tup) = hangar_res else { panic!() };
+    assert_eq!(hangar_tup[0], PyRep::List(vec![PyRep::Integer(ore_hangar_id)]));
+    assert!(matches!(&hangar_tup[1], PyRep::Dict(d) if d.iter().any(|(k, v)| k.as_i64() == Some(34) && v.as_i64().unwrap_or(0) > 0)));
+    let hangar_trit_id = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .find(|i| !pre_hangar_ids.contains(&i.item_id) && i.owner_id == char_id && i.location_id == station_id && i.flag == InventoryFlag::Hangar && i.type_id == 34)
+            .map(|i| i.item_id)
+            .expect("hangar trit id")
+    });
 
+    let pre_corp_ids: std::collections::HashSet<i64> = ctx.db.with_snapshot(|s| s.items.keys().copied().collect());
     let corp_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1069,11 +1131,18 @@ async fn test_gh1183_reprocess_destination_and_capacity_enforcement() {
         )
         .await
         .expect("Reprocess into authorized office CorpSAG2");
-    let PyRep::List(corp_list) = corp_res else { panic!() };
-    let corp_trit_id = get_dict_val(&corp_list[0], "tritaniumItemID")
-        .and_then(|v| v.as_i64())
-        .expect("corp trit id");
+    let PyRep::Tuple(corp_tup) = corp_res else { panic!() };
+    assert_eq!(corp_tup[0], PyRep::List(vec![PyRep::Integer(ore_corp_id)]));
+    assert!(matches!(&corp_tup[1], PyRep::Dict(d) if d.iter().any(|(k, v)| k.as_i64() == Some(34) && v.as_i64().unwrap_or(0) > 0)));
+    let corp_trit_id = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .find(|i| !pre_corp_ids.contains(&i.item_id) && i.owner_id == corp_id && i.location_id == office_id && i.flag == InventoryFlag::CorpSAG2 && i.type_id == 34)
+            .map(|i| i.item_id)
+            .expect("corp trit id")
+    });
 
+    let pre_cont_ids: std::collections::HashSet<i64> = ctx.db.with_snapshot(|s| s.items.keys().copied().collect());
     let cont_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1092,10 +1161,16 @@ async fn test_gh1183_reprocess_destination_and_capacity_enforcement() {
         )
         .await
         .expect("Reprocess into unlocked Station Container");
-    let PyRep::List(cont_list) = cont_res else { panic!() };
-    let cont_trit_id = get_dict_val(&cont_list[0], "tritaniumItemID")
-        .and_then(|v| v.as_i64())
-        .expect("cont trit id");
+    let PyRep::Tuple(cont_tup) = cont_res else { panic!() };
+    assert_eq!(cont_tup[0], PyRep::List(vec![PyRep::Integer(ore_cont_id)]));
+    assert!(matches!(&cont_tup[1], PyRep::Dict(d) if d.iter().any(|(k, v)| k.as_i64() == Some(34) && v.as_i64().unwrap_or(0) > 0)));
+    let cont_trit_id = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .find(|i| !pre_cont_ids.contains(&i.item_id) && i.owner_id == char_id && i.location_id == station_cont_id && i.flag == InventoryFlag::Hangar && i.type_id == 34)
+            .map(|i| i.item_id)
+            .expect("cont trit id")
+    });
 
     // 5. Persist to SQLite, reload into a fresh ServerContext, and verify all destinations persist.
     let reloaded_ctx = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "gh1183_reprocess");

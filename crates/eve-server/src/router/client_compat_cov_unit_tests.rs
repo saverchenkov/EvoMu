@@ -157,37 +157,6 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
 
 #[test]
 fn issue_776_reprocess_list_and_fw_battlefield_compat() {
-    // #776: 1-arg batch Reprocess list normalized on wire to (inputItemIDs, outputByTypeID)
-    let batch_reply = PyRep::List(vec![
-        PyRep::keyval([
-            ("itemID", PyRep::Integer(1001)),
-            (
-                "outputs",
-                PyRep::List(vec![PyRep::keyval([
-                    ("typeID", PyRep::Integer(34)),
-                    ("quantity", PyRep::Integer(120)),
-                ])]),
-            ),
-        ]),
-        PyRep::keyval([
-            ("itemID", PyRep::Integer(1002)),
-            (
-                "outputs",
-                PyRep::List(vec![PyRep::keyval([
-                    ("typeID", PyRep::Integer(34)),
-                    ("quantity", PyRep::Integer(80)),
-                ])]),
-            ),
-        ]),
-    ]);
-    let rep_norm = normalize_macho_rpc_reply("reprocessingSvc", "Reprocess", Ok(batch_reply))
-        .expect("normalize Reprocess");
-    let PyRep::Tuple(t) = rep_norm else {
-        panic!("expected 2-tuple from Reprocess compat");
-    };
-    assert_eq!(t[0], PyRep::List(vec![PyRep::Integer(1001), PyRep::Integer(1002)]));
-    assert_eq!(t[1], PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(200))]));
-
     // #955: dungeonInstanceCacheMgr.GetFactionWarfareBattlefieldInstances converts List -> Dict by solarSystemID
     let fw_bf = normalize_macho_rpc_reply(
         "dungeonInstanceCacheMgr",
@@ -1668,4 +1637,185 @@ async fn arch_933_t7a_agent_location_and_briefing_emit_native_v24_without_compat
     assert!(matches!(obj_d, PyRep::Dict(_)));
     assert_eq!(obj_d.dict_get("contentID"), Some(&PyRep::Integer(i64::from(mission_tmpl.mission_id))));
     assert!(matches!(obj_d.dict_get("objectives"), Some(PyRep::List(_))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_933_t7b_reprocessing_svc_reprocess_emits_native_v24_without_compat() {
+    use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, VirtualServerClock, WorldRepository};
+    use eve_machonet::{service_roles, SessionState};
+    use std::sync::{Arc, OnceLock};
+
+    static SDE: OnceLock<Arc<eve_sde::SdeRegistry>> = OnceLock::new();
+    let shared_sde = || -> Arc<eve_sde::SdeRegistry> {
+        if let Some(sde) = SDE.get() {
+            Arc::clone(sde)
+        } else {
+            let ctx = crate::router::ServerContext::new();
+            let _ = SDE.set(Arc::clone(&ctx.sde));
+            ctx.sde
+        }
+    };
+
+    let now_unix = 1_800_000_000_u64;
+    let char_id = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let ship_id = 100_000_001_i64;
+    let veld_id = 993_702_001_i64;
+    let plag_id = 993_702_002_i64;
+    let scord_id = 993_702_003_i64;
+    let zero_out_id = 993_702_004_i64;
+
+    let mut sde = (*shared_sde()).clone();
+    let mut tiny_type = sde.types.get(&1230).expect("Veldspar in SDE").clone();
+    tiny_type.type_id = 999_702;
+    tiny_type.portion_size = 1;
+    sde.types.insert(999_702, tiny_type);
+    sde.type_materials.insert(
+        999_702,
+        vec![eve_sde::TypeMaterialEntry {
+            material_type_id: 34,
+            quantity: 1,
+        }],
+    );
+    let sde = Arc::new(sde);
+
+    let setup_world = || -> (crate::router::ServerContext, SessionState) {
+        let ctx = crate::router::ServerContext::with_sde_and_repository(
+            Arc::clone(&sde),
+            Arc::new(WorldRepository::with_demo_seed()),
+        )
+        .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+        ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix)));
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.corporation_id = corp_id;
+                ch.station_id = Some(station_id);
+                ch.structure_id = None;
+                ch.solar_system_id = 30_000_142;
+                ch.active_ship_id = ship_id;
+                ch.balance = IskCents::from_isk(100_000_000);
+            }
+            snap.skills.remove(&char_id);
+            snap.active_implants.remove(&char_id);
+            for (iid, tid, qty) in [
+                (veld_id, 1230_u32, 250_i32),
+                (plag_id, 18_u32, 200_i32),
+                (scord_id, 1228_u32, 100_i32),
+                (zero_out_id, 999_702_u32, 1_i32),
+            ] {
+                snap.items.insert(
+                    iid,
+                    InventoryItemRecord {
+                        item_id: iid,
+                        type_id: tid,
+                        owner_id: char_id,
+                        location_id: station_id,
+                        flag: InventoryFlag::Hangar,
+                        quantity: qty,
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+        });
+        let sess = SessionState {
+            session_id: 77_702,
+            user_id: Some(1),
+            character_id: Some(char_id),
+            corporation_id: Some(corp_id),
+            solar_system_id: Some(30_000_142),
+            station_id: Some(station_id),
+            ship_id: Some(ship_id),
+            role: service_roles::ROLE_PLAYER,
+            ..Default::default()
+        };
+        (ctx, sess)
+    };
+
+    let (ctx_direct, mut sess_direct) = setup_world();
+    let (ctx_wire, mut sess_wire) = setup_world();
+    let kw = HashMap::new();
+
+    // 1. Single-item 1-arg Reprocess (250 Veldspar -> 200 consumed, 50 remainder, 400 Tritanium at 50%).
+    let d1 = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(veld_id)], &kw, None)
+        .await
+        .expect("direct single Reprocess");
+    let w1 = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(veld_id)], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire single Reprocess");
+    assert_eq!(d1, w1, "single-item Reprocess direct reply must match wire reply");
+    assert_eq!(
+        d1,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(veld_id)]),
+            PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(400))]),
+        ])
+    );
+    ctx_direct.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&veld_id).map(|i| i.quantity), Some(50));
+        assert!(snap
+            .wallet_journal
+            .iter()
+            .any(|j| j.character_id == char_id && j.entry_type == "ReprocessingTax" && j.amount.0 > 0));
+    });
+
+    // 2. Multi-item 5-arg batch Reprocess aggregates outputs by ascending typeID across planned items.
+    let batch_args = [
+        PyRep::List(vec![PyRep::Integer(plag_id), PyRep::Integer(scord_id)]),
+        PyRep::Integer(station_id),
+        PyRep::Integer(char_id),
+        PyRep::Integer(station_id),
+        PyRep::Integer(InventoryFlag::Hangar as i64),
+    ];
+    let d2 = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "reprocessingSvc", None, "Reprocess", &batch_args, &kw, None)
+        .await
+        .expect("direct batch Reprocess");
+    let w2 = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "reprocessingSvc", None, "Reprocess", &batch_args, &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire batch Reprocess");
+    assert_eq!(d2, w2, "batch Reprocess direct reply must match wire reply");
+    let mut expected_map = std::collections::BTreeMap::<i64, i64>::new();
+    for (tid, portions) in [(18_u32, 2_i64), (1228_u32, 1_i64)] {
+        for mat in &sde.type_materials[&tid] {
+            let qty = ((mat.quantity as i64 * portions) as f64 * 0.50).floor() as i64;
+            if qty > 0 {
+                *expected_map.entry(i64::from(mat.material_type_id)).or_insert(0) += qty;
+            }
+        }
+    }
+    let expected_dict: Vec<(PyRep, PyRep)> = expected_map
+        .into_iter()
+        .map(|(tid, qty)| (PyRep::Integer(tid), PyRep::Integer(qty)))
+        .collect();
+    assert_eq!(
+        d2,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(plag_id), PyRep::Integer(scord_id)]),
+            PyRep::Dict(expected_dict),
+        ])
+    );
+
+    // 3. Zero-output item returns (inputIDs, {}) natively without compat rewriting.
+    let d3 = ctx_direct
+        .dispatch_rpc(&mut sess_direct, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(zero_out_id)], &kw, None)
+        .await
+        .expect("direct zero-output Reprocess");
+    let w3 = ctx_wire
+        .dispatch_rpc(&mut sess_wire, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(zero_out_id)], &kw, Some("machoNet:26000"))
+        .await
+        .expect("wire zero-output Reprocess");
+    assert_eq!(d3, w3);
+    assert_eq!(
+        d3,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(zero_out_id)]),
+            PyRep::Dict(Vec::new()),
+        ])
+    );
 }

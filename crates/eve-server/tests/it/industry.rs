@@ -132,6 +132,14 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
 
     // 3. Reprocess 10,000 Veldspar (100_000_012, type 1230, portionSize = 100, 34 -> 400 per batch).
     // With 0 skills, base_rate = 0.50 and Caldari Navy standing 2.0 -> station_tax_rate = 0.035 (charged in ISK) -> yield_rate = 0.50 -> 100 * 400 * 0.50 = 20,000 Tritanium.
+    let (bal_before, journal_before, pre_item_ids): (i64, usize, std::collections::HashSet<i64>) =
+        ctx.db.with_snapshot(|snap| {
+            (
+                snap.characters[&90_000_001].balance.0,
+                snap.wallet_journal.len(),
+                snap.items.keys().copied().collect(),
+            )
+        });
     let reproc_veld = ctx
         .dispatch_rpc(
             &mut sess,
@@ -144,42 +152,41 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
         )
         .await
         .expect("Reprocess 10,000 Veldspar");
-    let PyRep::KeyVal(veld_kv) = reproc_veld else {
-        panic!("Expected KeyVal from Veldspar Reprocess");
-    };
     let sde_veldspar_mats = ctx.sde.type_materials.get(&1230).expect("Veldspar typeMaterials");
     assert_eq!(sde_veldspar_mats.len(), 1);
     assert_eq!(sde_veldspar_mats[0].material_type_id, 34);
     assert_eq!(sde_veldspar_mats[0].quantity, 400);
 
-    let outputs = match veld_kv.get("outputs") {
-        Some(PyRep::List(l)) => l,
-        _ => panic!("Expected outputs list in Reprocess result"),
-    };
-    assert_eq!(outputs.len(), 1, "Veldspar must yield exactly 1 material type per SDE invTypeMaterials");
-    let out_mid = if let PyRep::KeyVal(mat_kv) = &outputs[0] {
-        assert_eq!(mat_kv.get("typeID").and_then(|v| v.as_i64()), Some(34));
-        assert_eq!(mat_kv.get("quantity").and_then(|v| v.as_i64()), Some(20_000));
-        mat_kv.get("itemID").and_then(|v| v.as_i64()).expect("material itemID")
-    } else {
-        panic!("Expected KeyVal in outputs[0]");
-    };
-    let credited = ctx.db.get_item(out_mid).expect("Credited material item in hangar");
-    assert_eq!(credited.type_id, 34);
-    assert_eq!(credited.owner_id, 90_000_001);
-    assert_eq!(credited.location_id, 60_003_760);
-    assert_eq!(credited.flag, InventoryFlag::Hangar);
-    assert_eq!(credited.quantity, 20_000);
-
     assert_eq!(
-        veld_kv.get("tritaniumQuantity").and_then(|v| v.as_i64()),
-        Some(20_000),
-        "S-1: 10,000 Veldspar at 0.50 facility yield must yield 20,000 Tritanium (with 3.5% station tax charged in ISK)"
+        reproc_veld,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(100_000_012)]),
+            PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(20_000))]),
+        ]),
+        "S-1: 10,000 Veldspar at 0.50 facility yield must return native V24 2-tuple yielding 20,000 Tritanium"
     );
-    assert!(
-        veld_kv.get("reprocessingTaxISK").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0,
-        "S-1: NPC station reprocessing tax must be charged in ISK"
-    );
+    ctx.db.with_snapshot(|snap| {
+        let credited = snap
+            .items
+            .values()
+            .find(|i| !pre_item_ids.contains(&i.item_id) && i.type_id == 34)
+            .expect("Credited material item in hangar");
+        assert_eq!(credited.owner_id, 90_000_001);
+        assert_eq!(credited.location_id, 60_003_760);
+        assert_eq!(credited.flag, InventoryFlag::Hangar);
+        assert_eq!(credited.quantity, 20_000);
+        assert!(
+            snap.characters[&90_000_001].balance.0 < bal_before,
+            "S-1: NPC station reprocessing tax must be charged in ISK"
+        );
+        assert!(
+            snap.wallet_journal
+                .iter()
+                .skip(journal_before)
+                .any(|e| e.character_id == 90_000_001 && e.entry_type == "ReprocessingTax" && e.amount.0 > 0),
+            "S-1: NPC station reprocessing tax must be recorded in wallet journal"
+        );
+    });
     assert!(
         ctx.db.get_item(100_000_012).is_none(),
         "S-1: Exact multiple of portionSize (10,000 Veldspar) must consume entire stack"
@@ -207,6 +214,8 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
             },
         );
     });
+    let pre_plag_ids: std::collections::HashSet<i64> =
+        ctx.db.with_snapshot(|snap| snap.items.keys().copied().collect());
     let reproc_plag = ctx
         .dispatch_rpc(
             &mut sess,
@@ -219,24 +228,30 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
         )
         .await
         .expect("Reprocess 250 Plagioclase");
-    let PyRep::KeyVal(rp_kv) = reproc_plag else {
-        panic!("Expected KeyVal from Reprocess");
-    };
+    assert_eq!(
+        reproc_plag,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(100_990_001)]),
+            PyRep::Dict(vec![
+                (PyRep::Integer(34), PyRep::Integer(175)),
+                (PyRep::Integer(36), PyRep::Integer(70)),
+            ]),
+        ])
+    );
     assert_eq!(
         ctx.db.get_item(100_990_001).map(|i| i.quantity),
         Some(50),
         "S-1: 50 un-reprocessed Plagioclase units (< portionSize 100) must remain in stack"
     );
-    assert_eq!(
-        rp_kv.get("tritaniumQuantity").and_then(|v| v.as_i64()),
-        Some(175)
-    );
-    let Some(PyRep::List(outputs)) = rp_kv.get("outputs") else {
-        panic!("Expected outputs list from Reprocess");
-    };
-    assert_eq!(outputs.len(), 2);
-    let mexallon_qty = ctx.db.with_snapshot(|snap| {
-        snap.items
+    let (minted_trit_qty, mexallon_qty) = ctx.db.with_snapshot(|snap| {
+        let trit = snap
+            .items
+            .values()
+            .filter(|i| !pre_plag_ids.contains(&i.item_id) && i.owner_id == 90_000_001 && i.location_id == 60_003_760 && i.type_id == 34)
+            .map(|i| i.quantity as i64)
+            .sum::<i64>();
+        let mex = snap
+            .items
             .values()
             .filter(|i| {
                 i.owner_id == 90_000_001
@@ -245,8 +260,10 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
                     && i.item_id != 100_000_010
             })
             .map(|i| i.quantity as i64)
-            .sum::<i64>()
+            .sum::<i64>();
+        (trit, mex)
     });
+    assert_eq!(minted_trit_qty, 175);
     assert_eq!(
         mexallon_qty, 70,
         "S-1: Reprocessing 200 Plagioclase at 0.50 yield must deposit 70 Mexallon (36)"

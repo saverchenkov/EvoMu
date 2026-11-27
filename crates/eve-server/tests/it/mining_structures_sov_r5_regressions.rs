@@ -161,6 +161,8 @@ async fn test_r5_212_222_corp_hangar_reprocess_compress_decompress_acl_and_owner
             corp.member_roles.insert(char_id, 1u64 << 13);
         }
     });
+    let pre_item_ids: std::collections::HashSet<i64> =
+        ctx.db.with_snapshot(|snap| snap.items.keys().copied().collect());
     let rep_ok = ctx
         .dispatch_rpc(
             &mut sess,
@@ -173,10 +175,27 @@ async fn test_r5_212_222_corp_hangar_reprocess_compress_decompress_acl_and_owner
         )
         .await
         .expect("Authorized CorpSAG1 reprocess");
-    let trit_id = rep_ok.dict_get("tritaniumItemID").and_then(|v| v.as_i64()).unwrap();
-    let trit_item = ctx.db.get_item(trit_id).unwrap();
+    let PyRep::Tuple(rep_parts) = rep_ok else {
+        panic!("expected V24 2-tuple from Reprocess, got {rep_ok:?}");
+    };
+    assert_eq!(rep_parts[0], PyRep::List(vec![PyRep::Integer(corp_ore_id)]));
+    let PyRep::Dict(out_map) = &rep_parts[1] else {
+        panic!("expected outputByTypeID Dict");
+    };
+    let trit_qty = out_map
+        .iter()
+        .find_map(|(k, v)| (k.as_i64() == Some(34)).then(|| v.as_i64()).flatten())
+        .expect("Tritanium in Reprocess output dict");
+    let trit_item = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .find(|i| !pre_item_ids.contains(&i.item_id) && i.type_id == 34 && i.owner_id == corp_id)
+            .cloned()
+            .expect("minted corp Tritanium item")
+    });
     assert_eq!(trit_item.owner_id, corp_id);
     assert_eq!(trit_item.flag, InventoryFlag::CorpSAG1);
+    assert_eq!(i64::from(trit_item.quantity), trit_qty);
 
     // #222: Dock at structure; member without division 2 take role cannot decompress CorpSAG2 gas
     ctx.db.with_mut_snapshot(|snap| {

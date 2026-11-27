@@ -441,7 +441,11 @@ async fn issue_552_container_split_alsc_and_reprocess_hangar_rbacs() {
     assert!(split.dict_get("newItemID").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
     // Loose Reprocess at JITA_44 now also succeeds because P2 holds ROLE_HANGAR_CAN_TAKE[0]
     let rep = rpc(&ctx, &mut s2, "reprocessingSvc", "Reprocess", &[PyRep::List(vec![PyRep::Integer(loose_ore)])]).await.expect("Reprocess with Hangar Take 1");
-    assert!(matches!(rep, PyRep::List(ref items) if !items.is_empty()), "expected batch Reprocess list: {rep:?}");
+    let PyRep::Tuple(ref parts) = rep else {
+        panic!("expected V24 2-tuple from Reprocess: {rep:?}");
+    };
+    assert_eq!(parts[0], PyRep::List(vec![PyRep::Integer(loose_ore)]));
+    assert!(matches!(&parts[1], PyRep::Dict(d) if !d.is_empty()), "expected non-empty mineral dict: {rep:?}");
     let _ = JITA_ALT;
 }
 

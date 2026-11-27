@@ -1274,30 +1274,45 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         );
     });
 
+    let expected_yield: f64 = 0.50 * 1.15 * 1.10 * 1.10; // 0.69575
+    let expected_tax: f64 = 0.05 - 0.0075 * 2.0; // 0.035
+    let expected_trit = (10.0_f64 * 400.0 * expected_yield).floor() as i64; // 2783
+    let q_veld = ctx
+        .dispatch_rpc(&mut session, "reprocessingSvc", None, "GetQuotes", &[PyRep::List(vec![PyRep::Integer(veld_item_id)])], &kw, None)
+        .await
+        .expect("GetQuotes 2.0 standing");
+    let PyRep::Tuple(ref qv_tup) = q_veld else { panic!("expected 3-tuple") };
+    assert!((qv_tup[0].as_f64().unwrap() - expected_tax).abs() < 1e-6);
+
     let reproc_res = ctx
         .dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(veld_item_id)], &kw, None)
         .await
         .expect("reprocessingSvc.Reprocess");
-    let yield_rate = get_dict_val(&reproc_res, "yieldRate").unwrap().as_f64().unwrap();
-    let trit_qty = get_dict_val(&reproc_res, "tritaniumQuantity").unwrap().as_i64().unwrap();
-    let tax_rate = get_dict_val(&reproc_res, "stationTaxRate").unwrap().as_f64().unwrap();
-    let expected_yield: f64 = 0.50 * 1.15 * 1.10 * 1.10; // 0.69575
-    let expected_tax: f64 = 0.05 - 0.0075 * 2.0; // 0.035
-    let expected_trit = (10.0_f64 * 400.0 * expected_yield).floor() as i64; // 2783
-    assert!((yield_rate - expected_yield).abs() < 1e-6);
-    assert!((tax_rate - expected_tax).abs() < 1e-6);
-    assert_eq!(trit_qty, expected_trit);
+    assert_eq!(
+        reproc_res,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(veld_item_id)]),
+            PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(expected_trit))]),
+        ])
+    );
 
-    let (rem_veld_qty, has_tax_journal) = ctx.db.with_snapshot(|snap| {
+    let (rem_veld_qty, has_tax_journal, minted_trit_qty) = ctx.db.with_snapshot(|snap| {
         let rem = snap.items.get(&veld_item_id).map(|it| it.quantity).unwrap_or(0);
         let has_journal = snap
             .wallet_journal
             .iter()
             .any(|e| e.character_id == char_id && e.entry_type == "ReprocessingTax" && e.amount.0 > 0);
-        (rem, has_journal)
+        let minted: i64 = snap
+            .items
+            .values()
+            .filter(|it| it.owner_id == char_id && it.location_id == station_id && it.type_id == 34)
+            .map(|it| i64::from(it.quantity))
+            .sum();
+        (rem, has_journal, minted)
     });
     assert_eq!(rem_veld_qty, 50, "Non-multiple remainder of 50 Veldspar must remain in hangar");
     assert!(has_tax_journal, "NPC station reprocessing with tax > 0 must record a ReprocessingTax wallet journal entry");
+    assert!(minted_trit_qty >= expected_trit);
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -1325,10 +1340,13 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         .await
         .expect("Reprocess with RX-804 implant");
     let expected_imp_yield: f64 = 0.50 * 1.15 * 1.10 * 1.10 * 1.04; // 0.72358
-    assert!((get_dict_val(&imp_res, "yieldRate").unwrap().as_f64().unwrap() - expected_imp_yield).abs() < 1e-6);
+    let expected_imp_trit = (10.0_f64 * 400.0 * expected_imp_yield).floor() as i64;
     assert_eq!(
-        get_dict_val(&imp_res, "tritaniumQuantity").unwrap().as_i64(),
-        Some((10.0_f64 * 400.0 * expected_imp_yield).floor() as i64)
+        imp_res,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(veld_imp_id)]),
+            PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(expected_imp_trit))]),
+        ])
     );
     assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&veld_imp_id).map(|i| i.quantity)), Some(50));
     ctx.db.with_mut_snapshot(|snap| {
@@ -1350,20 +1368,24 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
             .dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(mod_id)], &kw, None)
             .await
             .expect("Reprocess module");
-        let mod_yield = get_dict_val(&mod_reproc_res, "yieldRate").unwrap().as_f64().unwrap();
-        assert!((mod_yield - expected_mod_yield).abs() < 1e-6);
-        let PyRep::List(mod_outputs) = get_dict_val(&mod_reproc_res, "outputs").unwrap() else { panic!() };
+        let mut expected_mod_map = std::collections::BTreeMap::<i64, i64>::new();
         for mat in ctx.sde.type_materials.get(&482).expect("Miner II (482) SDE typeMaterials") {
             let expected_mat_qty = ((mat.quantity as f64) * expected_mod_yield).floor() as i64;
             if expected_mat_qty > 0 {
-                let actual_mat_qty = mod_outputs
-                    .iter()
-                    .find(|o| get_dict_val(o, "typeID").and_then(|v| v.as_i64()) == Some(mat.material_type_id as i64))
-                    .and_then(|o| get_dict_val(o, "quantity"))
-                    .and_then(|v| v.as_i64());
-                assert_eq!(actual_mat_qty, Some(expected_mat_qty));
+                *expected_mod_map.entry(i64::from(mat.material_type_id)).or_insert(0) += expected_mat_qty;
             }
         }
+        let expected_mod_dict: Vec<(PyRep, PyRep)> = expected_mod_map
+            .into_iter()
+            .map(|(tid, qty)| (PyRep::Integer(tid), PyRep::Integer(qty)))
+            .collect();
+        assert_eq!(
+            mod_reproc_res,
+            PyRep::Tuple(vec![
+                PyRep::List(vec![PyRep::Integer(mod_id)]),
+                PyRep::Dict(expected_mod_dict),
+            ])
+        );
     }
     ctx.db.with_mut_snapshot(|snap| {
         snap.active_implants.remove(&char_id);
@@ -1379,19 +1401,24 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         .dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(800_000_156)], &kw, None)
         .await
         .expect("Reprocess repackaged Rifter (587) at Scrapmetal Processing V");
-    assert!((get_dict_val(&ship_reproc_res, "yieldRate").unwrap().as_f64().unwrap() - 0.55).abs() < 1e-6);
-    let PyRep::List(ship_outputs) = get_dict_val(&ship_reproc_res, "outputs").unwrap() else { panic!() };
+    let mut expected_ship_map = std::collections::BTreeMap::<i64, i64>::new();
     for mat in ctx.sde.type_materials.get(&587).expect("Rifter SDE typeMaterials") {
         let expected_qty = ((mat.quantity as f64) * 0.55).floor() as i64;
         if expected_qty > 0 {
-            let actual_qty = ship_outputs
-                .iter()
-                .find(|o| get_dict_val(o, "typeID").and_then(|v| v.as_i64()) == Some(mat.material_type_id as i64))
-                .and_then(|o| get_dict_val(o, "quantity"))
-                .and_then(|v| v.as_i64());
-            assert_eq!(actual_qty, Some(expected_qty));
+            *expected_ship_map.entry(i64::from(mat.material_type_id)).or_insert(0) += expected_qty;
         }
     }
+    let expected_ship_dict: Vec<(PyRep, PyRep)> = expected_ship_map
+        .into_iter()
+        .map(|(tid, qty)| (PyRep::Integer(tid), PyRep::Integer(qty)))
+        .collect();
+    assert_eq!(
+        ship_reproc_res,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(800_000_156)]),
+            PyRep::Dict(expected_ship_dict),
+        ])
+    );
 
     // 3. Upwell Structure Reprocessing Service (`feat:structures.service-reprocessing`, `feat:mining.upwell-refinery-base-yield`):
     let structure_id = 1_000_000_001_002i64;
@@ -1496,22 +1523,25 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
 
         let struct_info = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.expect("GetQuotes");
         let PyRep::Tuple(ref si_tup) = struct_info else { panic!("expected 3-tuple") };
+        assert_eq!(si_tup[0].as_f64(), Some(0.0));
         let PyRep::Dict(ref si_eff) = si_tup[1] else { panic!("expected eff dict") };
         let struct_base = si_eff.iter().find(|(k, _)| *k == PyRep::None).and_then(|(_, v)| v.as_f64()).unwrap();
         assert!((struct_base - expected_base).abs() < 1e-6, "{label} base yield mismatch");
 
         let ore_item_id = 800_000_161 + (idx as i64) * 2;
+        let expected_struct_yield: f64 = expected_base * 1.15 * 1.10 * 1.10;
+        let expected_struct_trit = (10.0_f64 * 400.0 * expected_struct_yield).floor() as i64;
         let struct_reproc_res = ctx
             .dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(ore_item_id)], &kw, None)
             .await
             .expect("Reprocess in Upwell structure");
-        let struct_yield = get_dict_val(&struct_reproc_res, "yieldRate").unwrap().as_f64().unwrap();
-        let struct_tax = get_dict_val(&struct_reproc_res, "stationTaxRate").unwrap().as_f64().unwrap();
-        let struct_trit = get_dict_val(&struct_reproc_res, "tritaniumQuantity").unwrap().as_i64().unwrap();
-        let expected_struct_yield: f64 = expected_base * 1.15 * 1.10 * 1.10;
-        assert!((struct_yield - expected_struct_yield).abs() < 1e-6);
-        assert_eq!(struct_tax, 0.0);
-        assert_eq!(struct_trit, (10.0_f64 * 400.0 * expected_struct_yield).floor() as i64);
+        assert_eq!(
+            struct_reproc_res,
+            PyRep::Tuple(vec![
+                PyRep::List(vec![PyRep::Integer(ore_item_id)]),
+                PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(expected_struct_trit))]),
+            ])
+        );
     }
 
     // 4. Standup Reprocessing Rig Security Multipliers (`feat:structures.reprocessing-rig-security-multipliers`):
@@ -1547,16 +1577,50 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         let q_base = q_eff.iter().find(|(k, _)| *k == PyRep::None).and_then(|(_, v)| v.as_f64()).unwrap();
         assert!((q_base - expected_rigged_base).abs() < 1e-6);
 
+        let expected_rig_trit = (10.0_f64 * 400.0 * (expected_rigged_base * 1.15 * 1.10 * 1.10)).floor() as i64;
         let r = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(ore_id)], &kw, None).await.unwrap();
-        assert!((get_dict_val(&r, "stationBaseYield").unwrap().as_f64().unwrap() - expected_rigged_base).abs() < 1e-6);
+        assert_eq!(
+            r,
+            PyRep::Tuple(vec![
+                PyRep::List(vec![PyRep::Integer(ore_id)]),
+                PyRep::Dict(vec![(PyRep::Integer(34), PyRep::Integer(expected_rig_trit))]),
+            ])
+        );
     }
 
     let athanor_ice_id = 800_000_175i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(athanor_ice_id, make_item(athanor_ice_id, 16262, char_id, structure_id, InventoryFlag::Hangar, 10, false));
     });
+    let q_ice = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "GetQuotes", &[PyRep::List(vec![PyRep::Integer(athanor_ice_id)])], &kw, None).await.unwrap();
+    let PyRep::Tuple(ref qi_tup) = q_ice else { panic!("expected 3-tuple") };
+    let PyRep::Dict(ref qi_eff) = qi_tup[1] else { panic!("expected eff dict") };
+    let qi_base = qi_eff.iter().find(|(k, _)| k.as_i64() == Some(16262)).and_then(|(_, v)| v.as_f64()).unwrap();
+    assert!((qi_base - 0.51).abs() < 1e-6);
+    let PyRep::Dict(ref qi_quotes) = qi_tup[2] else { panic!("expected quotes dict") };
+    let qi_entry = qi_quotes.iter().find(|(k, _)| k.as_i64() == Some(athanor_ice_id)).map(|(_, v)| v).unwrap();
+    let qi_expected_dict: Vec<(PyRep, PyRep)> = qi_entry
+        .dict_get("recoverables")
+        .and_then(PyRep::crowset_rows)
+        .unwrap()
+        .into_iter()
+        .filter_map(|row| {
+            let tid = row.dbrow_get("typeID")?.as_i64()?;
+            let qty = row.dbrow_get("client")?.as_i64()?;
+            (qty > 0).then_some((tid, qty))
+        })
+        .collect::<std::collections::BTreeMap<i64, i64>>()
+        .into_iter()
+        .map(|(tid, qty)| (PyRep::Integer(tid), PyRep::Integer(qty)))
+        .collect();
     let ice_on_ore_rig = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(athanor_ice_id)], &kw, None).await.unwrap();
-    assert!((get_dict_val(&ice_on_ore_rig, "stationBaseYield").unwrap().as_f64().unwrap() - 0.51).abs() < 1e-6);
+    assert_eq!(
+        ice_on_ore_rig,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(athanor_ice_id)]),
+            PyRep::Dict(qi_expected_dict),
+        ])
+    );
 
     let tatara_rig_id = 800_000_180i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -1580,8 +1644,35 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         ctx.db.with_mut_snapshot(|snap| {
             snap.items.insert(item_id, make_item(item_id, type_id, char_id, tatara_id, InventoryFlag::Hangar, qty, false));
         });
+        let qt = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "GetQuotes", &[PyRep::List(vec![PyRep::Integer(item_id)])], &kw, None).await.unwrap();
+        let PyRep::Tuple(ref qt_tup) = qt else { panic!("expected 3-tuple") };
+        let PyRep::Dict(ref qt_eff) = qt_tup[1] else { panic!("expected eff dict") };
+        let qt_base = qt_eff.iter().find(|(k, _)| k.as_i64() == Some(i64::from(type_id))).and_then(|(_, v)| v.as_f64()).unwrap();
+        assert!((qt_base - expected_tatara_t2_null_base).abs() < 1e-6);
+        let PyRep::Dict(ref qt_quotes) = qt_tup[2] else { panic!("expected quotes dict") };
+        let qt_entry = qt_quotes.iter().find(|(k, _)| k.as_i64() == Some(item_id)).map(|(_, v)| v).unwrap();
+        let qt_expected_dict: Vec<(PyRep, PyRep)> = qt_entry
+            .dict_get("recoverables")
+            .and_then(PyRep::crowset_rows)
+            .unwrap()
+            .into_iter()
+            .filter_map(|row| {
+                let tid = row.dbrow_get("typeID")?.as_i64()?;
+                let q = row.dbrow_get("client")?.as_i64()?;
+                (q > 0).then_some((tid, q))
+            })
+            .collect::<std::collections::BTreeMap<i64, i64>>()
+            .into_iter()
+            .map(|(tid, q)| (PyRep::Integer(tid), PyRep::Integer(q)))
+            .collect();
         let res = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(item_id)], &kw, None).await.unwrap();
-        assert!((get_dict_val(&res, "stationBaseYield").unwrap().as_f64().unwrap() - expected_tatara_t2_null_base).abs() < 1e-6);
+        assert_eq!(
+            res,
+            PyRep::Tuple(vec![
+                PyRep::List(vec![PyRep::Integer(item_id)]),
+                PyRep::Dict(qt_expected_dict),
+            ])
+        );
     }
 
     // 5. Structure Owner Reprocessing Tax (`feat:mining.reprocessing-tax`):
@@ -1617,18 +1708,23 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         eve_db::corp_roles::ROLE_DIRECTOR,
     );
     ctx.dispatch_rpc(&mut session, "structureSettings", None, "SaveProfileSettings", &[PyRep::Integer(tatara_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Real(0.03)])])], &kw, None).await.expect("SaveProfileSettings 3% reprocessing tax");
+    let q_st_tax = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "GetQuotes", &[PyRep::List(vec![PyRep::Integer(taxed_ore_id)])], &kw, None).await.expect("GetQuotes with 3% owner tax");
+    let PyRep::Tuple(ref qst_tup) = q_st_tax else { panic!("expected 3-tuple") };
+    assert!((qst_tup[0].as_f64().unwrap() - 0.03).abs() < 1e-6);
+    let bal_before_st_tax = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.0);
     let st_tax_res = ctx.dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(taxed_ore_id)], &kw, None).await.expect("Reprocess in structure with 3% owner tax");
-    assert!((get_dict_val(&st_tax_res, "stationTaxRate").unwrap().as_f64().unwrap() - 0.03).abs() < 1e-6);
-    assert!(get_dict_val(&st_tax_res, "reprocessingTaxISK").unwrap().as_f64().unwrap() > 0.0);
-    let (journal_added, corp_wallet) = ctx.db.with_snapshot(|snap| {
+    let PyRep::Tuple(ref st_tup) = st_tax_res else { panic!("expected 2-tuple") };
+    assert_eq!(st_tup[0], PyRep::List(vec![PyRep::Integer(taxed_ore_id)]));
+    assert!(matches!(&st_tup[1], PyRep::Dict(d) if d.iter().any(|(k, v)| k.as_i64() == Some(34) && v.as_i64().unwrap_or(0) > 0)));
+    let (journal_added, corp_wallet, bal_after_st_tax) = ctx.db.with_snapshot(|snap| {
         let added = snap.wallet_journal
             .iter()
             .skip(journal_before)
             .any(|e| e.character_id == char_id && e.entry_type == "ReprocessingTax" && e.amount.0 > 0);
         let cw = snap.corporations.get(&owner_corp_id).map(|c| c.master_wallet_balance().0).unwrap_or(0);
-        (added, cw)
+        (added, cw, snap.characters[&char_id].balance.0)
     });
-    assert!(journal_added && corp_wallet > 0);
+    assert!(journal_added && corp_wallet > 0 && bal_after_st_tax < bal_before_st_tax);
 }
 
 }

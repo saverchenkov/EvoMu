@@ -118,12 +118,27 @@ async fn test_mining_scrapmetal_yield_exclusions_at_npc_and_rigged_tatara() {
         );
         snap.items.insert(101_000_001, make_item(101_000_001, 482, char_id, jita_station, InventoryFlag::Hangar, 1, false));
     });
+    let expected_mod_0: Vec<(PyRep, PyRep)> = ctx.sde.type_materials[&482]
+        .iter()
+        .filter_map(|m| {
+            let q = ((m.quantity as f64) * 0.50).floor() as i64;
+            (q > 0).then_some((i64::from(m.material_type_id), q))
+        })
+        .collect::<std::collections::BTreeMap<i64, i64>>()
+        .into_iter()
+        .map(|(tid, q)| (PyRep::Integer(tid), PyRep::Integer(q)))
+        .collect();
     let mod_lvl0 = ctx
         .dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(101_000_001)], &kw, None)
         .await
         .expect("Reprocess Miner II at Scrapmetal 0");
-    assert!((dict_get(&mod_lvl0, "stationBaseYield").and_then(|v| v.as_f64()).unwrap() - 0.50).abs() < 1e-6);
-    assert!((dict_get(&mod_lvl0, "yieldRate").and_then(|v| v.as_f64()).unwrap() - 0.50).abs() < 1e-6);
+    assert_eq!(
+        mod_lvl0,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(101_000_001)]),
+            PyRep::Dict(expected_mod_0),
+        ])
+    );
 
     // Train Scrapmetal Processing V (12196) -> 50% * (1 + 5 * 2%) = 55%
     ctx.db.with_mut_snapshot(|snap| {
@@ -133,12 +148,27 @@ async fn test_mining_scrapmetal_yield_exclusions_at_npc_and_rigged_tatara() {
         );
         snap.items.insert(101_000_002, make_item(101_000_002, 482, char_id, jita_station, InventoryFlag::Hangar, 1, false));
     });
+    let expected_mod_5: Vec<(PyRep, PyRep)> = ctx.sde.type_materials[&482]
+        .iter()
+        .filter_map(|m| {
+            let q = ((m.quantity as f64) * 0.55).floor() as i64;
+            (q > 0).then_some((i64::from(m.material_type_id), q))
+        })
+        .collect::<std::collections::BTreeMap<i64, i64>>()
+        .into_iter()
+        .map(|(tid, q)| (PyRep::Integer(tid), PyRep::Integer(q)))
+        .collect();
     let mod_lvl5 = ctx
         .dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(101_000_002)], &kw, None)
         .await
         .expect("Reprocess Miner II at Scrapmetal 5");
-    assert!((dict_get(&mod_lvl5, "stationBaseYield").and_then(|v| v.as_f64()).unwrap() - 0.50).abs() < 1e-6);
-    assert!((dict_get(&mod_lvl5, "yieldRate").and_then(|v| v.as_f64()).unwrap() - 0.55).abs() < 1e-6);
+    assert_eq!(
+        mod_lvl5,
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Integer(101_000_002)]),
+            PyRep::Dict(expected_mod_5),
+        ])
+    );
 
     // 2. Negative exclusion test: docked at a W-space Tatara (35836) with T2 Reprocessing Rig (46493),
     // Reprocessing V (3385), Reprocessing Efficiency V (3389), Veldspar Processing V (12195), and
@@ -197,32 +227,73 @@ async fn test_mining_scrapmetal_yield_exclusions_at_npc_and_rigged_tatara() {
     sess.structure_id = Some(tatara_id);
     sess.solar_system_id = Some(wh_sys);
 
+    let wh_quotes = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "GetQuotes",
+            &[PyRep::List(vec![
+                PyRep::Integer(101_000_720),
+                PyRep::Integer(101_000_721),
+                PyRep::Integer(101_000_722),
+                PyRep::Integer(101_000_723),
+                PyRep::Integer(101_000_724),
+            ])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetQuotes at Tatara");
+    let PyRep::Tuple(ref wq_parts) = wh_quotes else { panic!("expected 3-tuple") };
+    let PyRep::Dict(ref wq_eff) = wq_parts[1] else { panic!("expected eff dict") };
+    let ore_base = wq_eff.iter().find(|(k, _)| k.as_i64() == Some(1230)).and_then(|(_, v)| v.as_f64()).unwrap();
+    assert!(ore_base > 0.55, "Ore at rigged W-space Tatara must receive hull+rig+sec bonus (got {ore_base})");
+
     let ore_rep = ctx
         .dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(101_000_720)], &kw, None)
         .await
         .expect("Reprocess Veldspar at Tatara");
-    let ore_base = dict_get(&ore_rep, "stationBaseYield").and_then(|v| v.as_f64()).unwrap();
-    let ore_yield = dict_get(&ore_rep, "yieldRate").and_then(|v| v.as_f64()).unwrap();
-    assert!(ore_base > 0.55, "Ore at rigged W-space Tatara must receive hull+rig+sec bonus (got {ore_base})");
-    assert!(ore_yield > 0.75, "Ore yield at max skills + RX-804 + Tatara must exceed 75% (got {ore_yield})");
+    let PyRep::Tuple(ref ore_tup) = ore_rep else { panic!("expected 2-tuple") };
+    assert_eq!(ore_tup[0], PyRep::List(vec![PyRep::Integer(101_000_720)]));
+    let PyRep::Dict(ref ore_outs) = ore_tup[1] else { panic!("expected dict") };
+    let ore_trit = ore_outs.iter().find_map(|(k, v)| (k.as_i64() == Some(34)).then(|| v.as_i64()).flatten()).unwrap_or(0);
+    assert!(ore_trit > 300, "Ore yield at max skills + RX-804 + Tatara must exceed 75% (> 300 Tritanium from 100 Veldspar, got {ore_trit})");
 
-    for (iid, label) in [
-        (101_000_721_i64, "Miner II"),
-        (101_000_722_i64, "Rifter"),
-        (101_000_723_i64, "Metal Scraps"),
-        (101_000_724_i64, "Reinforced Metal Scraps"),
+    for (iid, tid, portions, label) in [
+        (101_000_721_i64, 482_u32, 1_i64, "Miner II"),
+        (101_000_722_i64, 587_u32, 1_i64, "Rifter"),
+        (101_000_723_i64, 15331_u32, 10_i64, "Metal Scraps"),
+        (101_000_724_i64, 30497_u32, 2_i64, "Reinforced Metal Scraps"),
     ] {
+        let base = wq_eff.iter().find(|(k, _)| k.as_i64() == Some(i64::from(tid))).and_then(|(_, v)| v.as_f64()).unwrap();
+        assert!((base - 0.50).abs() < 1e-6, "{label} must exclude Tatara hull/rig/sec bonus (got {base})");
         let rep = ctx
             .dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(iid)], &kw, None)
             .await
             .unwrap_or_else(|e| panic!("Reprocess {label} failed: {e:?}"));
-        let base = dict_get(&rep, "stationBaseYield").and_then(|v| v.as_f64()).unwrap();
-        let yld = dict_get(&rep, "yieldRate").and_then(|v| v.as_f64()).unwrap();
-        assert!((base - 0.50).abs() < 1e-6, "{label} must exclude Tatara hull/rig/sec bonus (got {base})");
-        assert!((yld - 0.55).abs() < 1e-6, "{label} must exclude skills & implants and cap at 55% (got {yld})");
+        let expected_dict: Vec<(PyRep, PyRep)> = ctx.sde.type_materials[&tid]
+            .iter()
+            .filter_map(|m| {
+                let q = (((m.quantity as i64 * portions) as f64) * 0.55).floor() as i64;
+                (q > 0).then_some((i64::from(m.material_type_id), q))
+            })
+            .collect::<std::collections::BTreeMap<i64, i64>>()
+            .into_iter()
+            .map(|(t, q)| (PyRep::Integer(t), PyRep::Integer(q)))
+            .collect();
+        assert_eq!(
+            rep,
+            PyRep::Tuple(vec![
+                PyRep::List(vec![PyRep::Integer(iid)]),
+                PyRep::Dict(expected_dict),
+            ]),
+            "{label} must exclude skills & implants and cap at 55%"
+        );
         if iid == 101_000_723 {
-            let Some(PyRep::List(outs)) = dict_get(&rep, "outputs") else { panic!("expected outputs list") };
-            let trit = outs.iter().find_map(|d| (dict_get(d, "typeID")?.as_i64()? == 34).then(|| dict_get(d, "quantity")?.as_i64()).flatten()).unwrap_or(0);
+            let PyRep::Tuple(ref parts) = rep else { unreachable!() };
+            let PyRep::Dict(ref outs) = parts[1] else { unreachable!() };
+            let trit = outs.iter().find_map(|(k, v)| (k.as_i64() == Some(34)).then(|| v.as_i64()).flatten()).unwrap_or(0);
             assert_eq!(trit, 2_750, "10x Metal Scraps (5,000 base Tritanium) must yield 2,750 (<= 55%) in rigged Tatara");
         }
     }
@@ -277,15 +348,22 @@ async fn test_mining_prismaticite_reprocessing_and_unrefined_mineral_reactions()
             snap.next_entity_id += (idx * 7) + 3;
             snap.items.insert(iid, make_item(iid, tid, char_id, jita_station, InventoryFlag::Hangar, 100, false));
         });
+        let yld = ctx.db.with_snapshot(|snap| {
+            let t = ctx.sde.types.get(&tid).unwrap();
+            eve_server::services::space_entity_mining::compute_reprocessing_rates_for_item(
+                &ctx.sde, snap, char_id, jita_station, t,
+            ).1
+        });
         let rep = ctx
             .dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(iid)], &kw, None)
             .await
             .expect("Reprocess Prismaticite batch");
-        let yld = dict_get(&rep, "yieldRate").and_then(|v| v.as_f64()).unwrap();
-        let PyRep::List(outs) = dict_get(&rep, "outputs").expect("outputs") else { panic!("Expected outputs list") };
+        let PyRep::Tuple(ref parts) = rep else { panic!("Expected V24 2-tuple") };
+        assert_eq!(parts[0], PyRep::List(vec![PyRep::Integer(iid)]));
+        let PyRep::Dict(ref outs) = parts[1] else { panic!("Expected outputByTypeID Dict") };
         assert_eq!(outs.len(), 1, "Prismaticite batch must yield exactly 1 mineral type");
-        let out_tid = dict_get(&outs[0], "typeID").and_then(|v| v.as_i64()).unwrap() as u32;
-        let out_qty = dict_get(&outs[0], "quantity").and_then(|v| v.as_i64()).unwrap() as u64;
+        let out_tid = outs[0].0.as_i64().unwrap() as u32;
+        let out_qty = outs[0].1.as_i64().unwrap() as u64;
         let &(q_min, q_max) = prism_ranges.get(&out_tid).expect("Output must be one of the 8 SDE minerals");
         let exp_lo = ((q_min as f64) * yld).floor() as u64;
         let exp_hi = ((q_max as f64) * yld).floor() as u64;
@@ -306,20 +384,27 @@ async fn test_mining_prismaticite_reprocessing_and_unrefined_mineral_reactions()
         snap.next_entity_id += 41;
         snap.items.insert(multi_iid, make_item(multi_iid, 90041, char_id, jita_station, InventoryFlag::Hangar, 1_000, false));
     });
+    let multi_yld = ctx.db.with_snapshot(|snap| {
+        let t = ctx.sde.types.get(&90041).unwrap();
+        eve_server::services::space_entity_mining::compute_reprocessing_rates_for_item(
+            &ctx.sde, snap, char_id, jita_station, t,
+        ).1
+    });
     let multi_rep = ctx
         .dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(multi_iid)], &kw, None)
         .await
         .expect("Reprocess 10-batch Prismaticite stack");
-    let multi_yld = dict_get(&multi_rep, "yieldRate").and_then(|v| v.as_f64()).unwrap();
-    let PyRep::List(multi_outs) = dict_get(&multi_rep, "outputs").expect("outputs") else { panic!() };
+    let PyRep::Tuple(ref multi_parts) = multi_rep else { panic!("Expected V24 2-tuple") };
+    assert_eq!(multi_parts[0], PyRep::List(vec![PyRep::Integer(multi_iid)]));
+    let PyRep::Dict(ref multi_outs) = multi_parts[1] else { panic!("Expected outputByTypeID Dict") };
     assert!(
         multi_outs.len() >= 2,
         "10-batch Prismaticite stack must yield multiple distinct minerals across independent batch rolls, got {}",
         multi_outs.len()
     );
-    for out in multi_outs {
-        let out_tid = dict_get(out, "typeID").and_then(|v| v.as_i64()).unwrap() as u32;
-        let out_qty = dict_get(out, "quantity").and_then(|v| v.as_i64()).unwrap() as u64;
+    for (k, v) in multi_outs {
+        let out_tid = k.as_i64().unwrap() as u32;
+        let out_qty = v.as_i64().unwrap() as u64;
         let &(q_min, q_max) = prism_ranges.get(&out_tid).expect("Output must be one of the 8 SDE minerals");
         let exp_lo = ((q_min as f64) * multi_yld).floor() as u64;
         let exp_hi = (((q_max * 10) as f64) * multi_yld).floor() as u64;
@@ -473,15 +558,22 @@ async fn test_mining_prismaticite_reprocessing_and_unrefined_mineral_reactions()
         prism_base > 0.55,
         "Prismaticite (group 4915) must receive M-Set Asteroid Ore Grading Processor rig bonus on Athanor (got {prism_base})"
     );
+    let unref_yld = ctx.db.with_snapshot(|snap| {
+        let t = ctx.sde.types.get(&90283).unwrap();
+        eve_server::services::space_entity_mining::compute_reprocessing_rates_for_item(
+            &ctx.sde, snap, char_id, tatara_id, t,
+        ).1
+    });
     let unref_rep = ctx
         .dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(unref_item_id)], &kw, None)
         .await
         .expect("Reprocess Unrefined Tritanium");
-    let unref_yld = dict_get(&unref_rep, "yieldRate").and_then(|v| v.as_f64()).unwrap();
-    let PyRep::List(unref_outs) = dict_get(&unref_rep, "outputs").expect("outputs") else { panic!() };
+    let PyRep::Tuple(ref unref_parts) = unref_rep else { panic!("Expected V24 2-tuple") };
+    assert_eq!(unref_parts[0], PyRep::List(vec![PyRep::Integer(unref_item_id)]));
+    let PyRep::Dict(ref unref_outs) = unref_parts[1] else { panic!("Expected outputByTypeID Dict") };
     assert_eq!(unref_outs.len(), 1);
-    assert_eq!(dict_get(&unref_outs[0], "typeID").and_then(|v| v.as_i64()), Some(34));
-    let trit_qty = dict_get(&unref_outs[0], "quantity").and_then(|v| v.as_i64()).unwrap() as u64;
+    assert_eq!(unref_outs[0].0.as_i64(), Some(34));
+    let trit_qty = unref_outs[0].1.as_i64().unwrap() as u64;
     let trit_lo = (368_000.0 * unref_yld).floor() as u64;
     let trit_hi = (496_800.0 * unref_yld).floor() as u64;
     assert!(

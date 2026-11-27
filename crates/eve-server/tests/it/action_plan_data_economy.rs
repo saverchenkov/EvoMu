@@ -1047,21 +1047,20 @@ async fn test_plan_c6_reprocessing_yield_tax_and_materials() {
         .await
         .expect("reprocessingSvc.Reprocess Veldspar");
 
-    let outputs_rep = get_dict_val(&reproc_res, "outputs").expect("outputs list");
-    let mat_outputs = match outputs_rep {
-        PyRep::List(l) => l,
-        _ => panic!("Expected list of output items"),
+    let PyRep::Tuple(reproc_parts) = reproc_res else {
+        panic!("Expected V24 2-tuple from reprocessingSvc.Reprocess");
     };
-    assert!(!mat_outputs.is_empty(), "Outputs list must contain produced materials");
+    assert_eq!(reproc_parts.len(), 2);
+    assert_eq!(reproc_parts[0], PyRep::List(vec![PyRep::Integer(veldspar_item_id)]));
+    let PyRep::Dict(mat_outputs) = &reproc_parts[1] else {
+        panic!("Expected outputByTypeID Dict, got {:?}", reproc_parts[1]);
+    };
+    assert!(!mat_outputs.is_empty(), "Outputs dict must contain produced materials");
 
-    let trit_out = mat_outputs.iter().find(|entry| {
-        get_dict_val(entry, "typeID").and_then(|v| v.as_i64()) == Some(TRITANIUM_TYPE_ID as i64)
-    });
-    assert!(trit_out.is_some(), "Reprocessing Veldspar must produce Tritanium");
-
-    let trit_qty = get_dict_val(trit_out.unwrap(), "quantity")
-        .and_then(|v| v.as_i64())
-        .expect("Tritanium output quantity");
+    let trit_qty = mat_outputs
+        .iter()
+        .find_map(|(k, v)| (k.as_i64() == Some(TRITANIUM_TYPE_ID as i64)).then(|| v.as_i64()).flatten())
+        .expect("Reprocessing Veldspar must produce Tritanium");
     assert!(trit_qty > 0, "Produced Tritanium quantity must be positive");
 
     ctx.db.with_snapshot(|snap| {

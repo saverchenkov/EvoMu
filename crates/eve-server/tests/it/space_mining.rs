@@ -1521,8 +1521,11 @@ async fn test_mining_reprocessing_curves_scrapmetal_and_prismaticite() {
 
     // Ore at rigged NS Tatara receives structure + rig + nullsec + skills + RX-804 (> 75%)
     let ore_rep = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(100_000_873)], &kw, None).await.unwrap();
-    let ore_yield = get_dict_val(&ore_rep, "yieldRate").and_then(|v| v.as_f64()).unwrap();
-    assert!(ore_yield > 0.75, "Ore at rigged NS Tatara must receive structure/rig/nullsec/implant bonuses (got {ore_yield})");
+    let PyRep::Tuple(ref ore_tup) = ore_rep else { panic!("expected V24 2-tuple from Reprocess") };
+    assert_eq!(ore_tup[0], PyRep::List(vec![PyRep::Integer(100_000_873)]));
+    let PyRep::Dict(ref ore_outs) = ore_tup[1] else { panic!("expected outputByTypeID Dict") };
+    let ore_trit = ore_outs.iter().find_map(|(k, v)| (k.as_i64() == Some(34)).then(|| v.as_i64()).flatten()).unwrap_or(0);
+    assert!(ore_trit > 3_000, "Ore at rigged NS Tatara must yield > 75% (> 3,000 Tritanium for 1,000 Veldspar, got {ore_trit})");
 
     // V24 client Dict {itemID: invItem} input to GetQuotes preserves typeID (Miner I = 482) and non-empty recoverables
     let req_dict = PyRep::Dict(vec![(PyRep::Integer(100_000_870), PyRep::keyval([("itemID", PyRep::Integer(100_000_870))]))]);
@@ -1535,10 +1538,22 @@ async fn test_mining_reprocessing_curves_scrapmetal_and_prismaticite() {
     assert!(!m_quotes[0].1.dict_get("recoverables").and_then(PyRep::crowset_rows).unwrap_or_default().is_empty());
 
     // Module (482) and packaged ship (587) ignore Upwell structure, rig, security-band, Reprocessing, and RX-804 bonuses -> exact 55% at Scrapmetal V
+    let expected_dict_at = |tid: u32, rate: f64| -> Vec<(PyRep, PyRep)> {
+        ctx.sde.type_materials[&tid]
+            .iter()
+            .filter_map(|m| {
+                let q = ((m.quantity as f64) * rate).floor() as i64;
+                (q > 0).then_some((i64::from(m.material_type_id), q))
+            })
+            .collect::<std::collections::BTreeMap<i64, i64>>()
+            .into_iter()
+            .map(|(k, v)| (PyRep::Integer(k), PyRep::Integer(v)))
+            .collect()
+    };
     let mod_rep = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(100_000_870)], &kw, None).await.unwrap();
     let ship_rep = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(100_000_871)], &kw, None).await.unwrap();
-    assert!((get_dict_val(&mod_rep, "yieldRate").and_then(|v| v.as_f64()).unwrap() - 0.55).abs() < 1e-6);
-    assert!((get_dict_val(&ship_rep, "yieldRate").and_then(|v| v.as_f64()).unwrap() - 0.55).abs() < 1e-6);
+    assert_eq!(mod_rep, PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(100_000_870)]), PyRep::Dict(expected_dict_at(482, 0.55))]));
+    assert_eq!(ship_rep, PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(100_000_871)]), PyRep::Dict(expected_dict_at(587, 0.55))]));
 
     // Scrapmetal Processing III -> exact 0.50 * (1 + 0.02 * 3) = 0.53 even in rigged NS Tatara with RX-804
     ctx.db.with_mut_snapshot(|snap| {
@@ -1546,7 +1561,7 @@ async fn test_mining_reprocessing_curves_scrapmetal_and_prismaticite() {
         snap.items.insert(100_000_874, make_item(100_000_874, 482, char_id, tatara_id, InventoryFlag::Hangar, 1, false));
     });
     let mod_lvl3 = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(100_000_874)], &kw, None).await.unwrap();
-    assert!((get_dict_val(&mod_lvl3, "yieldRate").and_then(|v| v.as_f64()).unwrap() - 0.53).abs() < 1e-6);
+    assert_eq!(mod_lvl3, PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(100_000_874)]), PyRep::Dict(expected_dict_at(482, 0.53))]));
 
     // 3. Prismaticite per-batch random mineral & Unrefined Mineral reactions (`feat:mining.prismaticite-reprocessing-and-unrefined-reactions`):
     let mut single_batch_minerals = BTreeSet::new();
@@ -1558,10 +1573,12 @@ async fn test_mining_reprocessing_curves_scrapmetal_and_prismaticite() {
         });
         ctx.set_mechanic_rng_seed(Some(seed));
         let rep = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(iid)], &kw, None).await.unwrap();
-        let PyRep::List(outs) = get_dict_val(&rep, "outputs").unwrap() else { panic!("expected outputs list") };
+        let PyRep::Tuple(ref parts) = rep else { panic!("expected V24 2-tuple") };
+        assert_eq!(parts[0], PyRep::List(vec![PyRep::Integer(iid)]));
+        let PyRep::Dict(ref outs) = parts[1] else { panic!("expected outputByTypeID dict") };
         assert_eq!(outs.len(), 1, "Single 100-unit Prismaticite batch must yield exactly 1 mineral type");
-        let tid = get_dict_val(&outs[0], "typeID").and_then(|v| v.as_i64()).unwrap() as u32;
-        let qty = get_dict_val(&outs[0], "quantity").and_then(|v| v.as_i64()).unwrap();
+        let tid = outs[0].0.as_i64().unwrap() as u32;
+        let qty = outs[0].1.as_i64().unwrap();
         assert!(ctx.sde.types.get(&tid).is_some_and(|t| t.group_id == 18));
         single_batch_minerals.insert(tid);
         single_batch_qtys.insert((tid, qty));
@@ -1574,7 +1591,9 @@ async fn test_mining_reprocessing_curves_scrapmetal_and_prismaticite() {
     });
     ctx.set_mechanic_rng_seed(Some(42));
     let multi_rep = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(100_000_890)], &kw, None).await.unwrap();
-    let PyRep::List(multi_outs) = get_dict_val(&multi_rep, "outputs").unwrap() else { panic!() };
+    let PyRep::Tuple(ref multi_parts) = multi_rep else { panic!("expected V24 2-tuple") };
+    assert_eq!(multi_parts[0], PyRep::List(vec![PyRep::Integer(100_000_890)]));
+    let PyRep::Dict(ref multi_outs) = multi_parts[1] else { panic!("expected outputByTypeID dict") };
     assert!(multi_outs.len() >= 2, "12-batch Prismaticite stack must aggregate independent per-batch mineral rolls");
 
     // Unrefined Mineral reaction (90274 Unrefined Tritanium Formula, group 1888):
@@ -1626,12 +1645,16 @@ async fn test_mining_reprocessing_curves_scrapmetal_and_prismaticite() {
     let u_rep1 = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(u1)], &kw, None).await.unwrap();
     ctx.set_mechanic_rng_seed(Some(999_983));
     let u_rep2 = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(u2)], &kw, None).await.unwrap();
-    let PyRep::List(u_out1) = get_dict_val(&u_rep1, "outputs").unwrap() else { panic!() };
-    let PyRep::List(u_out2) = get_dict_val(&u_rep2, "outputs").unwrap() else { panic!() };
-    assert_eq!(get_dict_val(&u_out1[0], "typeID").and_then(|v| v.as_i64()), Some(34));
-    assert_eq!(get_dict_val(&u_out2[0], "typeID").and_then(|v| v.as_i64()), Some(34));
-    let q1 = get_dict_val(&u_out1[0], "quantity").and_then(|v| v.as_i64()).unwrap();
-    let q2 = get_dict_val(&u_out2[0], "quantity").and_then(|v| v.as_i64()).unwrap();
+    let PyRep::Tuple(ref u_parts1) = u_rep1 else { panic!("expected V24 2-tuple") };
+    let PyRep::Tuple(ref u_parts2) = u_rep2 else { panic!("expected V24 2-tuple") };
+    assert_eq!(u_parts1[0], PyRep::List(vec![PyRep::Integer(u1)]));
+    assert_eq!(u_parts2[0], PyRep::List(vec![PyRep::Integer(u2)]));
+    let PyRep::Dict(ref u_out1) = u_parts1[1] else { panic!() };
+    let PyRep::Dict(ref u_out2) = u_parts2[1] else { panic!() };
+    assert_eq!(u_out1[0].0.as_i64(), Some(34));
+    assert_eq!(u_out2[0].0.as_i64(), Some(34));
+    let q1 = u_out1[0].1.as_i64().unwrap();
+    let q2 = u_out2[0].1.as_i64().unwrap();
     assert_ne!(q1, q2, "Unrefined Tritanium reprocessing must produce variable Tritanium output across batches ({q1} vs {q2})");
 }
 

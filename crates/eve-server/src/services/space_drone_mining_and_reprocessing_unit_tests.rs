@@ -328,6 +328,9 @@ async fn reprocessing_npc_station_corp_hangar_locks_singleton_and_insufficient_f
     assert_eq!(q_entries.len(), 1);
     assert_eq!(q_entries[0].0, PyRep::Integer(corp_ore_id));
 
+    let (bal_before, journal_before) = ctx.db.with_snapshot(|snap| {
+        (snap.characters[&char_id].balance, snap.wallet_journal.len())
+    });
     let batch_rep = handle(
         &ctx,
         &mut sess,
@@ -339,17 +342,26 @@ async fn reprocessing_npc_station_corp_hangar_locks_singleton_and_insufficient_f
     .await
     .unwrap()
     .unwrap();
-    let PyRep::List(batch_list) = batch_rep else {
-        panic!("expected batch list");
+    let PyRep::Tuple(batch_parts) = batch_rep else {
+        panic!("expected V24 2-tuple from Reprocess, got {batch_rep:?}");
     };
-    assert_eq!(batch_list.len(), 1);
-    assert!(
-        batch_list[0]
-            .dict_get("reprocessingTaxISK")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0)
-            > 0.0
-    );
+    assert_eq!(batch_parts.len(), 2);
+    assert_eq!(batch_parts[0], PyRep::List(vec![PyRep::Integer(corp_ore_id)]));
+    let PyRep::Dict(ref out_map) = batch_parts[1] else {
+        panic!("expected outputByTypeID Dict, got {:?}", batch_parts[1]);
+    };
+    assert!(!out_map.is_empty(), "expected non-empty mineral outputs");
+    ctx.db.with_snapshot(|snap| {
+        let bal_after = snap.characters[&char_id].balance;
+        assert!(bal_after < bal_before, "expected ReprocessingTax wallet debit");
+        assert!(
+            snap.wallet_journal
+                .iter()
+                .skip(journal_before)
+                .any(|j| j.character_id == char_id && j.entry_type == "ReprocessingTax" && j.amount.0 > 0),
+            "expected ReprocessingTax wallet journal entry"
+        );
+    });
 
     // 5. Structure with fuel_blocks == 0 -> ReprocessingServiceOffline
     let unfueled_st = 1_092_000_999_000_i64;
