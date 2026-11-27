@@ -1560,15 +1560,17 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 it.flag = InventoryFlag::None;
                 it.singleton = true;
                 it.version += 1;
+                let moved_qty = i64::try_from(it.quantity).unwrap_or(i64::MAX).max(1);
                 snap.item_positions.insert(item_id, [launch_pos.x, launch_pos.y, launch_pos.z]);
                 if is_ship {
                     crate::sp6_lifecycle::enter_space_in_snap(snap, item_id, sys_id);
                 }
-                Ok(())
+                Ok(moved_qty)
             });
-            if let Err(e) = res {
-                return Some(Err(e));
-            }
+            let moved_qty = match res {
+                Ok(q) => q,
+                Err(e) => return Some(Err(e)),
+            };
             let t_sde = ctx.sde.types.get(&type_id);
             let launched_cs = if is_ship {
                 let mut cs = ctx.build_ship_combat_state(item_owner, item_id, type_id);
@@ -1615,6 +1617,24 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     type_id: type_id as i64,
                 },
             );
+            crate::services::pve_dungeon_runtime::on_dungeon_container_cargo_changed(
+                ctx,
+                char_id,
+                Some(sys_id),
+                parent_id,
+                i64::from(sys_id),
+                type_id,
+                moved_qty,
+            )
+            .await;
+            crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
+                ctx,
+                char_id,
+                Some(sys_id),
+                parent_id,
+                type_id,
+            )
+            .await;
             Some(Ok(PyRep::keyval([
                 ("launchedItemID", PyRep::Integer(item_id)),
                 ("typeID", PyRep::Integer(type_id as i64)),
@@ -1922,6 +1942,10 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     let Some(item) = snap.items.get(&item_id) else {
                         return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} not found"), client_error: None });
                     };
+                    if crate::services::pve_dungeon_runtime_hooks::is_owned_dungeon_object_any_sys_in_snap(snap, item_id) {
+                        let msg = format!("Cannot trash dungeon object {item_id}");
+                        return Err(BridgeRpcError::with_client_error("DeleteFailed", msg.clone(), eve_proto::ClientError::CustomInfo(msg)));
+                    }
                     if item.owner_id != char_id {
                         return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} is not owned by character {char_id}"), client_error: None });
                     }
@@ -2042,6 +2066,10 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         .is_some_and(|p| {
                             p.type_id == 23 && (30_000_000..=50_000_000).contains(&p.location_id)
                         })
+                        && !crate::services::pve_dungeon_runtime_hooks::is_owned_dungeon_object_any_sys_in_snap(
+                            snap,
+                            old_location_id,
+                        )
                         && !snap
                             .items
                             .values()
@@ -2067,6 +2095,18 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 handle.try_remove_ball(ball_id);
             }
             for old_item in &trashed {
+                if old_item.location_id > 0 {
+                    crate::services::pve_dungeon_runtime::on_dungeon_container_cargo_changed(
+                        ctx,
+                        char_id,
+                        session.solar_system_id,
+                        old_item.location_id,
+                        0,
+                        old_item.type_id,
+                        i64::try_from(old_item.quantity).unwrap_or(i64::MAX).max(1),
+                    )
+                    .await;
+                }
                 ctx.invalidate_ship_fitting(old_item.item_id);
             }
             // Client `TrashInvItems` expects an empty list on full success and error dialog keys only for failures.

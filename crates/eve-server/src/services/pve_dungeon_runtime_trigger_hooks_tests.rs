@@ -4046,3 +4046,142 @@ async fn pre_exist_p1_01_and_p2_note_01_lowsec_disruptive_lance_and_indestructib
     }
 }
 
+
+#[tokio::test]
+async fn own_diff_p1_08_and_09_trash_and_launch_from_container_preserve_dungeon_cans_and_net_cargo() {
+    let mut sde = build_hooks_test_sde();
+    Arc::get_mut(&mut sde).unwrap().types.insert(
+        340_001,
+        mk_inv_type(340_001, 340, 2, "Small Secure Container", 5.0, 50.0, None, &[]),
+    );
+    let sys_id = 30_000_142;
+    let char_id = 95_008_701;
+    let inst_id = 8_701_001;
+    let r_pos = [12_000.0, 0.0, 0.0];
+    let (ctx, _clock, mut sess, ship_id) =
+        make_space_pilot_ctx(sde, sys_id, char_id, "r7_trash_launch", 587, DVec3::new(r_pos[0] + 50.0, 0.0, 0.0)).await;
+    let mut room = make_room(
+        0,
+        9_701,
+        r_pos,
+        vec![
+            DungeonRuntimeObject {
+                type_id: DEFAULT_CONTAINER_TYPE_ID,
+                name: "Supply Can".into(),
+                position: [r_pos[0] + 100.0, 0.0, 0.0],
+                radius: 150.0,
+                is_container: true,
+                ..Default::default()
+            },
+            DungeonRuntimeObject {
+                type_id: 16_757,
+                name: "Relay Bunker".into(),
+                position: [r_pos[0] + 300.0, 0.0, 0.0],
+                radius: 150.0,
+                is_container: true,
+                destructible: true,
+                tag: Some("bunker".into()),
+                ..Default::default()
+            },
+        ],
+        vec![
+            make_trig(
+                1,
+                DungeonTriggerKind::CompoundAnd {
+                    clauses: vec![
+                        DungeonTriggerKind::OnCargoDelivered {
+                            container_ball_id: None,
+                            target_object_index: Some(0),
+                            item_type_id: Some(34),
+                            required_quantity: 10,
+                        },
+                        DungeonTriggerKind::OnStructureDestroyed {
+                            target_ball_id: None,
+                            target_object_index: None,
+                            target_tag: Some("bunker".into()),
+                            target_type_id: None,
+                        },
+                    ],
+                },
+                DungeonTriggerAction::UnlockGate,
+                false,
+            ),
+            make_trig(
+                2,
+                DungeonTriggerKind::OnCargoDelivered {
+                    container_ball_id: None,
+                    target_object_index: Some(1),
+                    item_type_id: Some(340_001),
+                    required_quantity: 2,
+                },
+                DungeonTriggerAction::CompleteDungeon,
+                false,
+            ),
+        ],
+    );
+    room.entered = true;
+    room.entered_unix = Some(1_785_100_000);
+    with_dungeon_runtime_store(&ctx, |s| {
+        s.instances.insert(
+            inst_id,
+            DungeonRuntimeInstance {
+                instance_id: inst_id,
+                dungeon_id: 1,
+                solar_system_id: sys_id,
+                owner_char_id: char_id,
+                base_position: r_pos,
+                rooms: vec![room],
+                created_unix: 1_785_100_000,
+                ..Default::default()
+            },
+        );
+    });
+    let mat = materialize_dungeon_room_entities(&ctx, sys_id, inst_id, 0).await.expect("mat");
+    let (cont_23, cont_bunker) = (mat.object_ids[0], mat.object_ids[1]);
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+
+    // OWN-DIFF-P1-08(a): Direct TrashItems on dungeon objects is rejected cleanly.
+    for obj_id in [cont_23, cont_bunker] {
+        let err = crate::services::inventory_fitting::fitting_ships_mastery::handle_ships_mastery_and_fitting_ext(
+            &ctx, &mut sess, None, "invbroker", "TrashItems", &[PyRep::List(vec![PyRep::Integer(obj_id)])], &HashMap::new(),
+        ).await.expect("handled").unwrap_err();
+        assert_eq!(err.code, "DeleteFailed");
+        assert!(err.message.contains("dungeon object"));
+        assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&obj_id)));
+    }
+
+    // OWN-DIFF-P1-08(b): Deliver 10 Tritanium -> TrashItems deletes stack, preserves empty type_id=23 cont_23, debits net cargo & unlatches CompoundAnd.
+    insert_ship_item(&ctx, char_id, ship_id, 8_701_101, 34, InventoryFlag::Cargo, 10, false);
+    inv_add_to(&ctx, &mut sess, char_id, cont_23, 8_701_101, ship_id, Some(10)).await;
+    let trit_id = ctx.db.with_snapshot(|s| s.items.values().find(|i| i.location_id == cont_23 && i.type_id == 34).unwrap().item_id);
+    crate::services::inventory_fitting::fitting_ships_mastery::handle_ships_mastery_and_fitting_ext(
+        &ctx, &mut sess, None, "invbroker", "TrashItems", &[PyRep::List(vec![PyRep::Integer(trit_id)])], &HashMap::new(),
+    ).await.expect("handled").expect("TrashItems cargo ok");
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&trit_id) && s.items.contains_key(&cont_23)));
+    assert!(sys_h.get_ball_snapshot(cont_23).await.unwrap().is_some(), "empty dungeon cont_23 must stay in space");
+    read_dungeon_runtime_store(&ctx, |s| {
+        let r = &s.instances[&inst_id].rooms[0];
+        assert!(r.cargo_delivered_net.get(&format!("{cont_23}:34")).copied().unwrap_or(0) == 0);
+        assert!(!r.armed_timers.keys().any(|k| k.starts_with("__latch:") || k.starts_with("__and:")));
+    });
+    // OWN-DIFF-P1-09: Add -> LaunchFromContainer -> Scoop -> Add loop stays capped at net 1 (never reaches 2).
+    let player_can = 8_701_102;
+    insert_ship_item(&ctx, char_id, ship_id, player_can, 340_001, InventoryFlag::Cargo, 1, true);
+    inv_add_to(&ctx, &mut sess, char_id, cont_bunker, player_can, ship_id, Some(1)).await;
+    read_dungeon_runtime_store(&ctx, |s| assert_eq!(s.instances[&inst_id].rooms[0].cargo_delivered_net.get(&format!("{cont_bunker}:340001")).copied(), Some(1)));
+    crate::services::inventory_fitting::fitting_ships_mastery::handle_ships_mastery_and_fitting_ext(
+        &ctx, &mut sess, None, "ship", "LaunchFromContainer", &[PyRep::Integer(player_can)], &HashMap::new(),
+    ).await.expect("handled").expect("LaunchFromContainer ok");
+    read_dungeon_runtime_store(&ctx, |s| assert_eq!(s.instances[&inst_id].rooms[0].cargo_delivered_net.get(&format!("{cont_bunker}:340001")).copied().unwrap_or(0), 0));
+    crate::services::inventory_fitting::fitting_ships_mastery::handle_ships_mastery_and_fitting_ext(
+        &ctx, &mut sess, None, "ship", "Scoop", &[PyRep::Integer(player_can)], &HashMap::new(),
+    ).await.expect("handled").expect("Scoop ok");
+    inv_add_to(&ctx, &mut sess, char_id, cont_bunker, player_can, ship_id, Some(1)).await;
+    read_dungeon_runtime_store(&ctx, |s| {
+        let inst = &s.instances[&inst_id];
+        assert_eq!(inst.rooms[0].cargo_delivered_net.get(&format!("{cont_bunker}:340001")).copied(), Some(1));
+        assert!(!inst.completed && !inst.rooms[0].triggers[1].fired);
+    });
+    let _ = crate::combat::death_pipeline::on_ball_destroyed_sync(&ctx, sys_id, cont_bunker, Some(char_id), DVec3::ZERO).unwrap();
+    read_dungeon_runtime_store(&ctx, |s| assert!(!s.instances[&inst_id].rooms[0].triggers[0].fired && s.instances[&inst_id].rooms[0].gate_locked));
+}
