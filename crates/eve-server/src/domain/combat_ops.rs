@@ -6,7 +6,9 @@
 
 #![forbid(unsafe_code)]
 
-use crate::combat::npc_ai::{spawn_npc_wreck_and_loot_in_snap, DestroyedNpcOutcome};
+use crate::combat::npc_ai::{
+    spawn_npc_wreck_and_loot_in_snap, DestroyedNpcOutcome, NpcDestroyedOptions,
+};
 use crate::domain::DomainError;
 use crate::router::notify_registry::BallparkScene;
 use crate::router::{NotificationTarget, ServerContext};
@@ -417,9 +419,10 @@ pub async fn restore_ship_vital_state(
     })
 }
 
-/// Destroys a player/DB ship (via [`crate::combat::death_pipeline::execute_death_pipeline`]) or a
-/// space ball / tracked NPC (via [`crate::combat::npc_ai::NpcSpawnManager::handle_npc_destroyed_detailed`]
-/// or [`spawn_npc_wreck_and_loot_in_snap`]), never waking system `0` or cold solar systems (`#1542`).
+/// Destroys a player/DB ship (via [`crate::combat::death_pipeline::execute_death_pipeline`],
+/// rejecting `sys_id == 0` with `NoSolarSystem`) or a space ball / tracked NPC (via
+/// [`crate::combat::npc_ai::NpcSpawnManager::handle_npc_destroyed_detailed_with_options`] or
+/// [`spawn_npc_wreck_and_loot_in_snap`]), never waking system `0` or cold solar systems for space balls (`#1542`).
 pub async fn destroy_entity_in_system(
     ctx: &ServerContext,
     req: DestroyEntityRequest,
@@ -494,7 +497,7 @@ pub async fn destroy_entity_in_system(
         req.sys_id,
         Some(req.killer_char_id),
         req.victim_ship_id,
-        0,
+        ball.type_id,
     )
     .await;
 
@@ -506,12 +509,16 @@ pub async fn destroy_entity_in_system(
         .and_then(|mut spawns| {
             let mgr = spawns.get_mut(&req.sys_id)?;
             mgr.entities.contains_key(&req.victim_ship_id).then(|| {
-                mgr.handle_npc_destroyed_detailed(
+                mgr.handle_npc_destroyed_detailed_with_options(
                     ctx,
                     req.sys_id,
                     req.victim_ship_id,
                     req.killer_char_id,
                     now_unix,
+                    NpcDestroyedOptions {
+                        skip_death_hook_duplicates: true,
+                        live_pos_override: Some(victim_pos),
+                    },
                 )
             })
         });
@@ -528,10 +535,14 @@ pub async fn destroy_entity_in_system(
         ),
         Some(Err(err)) => return Err(DomainError::internal("KillFailed", err)),
         None => {
-            let wt_id = ctx
-                .sde
-                .resolve_wreck_type_id(ball.type_id, None)
-                .unwrap_or(26557);
+            let in_abyssal = (32_000_000..=32_999_999).contains(&req.sys_id);
+            let wt_id = if in_abyssal {
+                0
+            } else {
+                ctx.sde
+                    .resolve_wreck_type_id(ball.type_id, None)
+                    .unwrap_or(26557)
+            };
             let killmail_value_isk = ctx
                 .sde
                 .types
@@ -546,15 +557,19 @@ pub async fn destroy_entity_in_system(
                 })
                 .unwrap_or(0.0);
             let (wid, kid) = ctx.db.with_mut_snapshot(|snap| {
-                let wid = spawn_npc_wreck_and_loot_in_snap(
-                    snap,
-                    req.sys_id,
-                    req.killer_char_id,
-                    victim_pos,
-                    now_unix,
-                    wt_id,
-                    &[],
-                );
+                let wid = if in_abyssal {
+                    0
+                } else {
+                    spawn_npc_wreck_and_loot_in_snap(
+                        snap,
+                        req.sys_id,
+                        req.killer_char_id,
+                        victim_pos,
+                        now_unix,
+                        wt_id,
+                        &[],
+                    )
+                };
                 let kid = snap.alloc_entity_id();
                 snap.record_killmail(
                     KillmailRecord {
@@ -790,5 +805,187 @@ mod tests {
             assert!(snap.killmails.contains_key(&out.killmail_id));
             assert!(snap.characters[&cid].security_status >= pre_sec);
         });
+    }
+
+    #[tokio::test]
+    async fn destroy_entity_tracked_npc_credits_corp_project_payout_and_achievement_once() {
+        use crate::services::social_corp_fleet::social_corp_projects::{
+            create_canonical_project, CanonicalProjectSpec,
+        };
+        use eve_db::IskCents;
+
+        let ctx = ServerContext::new();
+        let cid = 90_000_001_i64;
+        let sys_id = 30_000_142_u32;
+        let npc_id = 950_888_002_i64;
+        let npc_type_id = ctx
+            .sde
+            .types
+            .iter()
+            .find(|(_, t)| t.category_id == 11 && ctx.sde.resolve_wreck_type_id(t.type_id, None).is_some())
+            .map(|(&tid, _)| tid)
+            .unwrap_or(16_997);
+        let spawn_pos = DVec3::new(3_000.0, 0.0, 0.0);
+        let live_pos = DVec3::new(4_200.0, 1_100.0, -500.0);
+
+        let corp_id = ctx.db.with_mut_snapshot(|snap| {
+            let corp_id = snap.characters[&cid].corporation_id;
+            if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+                corp.ensure_wallet_divisions();
+                corp.set_division_balance(1, IskCents::from_isk(1_000_000));
+            }
+            corp_id
+        });
+        let (pid, _) = create_canonical_project(
+            &ctx.db,
+            CanonicalProjectSpec {
+                corp_id,
+                creator_id: cid,
+                name: "Single NPC Kill Payout".into(),
+                description: "Verify destroy_entity_in_system credits +1 once".into(),
+                target_quantity: 5,
+                initial_quantity: 0,
+                escrow: IskCents::from_isk(50_000),
+                isk_per_unit: IskCents::from_isk(10_000),
+                wallet_division: 1,
+                matcher_type: "DestroyNPCShips".into(),
+                is_freelance: false,
+                auto_payout_on_contribution: true,
+                max_per_character: None,
+                expires_unix: None,
+                filter_id: None,
+                batch_size: 1,
+                now_unix: ctx.now_unix(),
+                min_project_id: 9_100,
+            },
+        )
+        .expect("create DestroyNPCShips corp project");
+
+        let handle = ctx.systems.get_or_spawn(sys_id);
+        handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id: npc_id,
+                    type_id: npc_type_id,
+                    position: live_pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                ctx.build_type_combat_state(npc_type_id),
+            )
+            .await
+            .unwrap();
+        if let Ok(mut spawns) = ctx.npc_spawns.write() {
+            spawns
+                .entry(sys_id)
+                .or_insert_with(NpcSpawnManager::new)
+                .entities
+                .insert(
+                    npc_id,
+                    NpcCombatEntity {
+                        ball_id: npc_id,
+                        type_id: npc_type_id,
+                        faction_id: 500_010,
+                        state: NpcAiState::Idle,
+                        spawn_group_id: 0,
+                        spawn_pos,
+                        target_id: None,
+                        bounty_isk: 0.0,
+                        optimal_range: 5_000.0,
+                        orbit_range: 3_000.0,
+                        base_dps: 10.0,
+                        damage_vector: DamageVector::default(),
+                        last_attack_tick: 0,
+                        has_shield_rep: false,
+                        has_armor_rep: false,
+                    },
+                );
+        }
+
+        let conds_for = |ev: &str| -> Vec<(u32, u32)> {
+            ctx.quasar_gateway
+                .progression
+                .achievements
+                .definitions
+                .iter()
+                .flat_map(|d| {
+                    d.conditions
+                        .iter()
+                        .filter(move |c| c.event_name == ev)
+                        .map(move |c| (d.id, c.condition_id))
+                })
+                .collect()
+        };
+        let cond_val = |ach_id: u32, cond_id: u32| -> u64 {
+            ctx.quasar_gateway
+                .progression
+                .achievements
+                .character_achievements
+                .read()
+                .unwrap()
+                .get(&(cid as u32))
+                .and_then(|list| list.iter().find(|a| a.def.id == ach_id))
+                .and_then(|a| a.condition_progress.get(&cond_id).copied())
+                .unwrap_or(0)
+        };
+        let hostile_conds = conds_for("destroyHostileNPC");
+        assert!(!hostile_conds.is_empty(), "expected destroyHostileNPC achievement condition");
+        let group_conds = conds_for("entityGroupDestroyed");
+        let hostile_before: Vec<u64> = hostile_conds.iter().map(|&(a, c)| cond_val(a, c)).collect();
+        let group_before: Vec<u64> = group_conds.iter().map(|&(a, c)| cond_val(a, c)).collect();
+        let bal_before = ctx.db.with_snapshot(|s| s.characters[&cid].balance);
+
+        let out = destroy_entity_in_system(
+            &ctx,
+            DestroyEntityRequest {
+                target_id: npc_id,
+                victim_char_id: cid,
+                victim_ship_id: npc_id,
+                sys_id,
+                killer_char_id: cid,
+                in_db_items: false,
+            },
+        )
+        .await
+        .expect("tracked NPC destroy succeeds");
+
+        let wreck_ball = handle
+            .get_ball_snapshot(out.wreck_id)
+            .await
+            .unwrap()
+            .expect("wreck ball spawned");
+        assert_eq!(wreck_ball.1.position, live_pos, "wreck ball must use live NPC position");
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(
+                snap.item_positions.get(&out.wreck_id).copied(),
+                Some([live_pos.x, live_pos.y, live_pos.z]),
+                "persisted wreck position must use live NPC position"
+            );
+            assert_eq!(snap.corp_projects[&pid].current_quantity, 1);
+            assert_eq!(
+                snap.characters[&cid].balance.raw_cents() - bal_before.raw_cents(),
+                IskCents::from_isk(10_000).raw_cents(),
+                "auto-payout must credit 1x 10,000 ISK per kill, not 2x"
+            );
+        });
+        for (&(ach_id, cond_id), &prev) in hostile_conds.iter().zip(&hostile_before) {
+            assert_eq!(
+                cond_val(ach_id, cond_id),
+                prev + 1,
+                "destroyHostileNPC condition ({ach_id}, {cond_id}) must increment by 1"
+            );
+        }
+        for (&(ach_id, cond_id), &prev) in group_conds.iter().zip(&group_before) {
+            assert_eq!(
+                cond_val(ach_id, cond_id),
+                prev + 1,
+                "entityGroupDestroyed condition ({ach_id}, {cond_id}) must increment by 1"
+            );
+        }
     }
 }

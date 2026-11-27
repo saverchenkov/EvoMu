@@ -1343,14 +1343,15 @@ impl NpcSpawnManager {
         self.step_ai_sync(ctx, sys_id, current_tick, dt);
     }
 
-    /// Handles death of an NPC and returns full wreck/killmail/bounty outcome details (`#1193`).
-    pub(crate) fn handle_npc_destroyed_detailed(
+    /// Handles death of an NPC with explicit deduplication/position options (`#1193`).
+    pub(crate) fn handle_npc_destroyed_detailed_with_options(
         &mut self,
         ctx: &ServerContext,
         sys_id: u32,
         npc_ball_id: i64,
         killer_char_id: i64,
         now_unix: u64,
+        opts: NpcDestroyedOptions,
     ) -> Result<DestroyedNpcOutcome, String> {
         let Some((entity, cs_until)) =
             self.remove_npc_and_record_cooldown(ctx, sys_id, npc_ball_id, now_unix)
@@ -1364,7 +1365,26 @@ impl NpcSpawnManager {
                 rt.clone_soldier_cooldown_until.insert(sys_id, until);
             });
         }
-        finalize_destroyed_npc_side_effects(ctx, sys_id, &entity, killer_char_id, now_unix)
+        finalize_destroyed_npc_side_effects(ctx, sys_id, &entity, killer_char_id, now_unix, opts)
+    }
+
+    /// Handles death of an NPC and returns full wreck/killmail/bounty outcome details (`#1193`).
+    pub(crate) fn handle_npc_destroyed_detailed(
+        &mut self,
+        ctx: &ServerContext,
+        sys_id: u32,
+        npc_ball_id: i64,
+        killer_char_id: i64,
+        now_unix: u64,
+    ) -> Result<DestroyedNpcOutcome, String> {
+        self.handle_npc_destroyed_detailed_with_options(
+            ctx,
+            sys_id,
+            npc_ball_id,
+            killer_char_id,
+            now_unix,
+            NpcDestroyedOptions::default(),
+        )
     }
 
     /// Handles death of an NPC: credits dynamic bounty based on `ENTITY_KILL_BOUNTY`,
@@ -1380,6 +1400,13 @@ impl NpcSpawnManager {
         self.handle_npc_destroyed_detailed(ctx, sys_id, npc_ball_id, killer_char_id, now_unix)
             .map(|outcome| outcome.bounty_isk)
     }
+}
+
+/// Optional overrides for tracked NPC destruction side effects (`#1193`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct NpcDestroyedOptions {
+    pub skip_death_hook_duplicates: bool,
+    pub live_pos_override: Option<DVec3>,
 }
 
 /// Result of finalizing a tracked NPC's destruction side effects (`#1193`).
@@ -2058,6 +2085,7 @@ fn finalize_ai_step_cleanup(
             &entity,
             attacker_npc_id,
             now_unix,
+            NpcDestroyedOptions::default(),
         );
     }
     if !actions.remaining_destructions.is_empty() {
@@ -2119,10 +2147,12 @@ fn finalize_destroyed_npc_side_effects(
     entity: &NpcCombatEntity,
     killer_char_id: i64,
     now_unix: u64,
+    opts: NpcDestroyedOptions,
 ) -> Result<DestroyedNpcOutcome, String> {
     let supp_mult = crate::services::security_mgr::insurgency_suppression_bounty_and_sec_multiplier(ctx, sys_id);
     let bounty = entity.bounty_isk * supp_mult;
     let npc_ball_id = entity.ball_id;
+    let wreck_pos = opts.live_pos_override.unwrap_or(entity.spawn_pos);
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
             crate::services::pve_ess_reserve_banks::credit_ballpark_npc_bounty_with_ess_split(
@@ -2175,7 +2205,7 @@ fn finalize_destroyed_npc_side_effects(
                     snap,
                     sys_id,
                     killer_char_id,
-                    entity.spawn_pos,
+                    wreck_pos,
                     now_unix,
                     wreck_type_id,
                     &loot_entries,
@@ -2189,24 +2219,26 @@ fn finalize_destroyed_npc_side_effects(
                 bounty_isk: bounty,
                 wreck_id,
                 wreck_type_id,
-                wreck_pos: entity.spawn_pos,
+                wreck_pos,
                 killmail_id: kid,
             })
         });
     if res.is_ok() && killer_char_id > 0 {
-        crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
-            ctx,
-            killer_char_id,
-            &["DamageNPCShips", "DestroyNPCShips"],
-            1,
-            Some(sys_id as i64),
-        );
-        crate::services::agents_missions::on_mission_npc_destroyed_core(
-            &ctx.db,
-            sys_id,
-            npc_ball_id,
-            Some(killer_char_id),
-        );
+        if !opts.skip_death_hook_duplicates {
+            crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+                ctx,
+                killer_char_id,
+                &["DamageNPCShips", "DestroyNPCShips"],
+                1,
+                Some(sys_id as i64),
+            );
+            crate::services::agents_missions::on_mission_npc_destroyed_core(
+                &ctx.db,
+                sys_id,
+                npc_ball_id,
+                Some(killer_char_id),
+            );
+        }
         crate::services::agents_missions::agents_standings_arcs::apply_npc_kill_faction_standing_loss(
             ctx,
             sys_id,
@@ -2253,9 +2285,14 @@ fn finalize_destroyed_npc_side_effects(
                     1,
                 );
             }
+            let ach_events: &[&str] = if opts.skip_death_hook_duplicates {
+                &["entityGroupDestroyed"]
+            } else {
+                &["destroyHostileNPC", "entityGroupDestroyed"]
+            };
             ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
                 killer_char_id as u32,
-                &["destroyHostileNPC", "entityGroupDestroyed"],
+                ach_events,
                 1,
                 ctx.now_unix(),
                 &ctx.quasar_gateway,
