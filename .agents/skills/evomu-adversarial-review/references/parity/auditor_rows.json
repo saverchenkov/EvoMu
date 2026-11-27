@@ -3676,7 +3676,7 @@
       "why_missing": "feat:account.multi-char-training covers MCT activation, slot queries, and SaveSkillQueue rejection when no MCT slot is active, and feat:lifecycle.skillqueue-omega-lapse covers Omega expiry only; character_skills.rs:117-210 never checks mct_slots expiry, letting multiple queues on one account train concurrently forever after MCT expires."
     },
     {
-      "acceptance": "At the daily downtime job, uncompleted mission dungeons with killed NPCs are reset, so their spawn waves are present again on the next warp-in.",
+      "acceptance": "At the daily downtime job, active mission ballpark NPCs are despawned while surviving kill progress (npcs_remaining; killed NPCs stay dead) is preserved, re-materializing only surviving NPCs on the next pocket warp-in (PVE-019 / #1496).",
       "added_by_audit": "supervisor-20261022-B-lifecycle",
       "attest_ok": false,
       "category": "feat",
@@ -3686,7 +3686,7 @@
       "sources": [
         "wiki:Server_downtime"
       ],
-      "title": "Mission NPCs respawn after downtime"
+      "title": "Daily downtime despawns active mission NPCs while preserving kill progress"
     },
     {
       "acceptance": "Anchor completion is computed from the persisted anchor_start_unix (works with no subscribers). The bubble is re-created on actor spawn after a restart. The disruptor is removed 2 days after anchoring.",
