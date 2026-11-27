@@ -579,6 +579,8 @@ fn t() {
         seen_cmds = []
 
         def fake_sh(cmd, cwd, env=None, timeout=None):
+            if "--list" in cmd:
+                return 0, "demo::t1: test\ndemo::t2: test\n\n2 tests, 0 benchmarks\n"
             seen_cmds.append(list(cmd))
             return 0, "test demo ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured\n"
 
@@ -1924,6 +1926,8 @@ fn t() {
                 (0, "running 4 tests\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"),
             ]
             def fake_sh_a(cmd, cwd, env=None, timeout=None):
+                if "--list" in cmd:
+                    return 0, "foo::t1: test\n\n1 test, 0 benchmarks\n"
                 calls_a.append(cmd)
                 return seq_a[len(calls_a) - 1]
 
@@ -2979,6 +2983,181 @@ fn t() {
         srv_cmds = run_for(["crates/eve-server/src/foo/tests.rs", "crates/eve-server/src/bar.rs"])
         self.assertIn(["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "foo"], srv_cmds)
         self.assertIn(["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "bar"], srv_cmds)
+
+    def test_1196_shard_large_eve_server_tests_and_sigkill_classification(self):
+        # 1. SIGKILL (signal: 9) after `Running unittests` / `Running tests/` with 0 failures:
+        #    NEVER misclassified as compile_error / DOES_NOT_COMPILE; classified as infra OOM/SIGKILL!
+        sigkill_lib_out = (
+            "   Compiling eve-server v0.1.0\n"
+            "    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.21s\n"
+            "     Running unittests src/lib.rs (target/debug/deps/eve_server-abc123)\n"
+            "running 3738 tests\n"
+            "test alpha::t1 ... ok\n"
+            "error: test failed, to rerun pass `-p eve-server --lib`\n\n"
+            "Caused by:\n"
+            "  process didn't exit successfully: `/tmp/target/debug/deps/eve_server-abc123` (signal: 9, SIGKILL: kill)\n"
+        )
+        self.assertFalse(run_review._is_cargo_compile_error(sigkill_lib_out, 101, failed=0))
+        self.assertTrue(run_review._detect_cargo_target_infra_error(sigkill_lib_out, 101, failed=0))
+
+        sigkill_it_out = (
+            "     Running tests/it/main.rs (target/debug/deps/it-def456)\n"
+            "running 250 tests\n"
+            "error: test failed, to rerun pass `-p eve-server --test it`\n"
+            "Caused by:\n"
+            "  process didn't exit successfully: `/tmp/target/debug/deps/it-def456` (signal: 9, SIGKILL: kill)\n"
+        )
+        self.assertFalse(run_review._is_cargo_compile_error(sigkill_it_out, 101, failed=0))
+        self.assertTrue(run_review._detect_cargo_target_infra_error(sigkill_it_out, 101, failed=0))
+
+        # Never hide real test failures even if SIGKILL text appears
+        self.assertEqual(run_review._detect_cargo_target_infra_error(sigkill_lib_out, 101, failed=1), "")
+
+        # Real Santa banner or pre-exec SIGKILL is NOT treated as runtime OOM
+        santa_out = "This application has been blocked from executing\nRunning unittests src/lib.rs\nsignal: 9, SIGKILL\n"
+        self.assertEqual(run_review._detect_cargo_target_infra_error(santa_out, 101, failed=0), "")
+
+        # 2. EVOMU_REVIEW_TEST_THREADS clamped 1..=6 (default 4)
+        with tempfile.TemporaryDirectory() as tmp:
+            for raw_val, expected in ((None, "4"), ("2", "2"), ("6", "6"), ("0", "1"), ("99", "6"), ("bogus", "4")):
+                patch_env = {} if raw_val is None else {"EVOMU_REVIEW_TEST_THREADS": raw_val}
+                base_env = {k: v for k, v in os.environ.items() if k != "EVOMU_REVIEW_TEST_THREADS"}
+                base_env.update(patch_env)
+                with mock.patch.dict(os.environ, base_env, clear=True):
+                    c_env = run_review._review_cargo_env(tmp)
+                self.assertEqual(c_env["RUST_TEST_THREADS"], expected)
+
+        # 3. Sharding > 400 eve-server --lib tests into sorted --exact chunks of 400 + aggregating counts/failures
+        with tempfile.TemporaryDirectory() as tmp:
+            sdir = os.path.join(tmp, ".evomu-reviews")
+            os.makedirs(sdir, exist_ok=True)
+            # 905 unsorted tests -> 3 sorted chunks: 400, 400, 105
+            unsorted_names = ["mod_%04d::test_case" % i for i in reversed(range(905))]
+            expected_sorted = sorted(unsorted_names)
+            list_output = "\n".join(n + ": test" for n in unsorted_names) + "\n\n905 tests, 0 benchmarks\n[stderr]\nRunning unittests src/lib.rs\n"
+
+            seen_lib = []
+
+            def fake_sh_lib_shard(cmd, cwd, env=None, timeout=None):
+                seen_lib.append((list(cmd), dict(env or {})))
+                if "--list" in cmd:
+                    return 0, list_output
+                exact_idx = cmd.index("--exact")
+                chunk_names = cmd[exact_idx + 1:]
+                # Inject 1 real test failure in chunk 2 to prove chunk 3 still runs and counts aggregate
+                if len(seen_lib) == 3:
+                    return (
+                        101,
+                        "test %s ... FAILED\ntest result: FAILED. %d passed; 1 failed; 0 ignored; 0 measured\n"
+                        % (chunk_names[0], len(chunk_names) - 1),
+                    )
+                return 0, "test result: ok. %d passed; 0 failed; 0 ignored; 0 measured\n" % len(chunk_names)
+
+            lib_cmd = [["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "--no-fail-fast", "--", "services::", "router::"]]
+            with mock.patch.object(run_review, "derive_affected_test_commands", return_value=lib_cmd), \
+                 mock.patch.object(run_review, "_acquire_cargo_test_slot", return_value=None), \
+                 mock.patch.object(run_review, "_release_cargo_test_slot"), \
+                 mock.patch.object(run_review, "sh", side_effect=fake_sh_lib_shard):
+                out_txt, tm = run_review.run_tests(tmp, sdir, 60, attest_dir=os.path.join(tmp, "attest"), base="HEAD")
+
+            # 1 --list probe + 3 --exact chunks
+            self.assertEqual(len(seen_lib), 4)
+            self.assertEqual(
+                seen_lib[0][0][1:],
+                ["test", "-j", "4", "-p", "eve-server", "--lib", "--no-fail-fast", "--", "services::", "router::", "--list"],
+            )
+            reconstructed = []
+            chunk_sizes = []
+            for shard_cmd, shard_env in seen_lib[1:]:
+                self.assertEqual(shard_cmd[1:9], ["test", "-j", "4", "-p", "eve-server", "--lib", "--no-fail-fast", "--"])
+                self.assertEqual(shard_cmd[9], "--exact")
+                self.assertEqual(shard_env.get("EVOMU_PARITY_ATTEST_DIR"), os.path.join(tmp, "attest"))
+                chunk = shard_cmd[10:]
+                chunk_sizes.append(len(chunk))
+                reconstructed.extend(chunk)
+            self.assertEqual(chunk_sizes, [400, 400, 105])
+            self.assertEqual(reconstructed, expected_sorted)
+            self.assertEqual(tm["exit"], 101)
+            self.assertEqual(tm["passed"], 904)
+            self.assertEqual(tm["failed"], 1)
+            self.assertFalse(tm["compile_error"])
+
+            # 4. <= 400 eve-server --lib tests runs unsharded (1 --list + 1 original command)
+            seen_small = []
+            small_list = "\n".join("m::t_%03d: test" % i for i in range(400)) + "\n\n400 tests, 0 benchmarks\n"
+
+            def fake_sh_small(cmd, cwd, env=None, timeout=None):
+                seen_small.append(list(cmd))
+                if "--list" in cmd:
+                    return 0, small_list
+                return 0, "test result: ok. 400 passed; 0 failed; 0 ignored; 0 measured\n"
+
+            small_cmd = [["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "macho_listener"]]
+            with mock.patch.object(run_review, "derive_affected_test_commands", return_value=small_cmd), \
+                 mock.patch.object(run_review, "_acquire_cargo_test_slot", return_value=None), \
+                 mock.patch.object(run_review, "_release_cargo_test_slot"), \
+                 mock.patch.object(run_review, "sh", side_effect=fake_sh_small):
+                _, tm_small = run_review.run_tests(tmp, sdir, 60, base="HEAD")
+            self.assertEqual(len(seen_small), 2)
+            self.assertEqual(seen_small[0][1:], ["test", "-j", "4", "-p", "eve-server", "--lib", "--", "macho_listener", "--list"])
+            self.assertEqual(seen_small[1][1:], ["test", "-j", "4", "-p", "eve-server", "--lib", "macho_listener"])
+            self.assertEqual(tm_small["passed"], 400)
+            self.assertEqual(tm_small["exit"], 0)
+
+            # 5. > 120 eve-server --test it tests splits into chunks of 120
+            seen_it = []
+            it_names = ["it_mod::t_%03d" % i for i in range(250)]
+            it_list = "\n".join(n + ": test" for n in it_names) + "\n\n250 tests, 0 benchmarks\n"
+
+            def fake_sh_it(cmd, cwd, env=None, timeout=None):
+                seen_it.append(list(cmd))
+                if "--list" in cmd:
+                    return 0, it_list
+                exact_idx = cmd.index("--exact")
+                chunk_names = cmd[exact_idx + 1:]
+                return 0, "test result: ok. %d passed; 0 failed; 0 ignored; 0 measured\n" % len(chunk_names)
+
+            it_cmd = [["cargo", "test", "-j", "4", "-p", "eve-server", "--test", "it", "--", "space", "combat"]]
+            with mock.patch.object(run_review, "derive_affected_test_commands", return_value=it_cmd), \
+                 mock.patch.object(run_review, "_acquire_cargo_test_slot", return_value=None), \
+                 mock.patch.object(run_review, "_release_cargo_test_slot"), \
+                 mock.patch.object(run_review, "sh", side_effect=fake_sh_it):
+                _, tm_it = run_review.run_tests(tmp, sdir, 60, base="HEAD", compile_prechecked=True)
+            self.assertEqual(len(seen_it), 4)  # 1 --list + 3 chunks (120, 120, 10)
+            self.assertEqual([len(c[c.index("--exact") + 1:]) for c in seen_it[1:]], [120, 120, 10])
+            self.assertEqual(tm_it["passed"], 250)
+            self.assertEqual(tm_it["exit"], 0)
+
+            # 6. Persistent runtime OOM/SIGKILL in run_tests -> retries once, santa_blocks=0, compile_error=False, infra_error=True (ERROR verdict)
+            seen_oom = []
+
+            def fake_sh_oom(cmd, cwd, env=None, timeout=None):
+                if "--list" in cmd:
+                    return 0, "a::t1: test\n"
+                seen_oom.append(list(cmd))
+                return 101, sigkill_lib_out
+
+            with mock.patch.object(run_review, "derive_affected_test_commands", return_value=small_cmd), \
+                 mock.patch.object(run_review, "_acquire_cargo_test_slot", return_value=None), \
+                 mock.patch.object(run_review, "_release_cargo_test_slot"), \
+                 mock.patch.object(run_review, "sh", side_effect=fake_sh_oom):
+                oom_txt, tm_oom = run_review.run_tests(tmp, sdir, 60, base="HEAD")
+            self.assertEqual(len(seen_oom), 2)
+            self.assertTrue(tm_oom["infra_retried"])
+            self.assertTrue(tm_oom["infra_error"])
+            self.assertFalse(tm_oom["compile_error"])
+            self.assertEqual(tm_oom["santa_blocks"], 0)
+            so_oom = {"verdict": "PASS_WITH_ISSUES", "summary": "ok", "blocking_findings": [], "report_markdown": "body"}
+            v_oom, _, _ = run_review._evaluate_post_review_test_gate(
+                tmp, "HEAD", "HEAD", sdir, oom_txt, tm_oom, "PASS_WITH_ISSUES", so_oom, state_path=""
+            )
+            self.assertEqual(v_oom, "ERROR")
+            self.assertEqual(so_oom["blocking_findings"], [])
+
+        # 7. Process-group termination on timeout in `sh()`
+        rc_to, out_to = run_review.sh([sys.executable, "-c", "import time; time.sleep(5)"], REPO_ROOT, timeout=0.2)
+        self.assertEqual(rc_to, 124)
+        self.assertIn("TIMEOUT", out_to)
 
 
 if __name__ == "__main__":
