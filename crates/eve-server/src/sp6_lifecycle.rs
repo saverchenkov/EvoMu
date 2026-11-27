@@ -19,7 +19,7 @@
 mod cluster_tick;
 mod cluster_tick_downtime;
 mod combat_hp_persistence;
-mod disconnect_hold;
+pub(crate) mod disconnect_hold;
 mod drone_reconnect_finish;
 pub mod drone_return;
 

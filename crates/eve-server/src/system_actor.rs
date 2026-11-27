@@ -296,6 +296,103 @@ fn flush_post_unlock_actions_on_actor(
     })
 }
 
+fn build_next_system_view(
+    ballpark: &Ballpark,
+    actor_st: &SystemActorState,
+    view_tx: &tokio::sync::watch::Sender<Arc<SystemView>>,
+    tidi_factor_bits: &std::sync::atomic::AtomicU64,
+) -> Arc<SystemView> {
+    let cur_tidi = celestials::clamp_tidi_factor_bits(tidi_factor_bits);
+    let prev_view = { view_tx.borrow().clone() };
+    Arc::new(SystemView::from_ballpark(
+        ballpark,
+        Some(actor_st),
+        cur_tidi,
+        Some(prev_view.as_ref()),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_reader_facing_end_of_command(
+    solar_system_id: SolarSystemId,
+    ballpark: &Ballpark,
+    actor_st: &mut SystemActorState,
+    cmd_post_unlock_ops: &mut post_unlock::PostUnlockOps,
+    raw_hook_cmd: Option<ModuleDeactivationHook>,
+    post_hook_cmd: Option<PairedModuleDeactivationPostUnlockHook>,
+    cooldown_persist_gate: &Arc<CooldownPersistGate>,
+    cmd_tx_weak: &tokio::sync::mpsc::WeakSender<SystemCommand>,
+    tidi_factor_bits: &std::sync::atomic::AtomicU64,
+    view_tx: &tokio::sync::watch::Sender<Arc<SystemView>>,
+    always_build_view: bool,
+) -> (bool, Option<Arc<SystemView>>) {
+    let post_tidi_cmd = celestials::clamp_tidi_factor_bits(tidi_factor_bits);
+    let had_deact_hook = cmd_post_unlock_ops.has_deactivation_hook();
+    let mut_flag = ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
+        solar_system_id,
+        actor_st,
+        cmd_post_unlock_ops,
+        raw_hook_cmd,
+        post_hook_cmd,
+        cooldown_persist_gate,
+        Some(cmd_tx_weak),
+        post_tidi_cmd,
+    );
+    let view_opt = (always_build_view || mut_flag || had_deact_hook)
+        .then(|| build_next_system_view(ballpark, actor_st, view_tx, tidi_factor_bits));
+    (mut_flag, view_opt)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recover_reader_facing_state_after_panic(
+    solar_system_id: SolarSystemId,
+    ballpark_actor: &celestials::BallparkHandle,
+    actor_state_actor: &RankedRwLock<SystemActorState, RANK_ACTOR_STATE>,
+    ball_positions_actor: &Arc<celestials::BallPositionSyncCache>,
+    scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    active_module_ships_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    raw_hook_cmd: Option<ModuleDeactivationHook>,
+    post_hook_cmd: Option<PairedModuleDeactivationPostUnlockHook>,
+    cooldown_persist_gate: &Arc<CooldownPersistGate>,
+    cmd_tx_weak: &tokio::sync::mpsc::WeakSender<SystemCommand>,
+    tidi_factor_bits: &std::sync::atomic::AtomicU64,
+    view_tx: &tokio::sync::watch::Sender<Arc<SystemView>>,
+    active_subscribers: usize,
+) {
+    // Clear poison before reacquiring so future readers/writers see normal lock semantics (`#1173`).
+    ballpark_actor.clear_poison();
+    actor_state_actor.clear_poison();
+    let next_view = {
+        let ballpark = ballpark_actor.read().unwrap_or_else(|e| e.into_inner());
+        let mut actor_st = actor_state_actor.write().unwrap_or_else(|e| e.into_inner());
+        celestials::sync_ball_positions(&ballpark, ball_positions_actor, scrambled_balls_actor);
+        protection::sync_active_module_ships_cache(
+            &actor_st.active_module_cycles,
+            &actor_st.external_active_modules,
+            active_module_ships_actor,
+        );
+        protection::sync_all_protection_registry_in_actor(&ballpark, &mut actor_st);
+        celestials::update_system_hibernation_flag(&actor_st, &ballpark, active_subscribers);
+        let mut dropped_ops = post_unlock::PostUnlockOps::default();
+        finalize_reader_facing_end_of_command(
+            solar_system_id,
+            &ballpark,
+            &mut actor_st,
+            &mut dropped_ops,
+            raw_hook_cmd,
+            post_hook_cmd,
+            cooldown_persist_gate,
+            cmd_tx_weak,
+            tidi_factor_bits,
+            view_tx,
+            true,
+        )
+        .1
+        .expect("always_build_view=true must produce a SystemView")
+    };
+    let _ = view_tx.send(next_view);
+}
+
 #[derive(Clone, Debug)]
 enum SpecialSiteBallSpawnState {
     Spawning(Arc<tokio::sync::Notify>),
@@ -1334,6 +1431,11 @@ impl SystemRegistry {
         #[cfg(test)]
         let panic_after_destruction_actor = panic_after_destruction_for_test.clone();
         #[cfg(test)]
+        let panic_after_command_guards_for_test =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
+        #[cfg(test)]
+        let panic_after_command_guards_actor = panic_after_command_guards_for_test.clone();
+        #[cfg(test)]
         let before_step_reply_hook_for_test: Arc<
             RankedMutex<Option<Box<dyn FnOnce() + Send>>, RANK_LEAF>,
         > = Arc::new(RankedMutex::new(None));
@@ -1449,6 +1551,8 @@ impl SystemRegistry {
                 let deactivation_sink_hook =
                     ewar_cooldowns::active_sink_hook(raw_hook_cmd.as_ref(), post_hook_cmd.as_ref());
                 let cur_tidi_cmd = celestials::clamp_tidi_factor_bits(&tidi_factor_bits_actor);
+                let mut deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
+                let mut deferred_db_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let cmd_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 #[cfg(test)]
                 let countdown_hit = {
@@ -1468,8 +1572,6 @@ impl SystemRegistry {
                 if should_panic {
                     panic!("injected SystemActor command panic for #841 supervision test");
                 }
-                let mut deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
-                let mut deferred_db_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let mut cmd_post_unlock_ops = post_unlock::PostUnlockOps::default();
                 let mut cmd_slim_changed = false;
                 let (deact_mutated_actor, handled_view_and_deact_actor, actor_delivery_out, unsent_for_db_waiter): (
@@ -2174,6 +2276,12 @@ impl SystemRegistry {
                                 );
                             }
                 }
+                #[cfg(test)]
+                if panic_after_command_guards_actor
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    panic!("injected SystemActor command panic while write guards held for #1173 test");
+                }
                 if let Some((dt, step_reply)) = pending_step {
                     Some(cycles_tackle::execute_pending_step_in_actor(
                         &mut exec_ctx,
@@ -2235,19 +2343,24 @@ impl SystemRegistry {
                     })
                 }
                 })();
-                let post_tidi_cmd = celestials::clamp_tidi_factor_bits(&tidi_factor_bits_actor);
                 let deact_mutated = if handled_view_and_deact_actor {
                     false
                 } else {
-                    let mut_flag = ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
-                        solar_system_id, &mut actor_st, &mut cmd_post_unlock_ops,
-                        raw_hook_cmd, post_hook_cmd, &cooldown_persist_gate_actor,
-                        Some(&cmd_tx_weak_actor), post_tidi_cmd,
+                    let (mut_flag, next_view_opt) = finalize_reader_facing_end_of_command(
+                        solar_system_id,
+                        &ballpark,
+                        &mut actor_st,
+                        &mut cmd_post_unlock_ops,
+                        raw_hook_cmd.clone(),
+                        post_hook_cmd.clone(),
+                        &cooldown_persist_gate_actor,
+                        &cmd_tx_weak_actor,
+                        &tidi_factor_bits_actor,
+                        &view_tx_actor,
+                        false,
                     );
-                    if mut_flag || cmd_post_unlock_ops.has_deactivation_hook() {
-                        let prev_view = { view_tx_actor.borrow().clone() };
-                        let next_view = SystemView::from_ballpark(&ballpark, Some(&actor_st), post_tidi_cmd, Some(prev_view.as_ref()));
-                        let _ = view_tx_actor.send(Arc::new(next_view));
+                    if let Some(next_view) = next_view_opt {
+                        let _ = view_tx_actor.send(next_view);
                     }
                     mut_flag
                 };
@@ -2257,11 +2370,10 @@ impl SystemRegistry {
                 );
                 (deact_mutated, handled_view_and_deact_actor, out, unsent_for_db_waiter)
                 };
-                (cmd_slim_changed, deact_mutated_actor, handled_view_and_deact_actor, deferred_replies, deferred_db_replies, unsent_for_db_waiter, actor_delivery_out)
+                (cmd_slim_changed, deact_mutated_actor, handled_view_and_deact_actor, unsent_for_db_waiter, actor_delivery_out)
                 }));
-                let _ = flush_post_unlock_actions_on_actor(&post_unlock_actions_actor, &actor_flush_thread_actor, solar_system_id, &command_panics_actor);
                 match cmd_outcome {
-                    Ok((cmd_slim_changed, deact_mutated_actor, handled_view_and_deact_actor, deferred_replies, deferred_db_replies, unsent_for_db_waiter, actor_delivery_out)) => {
+                    Ok((cmd_slim_changed, deact_mutated_actor, handled_view_and_deact_actor, unsent_for_db_waiter, actor_delivery_out)) => {
                         if handled_view_and_deact_actor {
                             batch_view_dirty = false;
                         } else if cmd_may_mutate_view || cmd_slim_changed || deact_mutated_actor {
@@ -2273,13 +2385,23 @@ impl SystemRegistry {
                         if let Some(delivery) = actor_delivery_out { batch_delivery = Some(delivery); }
                     }
                     Err(panic_payload) => {
-                        let _ = flush_post_unlock_actions_on_actor(
-                            &post_unlock_actions_actor,
-                            &actor_flush_thread_actor,
+                        recover_reader_facing_state_after_panic(
                             solar_system_id,
-                            &command_panics_actor,
+                            &ballpark_actor,
+                            &actor_state_actor,
+                            &ball_positions_actor,
+                            &scrambled_balls_actor,
+                            &active_module_ships_actor,
+                            raw_hook_cmd,
+                            post_hook_cmd,
+                            &cooldown_persist_gate_actor,
+                            &cmd_tx_weak_actor,
+                            &tidi_factor_bits_actor,
+                            &view_tx_actor,
+                            event_tx_actor.receiver_count(),
                         );
-                        let panic_count = command_panics_actor.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        batch_view_dirty = false;
+                        let panic_count = command_panics_actor.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                         let msg = panic_payload
                             .downcast_ref::<&str>()
                             .copied()
@@ -2291,8 +2413,13 @@ impl SystemRegistry {
                             panic = %msg,
                             "SystemActor caught panic while handling command; continuing actor loop"
                         );
+                        // Drop deferred reply senders only after recovery & telemetry finish so
+                        // callers awaiting `Err` never observe stale views or unrecovered poison.
+                        drop(deferred_replies);
+                        drop(deferred_db_replies);
                     }
                 }
+                let _ = flush_post_unlock_actions_on_actor(&post_unlock_actions_actor, &actor_flush_thread_actor, solar_system_id, &command_panics_actor);
                 }
                 flush_post_unlock_actions_on_actor(
                     &post_unlock_actions_actor,
@@ -2304,16 +2431,14 @@ impl SystemRegistry {
                     let next_view = {
                         let ballpark = ballpark_actor.read().unwrap_or_else(|e| e.into_inner());
                         let actor_st = actor_state_actor.read().unwrap_or_else(|e| e.into_inner());
-                        let cur_tidi = celestials::clamp_tidi_factor_bits(&tidi_factor_bits_actor);
-                        let prev_view = { view_tx_actor.borrow().clone() };
-                        SystemView::from_ballpark(
+                        build_next_system_view(
                             &ballpark,
-                            Some(&actor_st),
-                            cur_tidi,
-                            Some(prev_view.as_ref()),
+                            &actor_st,
+                            &view_tx_actor,
+                            &tidi_factor_bits_actor,
                         )
                     };
-                    let _ = view_tx_actor.send(Arc::new(next_view));
+                    let _ = view_tx_actor.send(next_view);
                 }
                 weapon_effects::flush_actor_weapon_effects(
                     solar_system_id, &ballpark_actor, &actor_state_actor, &view_tx_actor,
@@ -2493,6 +2618,7 @@ impl SystemRegistry {
             #[cfg(test)] panic_next_command_for_test,
             #[cfg(test)] panic_on_command_countdown_for_test,
             #[cfg(test)] panic_after_destruction_for_test,
+            #[cfg(test)] panic_after_command_guards_for_test,
             #[cfg(test)] before_step_reply_hook_for_test,
             npc_death_hook: Arc::clone(&self.npc_death_hook),
             module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),

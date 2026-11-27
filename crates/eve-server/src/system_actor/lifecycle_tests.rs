@@ -63,6 +63,7 @@ fn dummy_system_handle(solar_system_id: SolarSystemId) -> SystemHandle {
         panic_next_command_for_test: Arc::new(AtomicBool::new(false)),
         panic_on_command_countdown_for_test: Arc::new(AtomicUsize::new(0)),
         panic_after_destruction_for_test: Arc::new(AtomicBool::new(false)),
+        panic_after_command_guards_for_test: Arc::new(AtomicBool::new(false)),
         before_step_reply_hook_for_test: Arc::new(RankedMutex::new(None)),
         npc_death_hook: Arc::new(RankedRwLock::new(None)),
         module_deactivation_hook: Arc::new(RankedRwLock::new(None)),

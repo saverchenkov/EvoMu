@@ -338,7 +338,7 @@ pub(super) fn finalize_expired_disconnected_ship(
 
 /// Evaluates logoff hold timers and emergency-warp vs mid-tunnel-warp preservation for an ungraceful disconnect (`#851` / `B13`).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn build_disconnected_ship_entry_sync(
+pub(crate) fn build_disconnected_ship_entry_sync(
     ctx: &ServerContext,
     sys_handle: Option<&SystemHandle>,
     char_id: i64,

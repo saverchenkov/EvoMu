@@ -239,7 +239,7 @@ fn check_item_repair_ownership_and_role(
     })
 }
 
-fn resolve_structure_repair_location(
+pub(crate) fn resolve_structure_repair_location(
     ctx: &ServerContext,
     session: &SessionState,
     char_id: i64,

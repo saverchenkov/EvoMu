@@ -168,6 +168,18 @@ pub(crate) fn clamp_tidi_factor_bits(bits: &std::sync::atomic::AtomicU64) -> f64
     }
 }
 
+/// Attempts non-blocking shared read access, recovering the inner guard if the lock is
+/// poisoned and returning `None` only on `WouldBlock` (`#1173`).
+pub(in crate::system_actor) fn try_read_recover_poison<T, const RANK: u16>(
+    lock: &RankedRwLock<T, RANK>,
+) -> Option<eve_db::lock_rank::RankedRwLockReadGuard<'_, T, RANK>> {
+    match lock.try_read() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poison)) => Some(poison.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
 impl Drop for BallparkWriteGuard<'_> {
     fn drop(&mut self) {
         let Some(guard) = self.guard.take() else {
@@ -190,7 +202,7 @@ impl Drop for BallparkWriteGuard<'_> {
             });
         let actor_st_guard = actor_st_arc
             .as_ref()
-            .and_then(|st_lock| st_lock.try_read().ok());
+            .and_then(|st_lock| try_read_recover_poison(st_lock));
         let next = super::SystemView::from_ballpark(
             &guard,
             actor_st_guard.as_deref(),
@@ -363,20 +375,13 @@ impl SystemHandle {
             .iter()
             .any(|&r| r >= eve_db::lock_rank::RANK_ACTOR_STATE)
         {
-            match self.actor_state.try_read() {
-                Ok(st) => super::SystemView::from_ballpark(
-                    ballpark,
-                    Some(&st),
-                    tidi,
-                    Some(prev.as_ref()),
-                ),
-                Err(_) => super::SystemView::from_ballpark(
-                    ballpark,
-                    None,
-                    tidi,
-                    Some(prev.as_ref()),
-                ),
-            }
+            let actor_st_guard = try_read_recover_poison(&self.actor_state);
+            super::SystemView::from_ballpark(
+                ballpark,
+                actor_st_guard.as_deref(),
+                tidi,
+                Some(prev.as_ref()),
+            )
         } else {
             super::SystemView::from_ballpark(ballpark, None, tidi, Some(prev.as_ref()))
         };
@@ -1066,7 +1071,7 @@ impl SystemHandle {
                 .iter()
                 .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
         {
-            if let Ok(bp) = self.ballpark.try_read() {
+            if let Some(bp) = try_read_recover_poison(&self.ballpark) {
                 self.publish_view_from(&bp, None);
             }
         }
@@ -2310,6 +2315,10 @@ pub struct SystemHandle {
     pub(crate) panic_on_command_countdown_for_test: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     pub(crate) panic_after_destruction_for_test: Arc<std::sync::atomic::AtomicBool>,
+    /// Test-only switch that panics inside the actor command loop after the command handler runs,
+    /// while both `ballpark` and `actor_state` write guards are still held (`#1173`).
+    #[cfg(test)]
+    pub(crate) panic_after_command_guards_for_test: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     pub(crate) before_step_reply_hook_for_test:
         Arc<RankedMutex<Option<Box<dyn FnOnce() + Send>>, RANK_LEAF>>,

@@ -1553,6 +1553,11 @@ impl<T: ?Sized, const RANK: u16> Ranked<RwLock<T>, RANK> {
         self.0.is_poisoned()
     }
 
+    /// Clears the poison flag on the underlying `RwLock`.
+    pub fn clear_poison(&self) {
+        self.0.clear_poison();
+    }
+
     /// Returns a mutable reference to the underlying data with exclusive borrow access.
     pub fn get_mut(&mut self) -> LockResult<&mut T> {
         self.0.get_mut()
@@ -1598,6 +1603,11 @@ impl<T: ?Sized, const RANK: u16> Ranked<Mutex<T>, RANK> {
     /// Returns whether the underlying `Mutex` is currently poisoned.
     pub fn is_poisoned(&self) -> bool {
         self.0.is_poisoned()
+    }
+
+    /// Clears the poison flag on the underlying `Mutex`.
+    pub fn clear_poison(&self) {
+        self.0.clear_poison();
     }
 
     /// Returns a mutable reference to the underlying data with exclusive borrow access.
