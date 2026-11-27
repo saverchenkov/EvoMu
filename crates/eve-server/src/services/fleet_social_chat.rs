@@ -147,18 +147,12 @@ fn handle_chat_rpc(
                 }
             }
             let resolved_chan_key = ctx.db.with_snapshot(|snap| resolve_channel_key(snap, chan_id));
-            if crate::services::pve_special_sites_abyssal::is_abyssal_local_channel_disabled(
+            if let Err(e) = crate::services::pve_special_sites_abyssal::check_abyssal_local_channel_access(
                 chan_id,
-                session.solar_system_id,
-            ) || crate::services::pve_special_sites_abyssal::is_abyssal_local_channel_disabled(
                 &resolved_chan_key,
                 session.solar_system_id,
             ) {
-                return Some(Err(BridgeRpcError {
-                    code: "LocalChannelDisabledInAbyssalSpace".into(),
-                    message: "Local chat channel is disabled inside Abyssal Deadspace".into(),
-                    client_error: None,
-                }));
+                return Some(Err(e));
             }
             let is_delayed = is_delayed_local_channel(&resolved_chan_key);
             let sys_id_opt = parse_channel_system_id(&resolved_chan_key);
@@ -712,10 +706,12 @@ fn handle_chat_rpc(
             };
             let chan_id = chan_id_owned.as_str();
             let resolved_chan_key = ctx.db.with_snapshot(|snap| resolve_channel_key(snap, chan_id));
-            if crate::services::pve_special_sites_abyssal::is_abyssal_local_channel_disabled(chan_id, session.solar_system_id)
-                || crate::services::pve_special_sites_abyssal::is_abyssal_local_channel_disabled(&resolved_chan_key, session.solar_system_id)
-            {
-                return Some(Err(BridgeRpcError { code: "LocalChannelDisabledInAbyssalSpace".into(), message: "Local chat channel is disabled inside Abyssal Deadspace".into(), client_error: None }));
+            if let Err(e) = crate::services::pve_special_sites_abyssal::check_abyssal_local_channel_access(
+                chan_id,
+                &resolved_chan_key,
+                session.solar_system_id,
+            ) {
+                return Some(Err(e));
             }
             let password_arg = args.get(1).and_then(|a| a.as_str());
             let motd_arg = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
@@ -873,10 +869,12 @@ fn handle_chat_rpc(
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "SendMessage requires channelID string".into(), client_error: None }));
             };
             let chan_key = ctx.db.with_snapshot(|snap| resolve_channel_key(snap, chan_id));
-            if crate::services::pve_special_sites_abyssal::is_abyssal_local_channel_disabled(chan_id, session.solar_system_id)
-                || crate::services::pve_special_sites_abyssal::is_abyssal_local_channel_disabled(&chan_key, session.solar_system_id)
-            {
-                return Some(Err(BridgeRpcError { code: "LocalChannelDisabledInAbyssalSpace".into(), message: "Local chat channel is disabled inside Abyssal Deadspace".into(), client_error: None }));
+            if let Err(e) = crate::services::pve_special_sites_abyssal::check_abyssal_local_channel_access(
+                chan_id,
+                &chan_key,
+                session.solar_system_id,
+            ) {
+                return Some(Err(e));
             }
             let text = args.get(1).and_then(|a| a.as_str()).unwrap_or("o7");
             if text.is_empty() || text.chars().count() > 2_000 {

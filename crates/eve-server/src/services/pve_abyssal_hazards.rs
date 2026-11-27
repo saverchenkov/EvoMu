@@ -232,6 +232,24 @@ pub fn is_abyssal_local_channel_disabled(chan_id: &str, session_sys: Option<u32>
             || lower.starts_with("local_"))
 }
 
+/// Returns `Err(LocalChannelDisabledInAbyssalSpace)` when either the raw wire channel ID
+/// or its resolved internal key targets a disabled Abyssal Deadspace local chat channel.
+pub(crate) fn check_abyssal_local_channel_access(
+    chan_id: &str,
+    resolved_chan_key: &str,
+    session_sys: Option<u32>,
+) -> Result<(), BridgeRpcError> {
+    if is_abyssal_local_channel_disabled(chan_id, session_sys)
+        || is_abyssal_local_channel_disabled(resolved_chan_key, session_sys)
+    {
+        return Err(rpc_err(
+            "LocalChannelDisabledInAbyssalSpace",
+            "Local chat channel is disabled inside Abyssal Deadspace",
+        ));
+    }
+    Ok(())
+}
+
 /// Blocks restricted RPCs (star map, D-scan, Local chat) while a pilot is inside Abyssal Deadspace.
 pub fn check_abyssal_in_pocket_rpc_restrictions(
     session: &eve_machonet::SessionState,
@@ -258,11 +276,10 @@ pub fn check_abyssal_in_pocket_rpc_restrictions(
             Some(eve_proto::PyRep::List(l) | eve_proto::PyRep::Tuple(l)) => l.first().and_then(|x| x.as_str()),
             _ => None,
         };
-        if chan_opt.is_some_and(|c| is_abyssal_local_channel_disabled(c, session.solar_system_id)) {
-            return Some(Err(rpc_err(
-                "LocalChannelDisabledInAbyssalSpace",
-                "Local chat channel is disabled inside Abyssal Deadspace",
-            )));
+        if let Some(c) = chan_opt {
+            if let Err(e) = check_abyssal_local_channel_access(c, c, session.solar_system_id) {
+                return Some(Err(e));
+            }
         }
     }
     None
