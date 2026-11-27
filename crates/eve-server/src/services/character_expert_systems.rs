@@ -547,11 +547,12 @@ pub fn handle(
                         | "objective_completed"
                 )
             {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "GM role required for AIR NPE control graph message".into(),
-                    client_error: None,
-                }));
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "air_npe_control_graph",
+                    "GM role required for AIR NPE control graph message",
+                )));
             }
             let msg_data = args.get(3).cloned().unwrap_or(PyRep::None);
 

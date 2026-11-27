@@ -177,11 +177,13 @@ pub async fn handle_anchor_mercenary_den_rpc(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Cannot anchor a Mercenary Den while docked".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(
+            session.ship_id.unwrap_or(0),
+            Some(char_id),
+            session.solar_system_id,
+            "anchor_mercenary_den",
+            "Cannot anchor a Mercenary Den while docked",
+        ));
     }
     let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
         code: "NoSolarSystem".into(),
@@ -199,10 +201,14 @@ pub async fn handle_anchor_mercenary_den_rpc(
         .await
         .ok()
         .flatten()
-        .ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: format!("Ship {ship_id} is not present in space"),
-            client_error: None,
+        .ok_or_else(|| {
+            BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "anchor_mercenary_den",
+                format!("Ship {ship_id} is not present in space"),
+            )
         })?;
 
     let first_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
@@ -604,10 +610,14 @@ pub async fn handle_mercden_component_call(
         .await
         .ok()
         .flatten()
-        .ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: format!("Ship {ship_id} is not in space in system {sys_id}"),
-            client_error: None,
+        .ok_or_else(|| {
+            BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "mercden_component_call",
+                format!("Ship {ship_id} is not in space in system {sys_id}"),
+            )
         })?;
     let den_pos = ctx
         .db
@@ -1129,10 +1139,14 @@ pub async fn apply_mercenary_den_shield_repair(
         .await
         .ok()
         .flatten()
-        .ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Ship must be in space to repair Mercenary Den shields".into(),
-            client_error: None,
+        .ok_or_else(|| {
+            BridgeRpcError::ship_not_in_space(
+                ship_id,
+                None,
+                Some(sys_id),
+                "mercenary_den_shield_repair",
+                "Ship must be in space to repair Mercenary Den shields",
+            )
         })?;
     let den_pos_opt = ctx
         .db
@@ -1584,7 +1598,7 @@ pub async fn handle_anchor_sov_hub_rpc(
         return Err(BridgeRpcError { code: "CannotAnchorSovHubOutsideNullSec".into(), message: format!("Sovereignty Hub can only be anchored in claimable null-security space (system {sys_id})"), client_error: None });
     }
     let (_, ship_ball) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError { code: "DestinyQueryFailed".into(), message: e, client_error: None })?
-        .ok_or_else(|| BridgeRpcError { code: "ShipNotInSpace".into(), message: format!("Active ship {ship_id} is not spawned in space"), client_error: None })?;
+        .ok_or_else(|| BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "anchor_sov_hub", format!("Active ship {ship_id} is not spawned in space")))?;
     let name = args.iter().filter_map(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).next_back().unwrap_or("Sovereignty Hub").to_string();
     let first_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let now = ctx.now_unix();

@@ -608,7 +608,12 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
                 Err(e) => return Some(Err(e)),
             };
             if !session.has_gm_role() {
-                return Some(Err(err("InsufficientRole", "shipCosmeticsMgr.RemoveSkin requires GM role")));
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "shipCosmeticsMgr.RemoveSkin",
+                    "shipCosmeticsMgr.RemoveSkin requires GM role",
+                )));
             }
             let rpc = crate::router::RpcArgs::positional(args);
             let skin_id = match rpc.req_u32(0, "skinID") {
@@ -633,7 +638,12 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
                 Err(e) => return Some(Err(e)),
             };
             if !session.has_gm_role() {
-                return Some(Err(err("InsufficientRole", "shipCosmeticsMgr.GMExpireSkinLicense requires GM role")));
+                return Some(Err(BridgeRpcError::insufficient_role(
+                    eve_machonet::service_roles::ROLE_GM_MASK,
+                    session.role,
+                    "shipCosmeticsMgr.GMExpireSkinLicense",
+                    "shipCosmeticsMgr.GMExpireSkinLicense requires GM role",
+                )));
             }
             let rpc = crate::router::RpcArgs::positional(args);
             let skin_id = match rpc.req_u32(0, "skinID") {

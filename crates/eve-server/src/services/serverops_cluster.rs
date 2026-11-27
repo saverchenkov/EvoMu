@@ -1957,11 +1957,12 @@ pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> 
 pub fn require_gm_or_admin(session: &SessionState) -> Result<(), BridgeRpcError> {
     ServerContext::require_auth(session)?;
     if !crate::router::ServerContext::has_canonical_gm_role(session) {
-        return Err(BridgeRpcError {
-            code: "InsufficientRole".into(),
-            message: "Cluster administration RPC requires GM or Admin role".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::insufficient_role(
+            ServerContext::ROLE_GM_CANONICAL_MASK,
+            session.role,
+            "cluster_admin",
+            "Cluster administration RPC requires GM or Admin role",
+        ));
     }
     Ok(())
 }

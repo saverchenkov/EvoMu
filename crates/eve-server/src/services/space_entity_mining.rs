@@ -97,11 +97,7 @@ pub(crate) async fn handle_mine(
 
     let handle = ctx.systems.get_or_spawn(sys_id);
     let Some((_, ship_ball)) = handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship is not spawned in Ballpark".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdMineRepeatedly", "Active ship is not spawned in Ballpark"));
     };
     if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
         return Err(BridgeRpcError {
@@ -1476,13 +1472,10 @@ fn resolve_station_container_dest(
     let is_corp_cont = caller_corp > 0 && dest_item.owner_id == caller_corp;
     let is_personal_cont = dest_item.owner_id == char_id;
     if !is_personal_cont && !is_corp_cont {
-        return Err(BridgeRpcError {
-            code: "OwnershipOrLocationViolation".into(),
-            message: format!(
-                "Container {target_loc} is not owned by character {char_id} or their corporation"
-            ),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ownership_or_location_violation(
+            target_loc, Some(dest_item.owner_id), Some(dest_item.location_id), Some(char_id), Some(station_id),
+            format!("Container {target_loc} is not owned by character {char_id} or their corporation"),
+        ));
     }
     if is_personal_cont && parsed.explicit_out_owner == Some(caller_corp) {
         return Err(BridgeRpcError {
@@ -1514,11 +1507,10 @@ fn resolve_station_container_dest(
         }
         check_container_lock_and_password(snap, cur, char_id)?;
         if cur.owner_id != dest_item.owner_id {
-            return Err(BridgeRpcError {
-                code: "OwnershipOrLocationViolation".into(),
-                message: format!("Container {target_loc} hierarchy has mismatched ownership"),
-                client_error: None,
-            });
+            return Err(BridgeRpcError::ownership_or_location_violation(
+                cur.item_id, Some(cur.owner_id), Some(cur.location_id), Some(dest_item.owner_id), Some(station_id),
+                format!("Container {target_loc} hierarchy has mismatched ownership"),
+            ));
         }
         if cur.location_id == station_id {
             if is_personal_cont {
@@ -1681,13 +1673,10 @@ fn resolve_reprocess_output_dest(
 
     if let Some(out_owner) = parsed.explicit_out_owner {
         if out_owner != char_id && !(caller_corp > 0 && out_owner == caller_corp) {
-            return Err(BridgeRpcError {
-                code: "OwnershipOrLocationViolation".into(),
-                message: format!(
-                    "Output owner {out_owner} is neither character {char_id} nor their corporation"
-                ),
-                client_error: None,
-            });
+            return Err(BridgeRpcError::ownership_or_location_violation(
+                source_item.item_id, Some(out_owner), Some(source_item.location_id), Some(char_id), Some(station_id),
+                format!("Output owner {out_owner} is neither character {char_id} nor their corporation"),
+            ));
         }
     }
 
@@ -2012,13 +2001,10 @@ pub async fn handle(
                     let from_loc_ok = parsed.from_loc.is_none_or(|fl| fl == item.location_id);
                     let valid_location = (in_station_hangar || in_docked_parent) && from_loc_ok;
                     if (!personal_ok && !corp_ok) || !valid_location || item.quantity <= 0 {
-                        return Err(BridgeRpcError {
-                            code: "OwnershipOrLocationViolation".into(),
-                            message: format!(
-                                "Item {item_id} must be owned by character {char_id} or an authorized corporate division at station {station_id}"
-                            ),
-                            client_error: None,
-                        });
+                        return Err(BridgeRpcError::ownership_or_location_violation(
+                            item_id, Some(item.owner_id), Some(item.location_id), Some(char_id), Some(station_id),
+                            format!("Item {item_id} must be owned by character {char_id} or an authorized corporate division at station {station_id}"),
+                        ));
                     }
                     let active_ship_id = snap
                         .characters

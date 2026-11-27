@@ -101,7 +101,15 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         .get_ball_snapshot(ship_id)
         .await
         .map_err(|e| err("DestinyQueryFailed", e))?
-        .ok_or_else(|| err("ShipNotInSpace", format!("Active ship {ship_id} is not spawned in space in system {sys_id}")))?;
+        .ok_or_else(|| {
+            BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "structure_deployment",
+                format!("Active ship {ship_id} is not spawned in space in system {sys_id}"),
+            )
+        })?;
     // Parse both V24 `StructureDeployment.ConfirmDeployment` 10-positional-arg calls
     // `(itemID, x, z, yaw, profileID, structureName, bio, reinforceWeekday, reinforceHour, extraVars)`
     // (`client_expectations.json:101420-101446`, as well as `(..., reinforceWeekday, reinforceHour, name, description, extraVars)`)
@@ -1405,7 +1413,15 @@ pub fn handle_structure_module_online(ctx: &ServerContext, session: &mut Session
         if !docked_here && !controlling_here {
             return Err(err("NotAtStructure", format!("Character {char_id} must be docked in or actively controlling structure {structure_id} to online/offline modules")));
         }
-        let item = snap.items.get(&module_id).cloned().filter(|i| i.location_id == structure_id).ok_or_else(|| err("ModuleNotFound", format!("Module {module_id} not fitted to structure {structure_id}")))?;
+        let item = snap.items.get(&module_id).cloned().filter(|i| i.location_id == structure_id).ok_or_else(|| {
+            BridgeRpcError::module_not_found(
+                module_id,
+                Some(structure_id),
+                None,
+                false,
+                format!("Module {module_id} not fitted to structure {structure_id}"),
+            )
+        })?;
         let is_service = (164..=171).contains(&(item.flag as u16));
         use crate::services::structure_acl_defense_rules as rules;
         let was_online = snap.module_online_states.get(&module_id).copied().unwrap_or(false)

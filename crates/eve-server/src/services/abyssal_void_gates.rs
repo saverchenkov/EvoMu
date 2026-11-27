@@ -769,31 +769,35 @@ pub(crate) async fn handle_void_space_player_jump(
 
     if cargo_filament_iid.is_none() {
         if target_id == ship_id {
-            return Err(BridgeRpcError {
-                code: "InvalidTarget".into(),
-                message: "Cannot target own ship as Void Space entrance gate".into(),
-                client_error: None,
-            });
+            return Err(BridgeRpcError::invalid_target_self(
+                target_id,
+                "void_space_gate_self",
+                "Cannot target own ship as Void Space entrance gate",
+            ));
         }
         let target_ball = origin_handle.get_ball_snapshot(target_id).await.ok().flatten();
         let Some((_, target_b)) = target_ball else {
-            return Err(BridgeRpcError {
-                code: "InvalidTarget".into(),
-                message: format!(
+            return Err(BridgeRpcError::invalid_target(
+                Some(target_id),
+                None,
+                "Void Space Gate",
+                "not_filament_or_gate",
+                format!(
                     "Target {target_id} is neither a filament in ship cargo nor a gate in space"
                 ),
-                client_error: None,
-            });
+            ));
         };
         if !is_valid_void_entrance_gate(ctx, target_id, target_b.type_id) {
-            return Err(BridgeRpcError {
-                code: "InvalidTarget".into(),
-                message: format!(
+            return Err(BridgeRpcError::invalid_target(
+                Some(target_id),
+                None,
+                "Void Space Gate",
+                "invalid_void_entrance_gate",
+                format!(
                     "Target {target_id} (type {}) is not a valid Void Space entrance gate",
                     target_b.type_id
                 ),
-                client_error: None,
-            });
+            ));
         }
         let dist = ship_vec.distance(target_b.position);
         if dist > 5_000.0 {

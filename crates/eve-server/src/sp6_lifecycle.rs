@@ -1278,11 +1278,13 @@ pub fn require_ship_ready_for_filament_jump(
     require_no_pvp_timer_for_filament(ctx, char_id)?;
     let (weap_until, _npc_until, _, _) = active_timers_for_char(ctx, char_id, now_unix);
     if weap_until > now_unix {
-        return Err(BridgeRpcError {
-            code: "WeaponsTimerActive".into(),
-            message: "Cannot activate filament while a Weapons Timer is active".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::weapons_timer_active(
+            char_id,
+            "filament_activate",
+            "weapons",
+            true,
+            "Cannot activate filament while a Weapons Timer is active",
+        ));
     }
     crate::services::space_nav_movement_guard::validate_pre_movement_locks(
         ctx,
@@ -1316,12 +1318,13 @@ pub fn require_ship_ready_for_filament_jump(
         });
     }
     let view = sys_handle.view();
-    if let Some(MovementMode::Warp { .. }) = view.movement_mode(ship_id) {
-        return Err(BridgeRpcError {
-            code: "ShipInWarp".into(),
-            message: "Cannot activate filament while ship is mid-warp".into(),
-            client_error: None,
-        });
+    if let Some(MovementMode::Warp { phase, .. }) = view.movement_mode(ship_id) {
+        return Err(BridgeRpcError::ship_in_warp_for_restricted_phase(
+            Some(ship_id),
+            "filament_activate",
+            crate::services::nav_warp_interdiction::warp_phase_kind(*phase),
+            "Cannot activate filament while ship is mid-warp",
+        ));
     }
     if let Some(cs) = view.combat_state(ship_id) {
         if cs.lance_disrupted_remaining_s > 0.0 {

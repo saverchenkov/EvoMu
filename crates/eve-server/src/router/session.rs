@@ -248,6 +248,15 @@ impl ServerContext {
     ) -> Result<(i64, SolarSystemId), BridgeRpcError> {
         let (_, char_id) = Self::require_character(session)?;
         if self.is_session_docked_with_policy(session, strict_db_dock, allow_structure_control) {
+            if docked_code == "ShipNotInSpace" {
+                return Err(BridgeRpcError::ship_not_in_space(
+                    session.ship_id.unwrap_or(0),
+                    Some(char_id),
+                    session.solar_system_id,
+                    "require_undocked_space_system",
+                    docked_msg,
+                ));
+            }
             return Err(BridgeRpcError::with_client_error(
                 docked_code,
                 docked_msg,

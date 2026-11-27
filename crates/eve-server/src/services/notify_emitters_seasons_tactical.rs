@@ -627,6 +627,33 @@ pub fn emit_fleet_escalating_path_if_in_fleet(
 
 /// Handles `dogmaIM.LoadAmmo`, emitting `OnChargeBeingLoadedToModule`, `OnChargeLoadedToModule`,
 /// and `OnAmmoInBankChanged` for any grouped weapon bank masters.
+pub(crate) fn validate_load_ammo_module_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    mod_id: i64,
+    char_id: i64,
+    ship_id: i64,
+) -> Result<eve_db::InventoryItemRecord, BridgeRpcError> {
+    let Some(mod_item) = snap.items.get(&mod_id).cloned() else {
+        return Err(BridgeRpcError::module_not_found(
+            mod_id,
+            Some(ship_id),
+            None,
+            true,
+            format!("Target module {mod_id} not found"),
+        ));
+    };
+    if mod_item.owner_id != char_id
+        || mod_item.location_id != ship_id
+        || !matches!(mod_item.flag as u16, 11..=34 | 125..=132)
+    {
+        return Err(rpc_err(
+            "ModuleOwnershipViolation",
+            format!("Target module {mod_id} is not fitted on ship {ship_id} owned by character {char_id}"),
+        ));
+    }
+    Ok(mod_item)
+}
+
 pub(crate) fn handle_load_ammo(
     ctx: &ServerContext,
     session: &SessionState,
@@ -757,18 +784,9 @@ pub(crate) fn handle_load_ammo(
     }
 
     for &mod_id in &all_target_modules {
-        let Some(mod_item) = ctx.db.with_snapshot(|snap| snap.items.get(&mod_id).cloned()) else {
-            return Err(rpc_err("ModuleNotFound", format!("Target module {mod_id} not found")));
-        };
-        if mod_item.owner_id != char_id
-            || mod_item.location_id != ship_id
-            || !matches!(mod_item.flag as u16, 11..=34 | 125..=132)
-        {
-            return Err(rpc_err(
-                "ModuleOwnershipViolation",
-                format!("Target module {mod_id} is not fitted on ship {ship_id} owned by character {char_id}"),
-            ));
-        }
+        let mod_item = ctx
+            .db
+            .with_snapshot(|snap| validate_load_ammo_module_in_snap(snap, mod_id, char_id, ship_id))?;
         if let (Some(wt), Some(ct)) = (
             ctx.sde.types.get(&mod_item.type_id),
             ctx.sde.types.get(&charge_type_id),
@@ -954,18 +972,7 @@ pub(crate) fn handle_load_ammo(
         }
 
         for &(mod_id, _) in &mod_allocations {
-            let Some(mod_item) = snap.items.get(&mod_id) else {
-                return Err(rpc_err("ModuleNotFound", format!("Target module {mod_id} not found")));
-            };
-            if mod_item.owner_id != char_id
-                || mod_item.location_id != ship_id
-                || !matches!(mod_item.flag as u16, 11..=34 | 125..=132)
-            {
-                return Err(rpc_err(
-                    "ModuleOwnershipViolation",
-                    format!("Target module {mod_id} is not fitted on ship {ship_id} owned by character {char_id}"),
-                ));
-            }
+            let _ = validate_load_ammo_module_in_snap(snap, mod_id, char_id, ship_id)?;
         }
         let mut diffs: Vec<(Option<eve_db::InventoryItemRecord>, Option<eve_db::InventoryItemRecord>)> =
             Vec::new();

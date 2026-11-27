@@ -1010,11 +1010,13 @@ async fn handle_admin_get_bubble_id(
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_character(session)?;
     if !session.has_gm_role() {
-        return Err(BridgeRpcError {
-            code: "InsufficientRoles".into(),
-            message: "AdminGetBubbleID requires a GM or Admin role".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::insufficient_role_with_code(
+            "InsufficientRoles",
+            eve_machonet::service_roles::ROLE_GM_MASK,
+            session.role,
+            "AdminGetBubbleID",
+            "AdminGetBubbleID requires a GM or Admin role",
+        ));
     }
     let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
     let Some(ship_id) = session.ship_id else {

@@ -332,11 +332,13 @@ pub async fn handle_ess_link(
             client_error: None,
         })?
     else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship ball is not in space".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "ess_link",
+            "Active ship ball is not in space",
+        ));
     };
     if ship_ball.type_id == 670 {
         return Err(BridgeRpcError {
