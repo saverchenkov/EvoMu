@@ -505,6 +505,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         });
     }
 
+    let origin_sys_handle = wake_jump_destination_system(ctx, origin_sys).await?;
     let Some(taken) = abyss_handle.take_ball(ship_id).await else {
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
@@ -513,13 +514,6 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         });
     };
     let taken_cs = taken.combat_state.clone();
-    let origin_sys_handle = match wake_jump_destination_system(ctx, origin_sys).await {
-        Ok(h) => h,
-        Err(e) => {
-            let _ = abyss_handle.restore_ball(taken).await;
-            return Err(e);
-        }
-    };
 
     let exit_pos = [
         origin_pos[0] + 1_000.0,
@@ -856,28 +850,18 @@ pub(crate) async fn handle_void_space_player_jump(
     )
     .await?;
 
-    let origin_and_taken = match origin_handle_opt {
-        Some(origin_handle) => origin_handle
-            .take_ball(ship_id)
-            .await
-            .map(|taken| (origin_handle, taken)),
-        None => None,
+    let ship_not_in_origin_err = || BridgeRpcError {
+        code: "SystemTransitionFailed".into(),
+        message: format!("Ship {ship_id} is no longer in solar system {cur_sys}"),
+        client_error: None,
     };
-    let Some((origin_handle, taken)) = origin_and_taken else {
-        return Err(BridgeRpcError {
-            code: "SystemTransitionFailed".into(),
-            message: format!("Ship {ship_id} is no longer in solar system {cur_sys}"),
-            client_error: None,
-        });
-    };
+    let origin_handle = origin_handle_opt.ok_or_else(ship_not_in_origin_err)?;
+    let void_handle = wake_jump_destination_system(ctx, VOID_SPACE_SYSTEM_ID).await?;
+    let taken = origin_handle
+        .take_ball(ship_id)
+        .await
+        .ok_or_else(ship_not_in_origin_err)?;
     let taken_void_cs = taken.combat_state.clone();
-    let void_handle = match wake_jump_destination_system(ctx, VOID_SPACE_SYSTEM_ID).await {
-        Ok(h) => h,
-        Err(e) => {
-            let _ = origin_handle.restore_ball(taken).await;
-            return Err(e);
-        }
-    };
 
     // Server-validated target ID (filament or gate) is used as effective_content_id;
     // client-supplied content_id is not trusted directly.
@@ -1193,6 +1177,8 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         }
     }
 
+    let origin_sys = vs.origin_solar_system_id;
+    let origin_handle = wake_jump_destination_system(ctx, origin_sys).await?;
     let Some(taken) = void_handle.take_ball(ship_id).await else {
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
@@ -1201,15 +1187,6 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         });
     };
     let taken_exit_cs = taken.combat_state.clone();
-
-    let origin_sys = vs.origin_solar_system_id;
-    let origin_handle = match wake_jump_destination_system(ctx, origin_sys).await {
-        Ok(h) => h,
-        Err(e) => {
-            let _ = void_handle.restore_ball(taken).await;
-            return Err(e);
-        }
-    };
     let exit_pos = [
         vs.origin_position[0] + 1_000.0,
         vs.origin_position[1] + 1_000.0,

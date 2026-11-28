@@ -578,8 +578,24 @@ async fn cyno_and_filament_jumps_record_session_arrival_jump_and_rollback_on_wak
                 },
             );
         });
+        let fil_mod_id = 930_999_i64;
+        ctx_fail.db.with_mut_snapshot(|snap| {
+            put_item(snap, fil_mod_id, 439, fil_char, fil_ship, InventoryFlag::MedSlot0, 1, true);
+            snap.module_active_states.insert(fil_mod_id);
+        });
         let wh_h = ctx_fail.systems.get_or_spawn(wh_sys);
         spawn_ship(&wh_h, fil_ship, 587, 25, 6, pos, DVec3::ZERO, false).await;
+        wh_h.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id: fil_ship,
+            module_id: fil_mod_id,
+            module_type_id: 439,
+            effect_name: "afterburner".into(),
+            repeat: 1,
+            duration_s: 10.0,
+            ..Default::default()
+        })
+        .await
+        .expect("seed active module cycle");
         let mut sess = make_session(fil_char, 98_000_001, Some(wh_sys), Some(fil_ship));
         sess.user_id = Some(1);
         let err = handle(
@@ -596,6 +612,8 @@ async fn cyno_and_filament_jumps_record_session_arrival_jump_and_rollback_on_wak
         .expect_err("wake failure must roll back random jump filament");
         assert_eq!(err.code, "SystemTransitionFailed");
         assert!(wh_h.get_ball_snapshot(fil_ship).await.unwrap().is_some());
+        assert!(wh_h.has_module_cycle(fil_ship, fil_mod_id).await);
+        assert!(ctx_fail.db.with_snapshot(|s| s.module_active_states.contains(&fil_mod_id)));
         assert_eq!(
             ctx_fail.db.with_snapshot(|s| s.items[&fil_item].quantity),
             2
@@ -819,6 +837,28 @@ async fn cyno_and_filament_jumps_record_session_arrival_jump_and_rollback_on_wak
         cs.max_capacitor = 10_000.0;
         cur_h.set_combat_state(sid, cs).await.unwrap();
     }
+    let struct_mod_id = 77_991_i64;
+    let fleet_mod_id = 77_992_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        put_item(snap, struct_mod_id, 439, struct_pilot, struct_ship, InventoryFlag::MedSlot0, 1, true);
+        put_item(snap, fleet_mod_id, 439, fleet_pilot, fleet_ship, InventoryFlag::MedSlot0, 1, true);
+        snap.module_active_states.insert(struct_mod_id);
+        snap.module_active_states.insert(fleet_mod_id);
+    });
+    for (sid, mid) in [(struct_ship, struct_mod_id), (fleet_ship, fleet_mod_id)] {
+        cur_h
+            .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                ship_id: sid,
+                module_id: mid,
+                module_type_id: 439,
+                effect_name: "afterburner".into(),
+                repeat: 1,
+                duration_s: 10.0,
+                ..Default::default()
+            })
+            .await
+            .expect("seed active module cycle");
+    }
     struct_sess.solar_system_id = Some(cur_sys);
     fleet_sess.solar_system_id = Some(cur_sys);
 
@@ -836,6 +876,8 @@ async fn cyno_and_filament_jumps_record_session_arrival_jump_and_rollback_on_wak
     .expect_err("structure beacon jump wake failure must fail");
     assert_eq!(err_struct.code, "SystemTransitionFailed");
     assert!(cur_h.get_ball_snapshot(struct_ship).await.unwrap().is_some());
+    assert!(cur_h.has_module_cycle(struct_ship, struct_mod_id).await);
+    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&struct_mod_id)));
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&77_901].quantity), 5_000);
     assert!(ctx.systems.get_handle(dst_sys).is_none());
 
@@ -848,6 +890,8 @@ async fn cyno_and_filament_jumps_record_session_arrival_jump_and_rollback_on_wak
     .expect_err("fleet beacon jump wake failure must fail");
     assert_eq!(err_fleet.code, "SystemTransitionFailed");
     assert!(cur_h.get_ball_snapshot(fleet_ship).await.unwrap().is_some());
+    assert!(cur_h.has_module_cycle(fleet_ship, fleet_mod_id).await);
+    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&fleet_mod_id)));
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&77_902].quantity), 5_000);
     assert!(ctx.systems.get_handle(dst_sys).is_none());
 }

@@ -1771,17 +1771,6 @@ pub(crate) async fn resolve_fleet_beacon_or_destroyed(
     }
 }
 
-async fn try_set_ship_combat_state_in_system(
-    ctx: &ServerContext,
-    sys_id: u32,
-    ship_id: i64,
-    cs: eve_destiny::CombatState,
-) {
-    if let Some(sys) = ctx.systems.get_handle(sys_id) {
-        let _ = sys.set_combat_state(ship_id, cs).await;
-    }
-}
-
 /// `beyonce.CmdJumpToFleetModuleBeacon` / `beyonce.CmdJumpToFleetDeployableBeacon`: jump drive to a fleet cyno.
 // parity: feat:navigation.jump-drive-range-fuel, feat:navigation.jump-arrival-placement
 pub(super) async fn jump_to_fleet_beacon(
@@ -1887,29 +1876,23 @@ pub(super) async fn jump_to_fleet_beacon(
     let fuel_type = type_attr(ctx, ship_type, ATTR_JUMP_DRIVE_CONSUMPTION_TYPE) as TypeId;
     let effective_consumption = effective_jump_drive_consumption_per_ly(ctx, char_id, ship_id, ship_type);
     let fuel_qty = (effective_consumption * dist).ceil() as i64;
-    let updated_cap_cs = crate::services::space_destiny::space_nav_travel::validate_and_prepare_jump_capacitor(
+    if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, ctx.now_unix(), None).is_some() {
+        return Err(err("SessionChangeTimerActive", "Session change timer is active"));
+    }
+    let dest_handle = wake_jump_destination_system(ctx, beacon.solar_system_id).await?;
+    let rem_cap = crate::services::space_destiny::space_nav_travel::validate_and_prepare_jump_capacitor(
         ctx,
         char_id,
         ship_id,
         sys_id,
         ship_type_id,
     )
-    .await?;
-    if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, ctx.now_unix(), None).is_some() {
-        return Err(err("SessionChangeTimerActive", "Session change timer is active"));
-    }
-    let _ = wake_jump_destination_system(ctx, beacon.solar_system_id).await?;
+    .await?
+    .map(|cs| cs.capacitor);
     let (reserved_fuel, _reserved_diffs, fuel_guard) =
         consume_or_err_with_guard(ctx, ship_id, fuel_type, fuel_qty, |have| {
             format!("Jump requires {fuel_qty} x type {fuel_type}, ship holds {have}")
         })?;
-    let mut prev_cap_cs = None;
-    if let Some(cap_cs) = updated_cap_cs {
-        if let Some(sys) = ctx.systems.get_handle(sys_id) {
-            prev_cap_cs = sys.get_combat_state(ship_id).await.ok().flatten();
-        }
-        try_set_ship_combat_state_in_system(ctx, sys_id, ship_id, cap_cs).await;
-    }
     let pos = if landed_at_star {
         star_arrival_position(ctx, beacon.solar_system_id)
     } else {
@@ -1930,14 +1913,14 @@ pub(super) async fn jump_to_fleet_beacon(
     {
         Ok(res) => {
             drop(fuel_guard);
+            if let Some(rem_cap) = rem_cap {
+                let _ = dest_handle.set_capacitor(ship_id, rem_cap).await;
+            }
             res
         }
         Err(e) => {
             refund_ship_fuel_items(ctx, char_id, &reserved_fuel, Some(&fuel_guard));
             drop(fuel_guard);
-            if let Some(prev_cs) = prev_cap_cs {
-                try_set_ship_combat_state_in_system(ctx, sys_id, ship_id, prev_cs).await;
-            }
             return Err(e);
         }
     };

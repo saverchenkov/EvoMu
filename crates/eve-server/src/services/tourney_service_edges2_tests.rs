@@ -1012,3 +1012,190 @@ async fn tourney_create_match_and_teleport_wake_cold_match_sys_with_gm_command_w
         ))
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tourney_teleport_two_arg_pins_pre_wake_match_and_rejects_system_divergence() {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    let ctx = make_ctx();
+    let kw = HashMap::new();
+    let start_sys = 30_000_142_u32;
+    let mut kspace = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .filter(|&s| s != start_sys && s < 31_000_000);
+    let arena_sys = kspace.next().expect("arena solar system");
+    let alt_sys = kspace.next().expect("alt solar system");
+
+    let gm_cid = 97_900_201_i64;
+    let gm_ship = 97_900_301_i64;
+    let red_capt = 97_900_202_i64;
+    let blue_capt = 97_900_203_i64;
+    seed_pilot(&ctx, gm_cid, start_sys, gm_ship, 587);
+    seed_pilot(&ctx, red_capt, start_sys, 97_900_302, 587);
+    seed_pilot(&ctx, blue_capt, start_sys, 97_900_303, 587);
+
+    let mut gm = mk_sess(Some(gm_cid), Some(start_sys), true);
+    let mut cm_kw = HashMap::new();
+    cm_kw.insert("redTeamID".into(), PyRep::Integer(1_000_009));
+    cm_kw.insert("blueTeamID".into(), PyRep::Integer(1_000_125));
+    cm_kw.insert("redCaptainID".into(), PyRep::Integer(red_capt));
+    cm_kw.insert("blueCaptainID".into(), PyRep::Integer(blue_capt));
+    cm_kw.insert("systemID".into(), PyRep::Integer(i64::from(arena_sys)));
+    tm(
+        &ctx,
+        &mut gm,
+        "CreateMatch",
+        &[PyRep::Integer(88), PyRep::Integer(8501), PyRep::Integer(50)],
+        &cm_kw,
+    )
+    .await
+    .expect("CreateMatch succeeds");
+    tm(&ctx, &mut gm, "AddPlayer", &[PyRep::Integer(0), PyRep::Integer(gm_cid)], &kw)
+        .await
+        .expect("AddPlayer succeeds");
+    assert!(ctx.systems.stop_system(arena_sys).await);
+    assert!(ctx.systems.get_handle(arena_sys).is_none());
+
+    struct MidWakeTourneyMutator {
+        target_sys: u32,
+        alt_sys: u32,
+        db: Arc<WorldRepository>,
+        mode: Arc<AtomicU8>,
+    }
+    impl crate::system_actor::SystemContentProvider for MidWakeTourneyMutator {
+        fn name(&self) -> &'static str {
+            "test_tourney_mid_wake_mutator"
+        }
+
+        fn seed(
+            &self,
+            seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+        ) -> Result<(), String> {
+            if seed_ctx.solar_system_id != self.target_sys {
+                return Ok(());
+            }
+            match self.mode.swap(0, Ordering::AcqRel) {
+                1 => {
+                    // Concurrent CreateMatch changes active_match_id mid-wake while match 8501 stays in target_sys.
+                    let alt_sys = self.alt_sys;
+                    self.db.with_mut_snapshot(|snap| {
+                        let mut m2 = snap.tourney_state.matches[&8501].clone();
+                        m2.match_id = 8502;
+                        m2.solar_system_id = i64::from(alt_sys);
+                        snap.tourney_state.matches.insert(8502, m2);
+                        snap.tourney_state.active_match_id = Some(8502);
+                    });
+                }
+                2 => {
+                    // Match solar_system_id mutates across wake boundary -> post-wake guard must abort.
+                    let alt_sys = self.alt_sys;
+                    self.db.with_mut_snapshot(|snap| {
+                        if let Some(m) = snap.tourney_state.matches.get_mut(&8501) {
+                            m.solar_system_id = i64::from(alt_sys);
+                        }
+                    });
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    let mode = Arc::new(AtomicU8::new(1));
+    ctx.systems
+        .register_content_provider(Arc::new(MidWakeTourneyMutator {
+            target_sys: arena_sys,
+            alt_sys,
+            db: Arc::clone(&ctx.db),
+            mode: Arc::clone(&mode),
+        }))
+        .expect("register tourney mid-wake mutator");
+
+    let spawn_gm_ball = |sys_h: crate::system_actor::SystemHandle| async move {
+        let _ = sys_h
+            .spawn_ball(eve_destiny::Ball {
+                id: gm_ship,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await;
+    };
+
+    let start_h = ctx.systems.get_or_spawn(start_sys);
+    spawn_gm_ball(start_h.clone()).await;
+
+    // 1. Two-arg TeleportPlayers pins pre-wake resolved_mid=8501 even when active_match_id shifts to 8502 during wake.
+    let tp_pinned = tm(
+        &ctx,
+        &mut gm,
+        "TeleportPlayers",
+        &[PyRep::Integer(0), PyRep::Integer(0)],
+        &kw,
+    )
+    .await
+    .expect("two-arg TeleportPlayers pins pre-wake match 8501");
+    assert_eq!(tp_pinned, PyRep::Bool(true));
+    assert_eq!(gm.solar_system_id, Some(arena_sys));
+    ctx.db.with_snapshot(|s| {
+        let store = load_store(s);
+        assert_eq!(store.active_match_id, Some(8502));
+        assert!(!store.matches[&8501].teleported_teams.is_empty());
+        assert!(store.matches[&8502].teleported_teams.is_empty());
+        assert_eq!(s.characters[&gm_cid].solar_system_id, arena_sys);
+    });
+
+    // 2. If the pinned match's solar_system_id diverges across the wake boundary, TeleportPlayers fails closed.
+    if let Some(arena_h) = ctx.systems.get_handle(arena_sys) {
+        let _ = arena_h.remove_ball(gm_ship).await;
+    }
+    assert!(ctx.systems.stop_system(arena_sys).await);
+    gm.solar_system_id = Some(start_sys);
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&gm_cid) {
+            ch.solar_system_id = start_sys;
+        }
+        if let Some(sh) = s.items.get_mut(&gm_ship) {
+            sh.location_id = i64::from(start_sys);
+        }
+        s.tourney_state.active_match_id = Some(8501);
+        if let Some(m) = s.tourney_state.matches.get_mut(&8501) {
+            m.teleported_teams.clear();
+        }
+    });
+    spawn_gm_ball(start_h.clone()).await;
+    let _ = ctx.drain_notifications_for_char(gm_cid);
+    mode.store(2, Ordering::Release);
+
+    let diverge_err = tm(
+        &ctx,
+        &mut gm,
+        "TeleportPlayers",
+        &[PyRep::Integer(0), PyRep::Integer(0)],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(diverge_err.code, "SystemTransitionFailed");
+    assert_eq!(gm.solar_system_id, Some(start_sys));
+    assert!(start_h.get_ball_snapshot(gm_ship).await.unwrap().is_some());
+    ctx.db.with_snapshot(|s| {
+        let store = load_store(s);
+        assert!(store.matches[&8501].teleported_teams.is_empty());
+        assert_eq!(s.characters[&gm_cid].solar_system_id, start_sys);
+    });
+    assert!(
+        ctx.drain_notifications_for_char(gm_cid)
+            .iter()
+            .all(|n| n.event != "OnSessionChanged" && n.event != "OnEnterTournamentSystem")
+    );
+}

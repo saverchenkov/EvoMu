@@ -1167,7 +1167,18 @@ pub async fn handle(
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
-                let m = store.resolve_match_mut(target_mid)?;
+                let m = store.resolve_match_mut(Some(resolved_mid))?;
+                if m.solar_system_id != pre_match_sys {
+                    let msg = format!(
+                        "Tournament match {resolved_mid} solar system changed from {pre_match_sys} to {} during wake",
+                        m.solar_system_id
+                    );
+                    return Err(BridgeRpcError::with_client_error(
+                        "SystemTransitionFailed",
+                        msg.clone(),
+                        eve_proto::ClientError::CustomInfo(msg),
+                    ));
+                }
                 let (refreshed, match_sys_u32) = validate_teleport_team_and_system(
                     ctx,
                     snap,

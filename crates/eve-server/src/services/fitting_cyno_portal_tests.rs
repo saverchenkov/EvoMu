@@ -1113,6 +1113,9 @@ async fn rpc_cyno_conduit_and_portal_jumps_atomic_on_wake_failure() {
                     (898, 0.25),
                     (3131, 500.0),
                     (3317, 99_317.0),
+                    (eve_sde::attr_ids::SHIELD_CAPACITY, 5_000.0),
+                    (eve_sde::attr_ids::ARMOR_HP, 4_000.0),
+                    (eve_sde::attr_ids::HP_STRUCT, 3_000.0),
                     (eve_sde::attr_ids::CAPACITOR_CAPACITY, 20_000.0),
                 ],
             ),
@@ -1319,4 +1322,55 @@ async fn rpc_cyno_conduit_and_portal_jumps_atomic_on_wake_failure() {
             crate::system_actor::SessionArrivalWakeReason::Jump,
         ))
     );
+
+    // 5. CmdJumpToFleetModuleBeacon wakes Cold dest_sys and preserves non-capacitor CombatState (shield/armor/hull damage).
+    cyno_state(&ctx).state.write().unwrap().bridges.remove(&anchor_ship);
+    assert!(ctx.systems.stop_system(dest_sys).await);
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+    let mut damaged_cs = ctx.build_ship_combat_state(anchor_id, anchor_ship, ship_tid);
+    assert!(damaged_cs.max_shield_hp > 0.0 && damaged_cs.max_armor_hp > 0.0 && damaged_cs.max_structure_hp > 0.0);
+    let expected_shield_frac = 0.25_f64;
+    let expected_armor = damaged_cs.max_armor_hp * 0.50;
+    let expected_struct = damaged_cs.max_structure_hp * 0.75;
+    damaged_cs.shield_hp = damaged_cs.max_shield_hp * expected_shield_frac;
+    damaged_cs.armor_hp = expected_armor;
+    damaged_cs.structure_hp = expected_struct;
+    damaged_cs.capacitor = 20_000.0;
+    damaged_cs.max_capacitor = 20_000.0;
+    origin_h
+        .set_combat_state(anchor_ship, damaged_cs)
+        .await
+        .expect("set damaged combat state");
+
+    handle_cyno_portal(
+        &ctx,
+        &mut anchor_sess,
+        "beyonce",
+        "CmdJumpToFleetModuleBeacon",
+        &[
+            PyRep::Integer(cyno_pilot_id),
+            PyRep::Integer(i64::from(dest_sys)),
+            PyRep::Integer(beacon_id),
+        ],
+    )
+    .await
+    .expect("handled")
+    .expect("CmdJumpToFleetModuleBeacon wakes dest_sys cleanly");
+    assert_eq!(anchor_sess.solar_system_id, Some(dest_sys));
+    assert_eq!(
+        ctx.systems.last_wake_reason(dest_sys),
+        Some(crate::system_actor::SystemWakeReason::SessionArrival(
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        ))
+    );
+    let dest_h = ctx.systems.get_handle(dest_sys).expect("dest live after jump");
+    let after_cs = dest_h
+        .get_combat_state(anchor_ship)
+        .await
+        .unwrap()
+        .expect("anchor ship combat state in dest");
+    assert!((after_cs.shield_hp / after_cs.max_shield_hp - expected_shield_frac).abs() < 0.01);
+    assert!((after_cs.armor_hp - expected_armor).abs() < 1e-6);
+    assert!((after_cs.structure_hp - expected_struct).abs() < 1e-6);
+    assert!(after_cs.capacitor < 20_000.0);
 }

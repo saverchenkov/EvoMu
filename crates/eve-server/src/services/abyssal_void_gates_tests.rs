@@ -1246,7 +1246,34 @@ async fn abyssal_and_void_gates_record_session_arrival_jump_and_rollback_on_wake
         })
         .await;
 
-    // 1. Void Space entry wake failure keeps ship & filament intact and VOID_SPACE_SYSTEM_ID Cold.
+    // 1. Void Space entry wake failure keeps ship, active modules, and filament intact and VOID_SPACE_SYSTEM_ID Cold.
+    let void_enter_mod = 777_991_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            void_enter_mod,
+            crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_item(
+                void_enter_mod,
+                439,
+                char_id,
+                ship_id,
+                eve_db::InventoryFlag::MedSlot0,
+                1,
+            ),
+        );
+        snap.module_active_states.insert(void_enter_mod);
+    });
+    origin_handle
+        .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id,
+            module_id: void_enter_mod,
+            module_type_id: 439,
+            effect_name: "afterburner".into(),
+            repeat: 1,
+            duration_s: 10.0,
+            ..Default::default()
+        })
+        .await
+        .expect("seed void enter module cycle");
     assert!(ctx.systems.get_handle(VOID_SPACE_SYSTEM_ID).is_none());
     let void_err = handle_void_space_player_jump(
         &ctx,
@@ -1258,6 +1285,8 @@ async fn abyssal_and_void_gates_record_session_arrival_jump_and_rollback_on_wake
     .unwrap_err();
     assert_eq!(void_err.code, "SystemTransitionFailed");
     assert!(origin_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+    assert!(origin_handle.has_module_cycle(ship_id, void_enter_mod).await);
+    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&void_enter_mod)));
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&void_fil_id].quantity), 2);
     assert!(ctx.systems.get_handle(VOID_SPACE_SYSTEM_ID).is_none());
 
@@ -1287,6 +1316,33 @@ async fn abyssal_and_void_gates_record_session_arrival_jump_and_rollback_on_wake
     assert!(ctx.systems.get_handle(origin_sys).is_none());
     fail_origin.store(true, Ordering::Release);
     let void_h = ctx.systems.get_handle(VOID_SPACE_SYSTEM_ID).expect("void handle");
+    let void_exit_mod = 777_992_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            void_exit_mod,
+            crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_item(
+                void_exit_mod,
+                439,
+                char_id,
+                ship_id,
+                eve_db::InventoryFlag::MedSlot0,
+                1,
+            ),
+        );
+        snap.module_active_states.insert(void_exit_mod);
+    });
+    void_h
+        .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id,
+            module_id: void_exit_mod,
+            module_type_id: 439,
+            effect_name: "afterburner".into(),
+            repeat: 1,
+            duration_s: 10.0,
+            ..Default::default()
+        })
+        .await
+        .expect("seed void exit module cycle");
     let vexit_err = handle_void_space_end_gate_activation(
         &ctx,
         &mut session,
@@ -1297,6 +1353,8 @@ async fn abyssal_and_void_gates_record_session_arrival_jump_and_rollback_on_wake
     .unwrap_err();
     assert_eq!(vexit_err.code, "SystemTransitionFailed");
     assert!(void_h.get_ball_snapshot(ship_id).await.unwrap().is_some());
+    assert!(void_h.has_module_cycle(ship_id, void_exit_mod).await);
+    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&void_exit_mod)));
     assert!(with_abyssal_state(&ctx, |st| st.void_space_sessions.contains_key(&char_id)));
     assert!(ctx.systems.get_handle(origin_sys).is_none());
 
@@ -1390,6 +1448,34 @@ async fn abyssal_and_void_gates_record_session_arrival_jump_and_rollback_on_wake
         }
     });
 
+    let abyss_exit_mod = 777_993_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            abyss_exit_mod,
+            crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_item(
+                abyss_exit_mod,
+                439,
+                char_id,
+                ship_id,
+                eve_db::InventoryFlag::MedSlot0,
+                1,
+            ),
+        );
+        snap.module_active_states.insert(abyss_exit_mod);
+    });
+    abyss_h
+        .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id,
+            module_id: abyss_exit_mod,
+            module_type_id: 439,
+            effect_name: "afterburner".into(),
+            repeat: 1,
+            duration_s: 10.0,
+            ..Default::default()
+        })
+        .await
+        .expect("seed abyssal exit module cycle");
+
     fail_origin.store(true, Ordering::Release);
     let ab_err = handle_abyssal_end_gate_activation(
         &ctx,
@@ -1401,6 +1487,8 @@ async fn abyssal_and_void_gates_record_session_arrival_jump_and_rollback_on_wake
     .unwrap_err();
     assert_eq!(ab_err.code, "SystemTransitionFailed");
     assert!(abyss_h.get_ball_snapshot(ship_id).await.unwrap().is_some());
+    assert!(abyss_h.has_module_cycle(ship_id, abyss_exit_mod).await);
+    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&abyss_exit_mod)));
     assert!(with_abyssal_state(&ctx, |st| st.pockets.contains_key(&char_id)));
     assert!(ctx.systems.get_handle(origin_sys).is_none());
 
