@@ -3,10 +3,9 @@
 
 #![forbid(unsafe_code)]
 
-use super::celestials::{clamp_tidi_factor_bits, BallparkHandle};
-use super::{BallOpsCtx, SystemActorState, SystemHandle, SystemRegistry, SystemView};
+use super::{BallOpsCtx, SystemActorState, SystemRegistry};
 use eve_db::lock_rank::{
-    held_lock_ranks, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK, RANK_WORLD_INNER,
+    held_lock_ranks, RankedMutex, RankedRwLock, RANK_SERVICE_STATE, RANK_WORLD_INNER,
 };
 use eve_db::sqlite_store::system_checkpoint::{
     current_unix_secs, ensure_system_checkpoint_schema, load_all_checkpoints_for_kind,
@@ -83,6 +82,7 @@ pub(in crate::system_actor) struct CooldownPersistGateState {
     pub in_flight_loading_transitions: Vec<PendingCooldownTransition>,
     pub pending_transitions: Vec<PendingCooldownTransition>,
     pub boot_raw_cooldowns: HashMap<(i64, i64, u32), (f64, f64)>,
+    pub shutdown_tidi_mode: Option<(f64, bool)>,
 }
 
 /// Per-system SQLite persistence serializer with monotonic `(epoch, seq)` guard and
@@ -153,6 +153,15 @@ impl CooldownPersistGate {
 
     pub fn has_pending_transitions(&self) -> bool {
         self.has_pending_transitions.load(Ordering::Acquire)
+    }
+
+    pub(in crate::system_actor) fn record_shutdown_tidi_mode(
+        &self,
+        tidi: f64,
+        has_tidi_history: bool,
+    ) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.shutdown_tidi_mode = Some((tidi, has_tidi_history));
     }
 
     pub(in crate::system_actor) fn take_all_pending_transitions(
@@ -339,7 +348,9 @@ pub(crate) fn serialize_module_cooldown_rows(cooldowns: &HashMap<(i64, i64, u32)
     sorted.into_iter().map(|(k @ (ship_id, mod_id, mod_tid), entry)| (module_cooldown_checkpoint_key(ship_id, mod_id, mod_tid), (k, entry))).collect()
 }
 
-fn can_write_sqlite_safely() -> bool { !held_lock_ranks().iter().any(|&r| r >= RANK_WORLD_INNER) }
+pub(in crate::system_actor) fn can_write_sqlite_safely() -> bool {
+    !held_lock_ranks().iter().any(|&r| r >= RANK_WORLD_INNER)
+}
 
 fn persist_module_cooldowns_rows_in_db(db: &WorldRepository, solar_system_id: SolarSystemId, rows: &[ModuleCooldownCheckpointRow]) -> bool {
     if !can_write_sqlite_safely() { return false; }
@@ -591,32 +602,6 @@ pub(crate) fn persist_cooldown_payload_with_gate_in_db(
         boot_db_pending_merge: payload.boot_db_pending_merge,
         merged_from_db,
     })
-}
-
-pub(in crate::system_actor) fn publish_ballpark_view(bp: &BallparkHandle) {
-    if held_lock_ranks().iter().any(|&r| r >= RANK_BALLPARK) {
-        return;
-    }
-    let guard = bp.inner.read().unwrap_or_else(|e| e.into_inner());
-    let tidi = clamp_tidi_factor_bits(&bp.tidi_factor_bits);
-    let prev = { bp.view_tx.borrow().clone() };
-    let actor_st_arc = bp
-        .actor_state
-        .get()
-        .and_then(|weak| weak.upgrade())
-        .filter(|_| !held_lock_ranks().iter().any(|&r| r >= RANK_ACTOR_STATE));
-    let actor_st_guard = actor_st_arc
-        .as_ref()
-        .map(|st_lock| st_lock.read().unwrap_or_else(|e| e.into_inner()));
-    let next = SystemView::from_ballpark(
-        &guard,
-        actor_st_guard.as_deref(),
-        tidi,
-        Some(prev.as_ref()),
-    );
-    drop(actor_st_guard);
-    drop(guard);
-    let _ = bp.view_tx.send(Arc::new(next));
 }
 
 pub(crate) fn find_all_cold_module_cooldown_entries_in_db(
@@ -1367,37 +1352,124 @@ impl SystemRegistry {
     }
 }
 
+fn resolve_actor_fallback_tidi_mode(
+    cluster_nodes: &RankedRwLock<super::ClusterNodeRegistry, RANK_SERVICE_STATE>,
+    db_opt: Option<&WorldRepository>,
+    gate: &CooldownPersistGate,
+    solar_system_id: SolarSystemId,
+) -> (f64, bool) {
+    let held_svc = held_lock_ranks()
+        .iter()
+        .any(|&r| r >= RANK_SERVICE_STATE);
+    let (manual_override, cn_tidi_hist) = if held_svc {
+        let cn = cluster_nodes
+            .read_unranked()
+            .unwrap_or_else(|e| e.into_inner());
+        (
+            cn.manual_tidi_overrides.get(&solar_system_id).copied(),
+            cn.tidi_history_systems.contains(&solar_system_id),
+        )
+    } else {
+        let cn = cluster_nodes.read().unwrap_or_else(|e| e.into_inner());
+        (
+            cn.manual_tidi_overrides.get(&solar_system_id).copied(),
+            cn.tidi_history_systems.contains(&solar_system_id),
+        )
+    };
+    let db_tidi = manual_override
+        .or_else(|| {
+            if !held_lock_ranks().iter().any(|&r| r >= RANK_WORLD_INNER) {
+                db_opt.and_then(|db| {
+                    db.with_snapshot(|snap| {
+                        let nid = -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
+                        snap.owner_notes
+                            .get(&nid)
+                            .and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
+                    })
+                })
+            } else {
+                None
+            }
+        })
+        .filter(|v| v.is_finite())
+        .unwrap_or(1.0)
+        .clamp(0.10, 1.0);
+    let has_tidi_history = db_tidi < 0.999_999 || cn_tidi_hist || gate.has_tidi_history();
+    (db_tidi, has_tidi_history)
+}
+
 pub(in crate::system_actor) fn take_stopped_cooldown_persist_payload_in_state(
-    st: &mut SystemActorState, solar_system_id: SolarSystemId, gate: &CooldownPersistGate, eff_tidi: f64, reg_has_tidi_history: bool,
+    st: &mut SystemActorState,
+    solar_system_id: SolarSystemId,
+    gate: &CooldownPersistGate,
+    cluster_nodes: &RankedRwLock<super::ClusterNodeRegistry, RANK_SERVICE_STATE>,
+    captured_tidi: f64,
 ) -> Option<ModuleCooldownPersistPayload> {
-    let gate_has_tidi = gate.has_tidi_history();
-    let drained = { let mut gate_guard = gate.inner.lock().unwrap_or_else(|e| e.into_inner()); gate.take_all_pending_transitions(&mut gate_guard) };
-    let has_tidi_history = st.has_tidi_history || gate_has_tidi || eff_tidi < 0.999_999 || reg_has_tidi_history;
-    let applied_transitions = apply_pending_transitions_to_actor_state(solar_system_id, st, eff_tidi, has_tidi_history, drained);
+    let (shutdown_tidi_opt, gate_has_tidi, drained) = {
+        let mut gate_guard = gate.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(
+            gate_guard.phase,
+            CooldownGatePhase::Live | CooldownGatePhase::Stopping
+        ) || st.module_cooldown_persist_epoch != gate.current_epoch()
+        {
+            return None;
+        }
+        let shutdown_tidi_opt = gate_guard.shutdown_tidi_mode.take();
+        let gate_has_tidi = gate.has_tidi_history();
+        let drained = gate.take_all_pending_transitions(&mut gate_guard);
+        (shutdown_tidi_opt, gate_has_tidi, drained)
+    };
+    let (reg_tidi, reg_has_tidi_history) = shutdown_tidi_opt.unwrap_or_else(|| {
+        resolve_actor_fallback_tidi_mode(
+            cluster_nodes,
+            st.db_opt.as_deref(),
+            gate,
+            solar_system_id,
+        )
+    });
+    let eff_tidi = if captured_tidi.is_finite() && captured_tidi < 0.999_999 {
+        captured_tidi.clamp(0.10, 1.0)
+    } else {
+        reg_tidi
+    };
+    let has_tidi_history =
+        st.has_tidi_history || gate_has_tidi || eff_tidi < 0.999_999 || reg_has_tidi_history;
+    let applied_transitions = apply_pending_transitions_to_actor_state(
+        solar_system_id,
+        st,
+        eff_tidi,
+        has_tidi_history,
+        drained,
+    );
     let has_entries = !st.module_cooldowns.reactivation_cooldowns.is_empty();
-    if !st.module_cooldown_checkpoint_dirty && !has_entries && !applied_transitions { return None; }
+    if !st.module_cooldown_checkpoint_dirty && !has_entries && !applied_transitions {
+        return None;
+    }
     let final_tidi_hist = has_tidi_history || st.has_tidi_history;
-    let now_unix_f64 = st.db_opt.as_ref().map(|db| db.clock().now_unix_secs() as f64).unwrap_or(0.0);
+    let now_unix_f64 = st
+        .db_opt
+        .as_ref()
+        .map(|db| db.clock().now_unix_secs() as f64)
+        .unwrap_or(0.0);
     if has_entries {
-        rebase_module_cooldowns_on_stop_in_state(&mut st.module_cooldowns, solar_system_id, now_unix_f64, st.sim_elapsed_secs, eff_tidi, final_tidi_hist);
+        rebase_module_cooldowns_on_stop_in_state(
+            &mut st.module_cooldowns,
+            solar_system_id,
+            now_unix_f64,
+            st.sim_elapsed_secs,
+            eff_tidi,
+            final_tidi_hist,
+        );
         st.module_cooldown_checkpoint_seq = st.module_cooldown_checkpoint_seq.saturating_add(1);
     }
-    Some(build_persist_payload_from_actor_state(st, eff_tidi, final_tidi_hist))
+    Some(build_persist_payload_from_actor_state(
+        st,
+        eff_tidi,
+        final_tidi_hist,
+    ))
 }
 
 impl SystemRegistry {
-    /// Flushes `actor_state`'s module cooldowns plus any `Stopping` gate transitions after
-    /// `cmd_tx.closed()` using the captured pre-drop `tidi_factor` (`G1A-R3-P1-01`).
-    pub(in crate::system_actor) fn flush_stopped_actor_module_cooldowns(&self, solar_system_id: SolarSystemId, actor_state: &RankedRwLock<SystemActorState, RANK_ACTOR_STATE>, captured_tidi_factor: f64) {
-        if solar_system_id == 0 { return; }
-        let (reg_tidi, reg_has_tidi_history) = self.resolve_effective_tidi_mode(solar_system_id, true);
-        let eff_tidi = if captured_tidi_factor.is_finite() && captured_tidi_factor < 0.999_999 { captured_tidi_factor.clamp(0.10, 1.0) } else { reg_tidi };
-        let gate = self.cooldown_persist_gate(solar_system_id);
-        if let Some(payload) = SystemHandle::take_stopped_cooldown_persist_payload(actor_state, solar_system_id, &gate, eff_tidi, reg_has_tidi_history) {
-            let _ = persist_cooldown_payload_with_gate_in_db(solar_system_id, &gate, payload);
-        }
-    }
-
     /// Dispatches a cooldown mutation to `solar_system_id`, whether `Live`, `Loading`,
     /// `Stopping`, or `Cold` (`G1A-R3-P1-02`).
     pub(in crate::system_actor) fn apply_cooldown_op_to_system(
@@ -1607,7 +1679,7 @@ impl SystemRegistry {
         }
     }
 
-    /// Checks a module's sim-clock reload deadline lock-free from [`SystemView`] (`#1081`, `#1541`).
+    /// Checks a module's sim-clock reload deadline lock-free from [`super::SystemView`] (`#1081`, `#1541`).
     pub fn check_module_reload_sim_deadline(&self, module_id: i64) -> Option<(SolarSystemId, f64, f64)> {
         for (sys_id, handle) in self.active_system_handles() {
             if let Some(d) = handle.view().module_reload_sim_deadline(module_id) { return Some((sys_id, d.sim_start_s, d.sim_deadline_s)); }

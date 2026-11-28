@@ -212,8 +212,22 @@ impl Drop for BallparkWriteGuard<'_> {
         drop(actor_st_guard);
         // Release RANK_BALLPARK and pop its thread-local held rank before sending on the watch channel.
         drop(guard);
-        let _ = self.view_tx.send(Arc::new(next));
+        send_view_preserving_atomic_tidi(&self.view_tx, &self.tidi_factor_bits, next);
     }
+}
+
+/// Publishes a [`super::SystemView`] snapshot while ensuring `tidi_factor` reflects the latest
+/// lock-free `tidi_factor_bits` inside the watch lock so concurrent `set_tidi_factor_raw` updates
+/// cannot be overwritten by an older snapshot.
+pub(in crate::system_actor) fn send_view_preserving_atomic_tidi(
+    view_tx: &tokio::sync::watch::Sender<Arc<super::SystemView>>,
+    tidi_factor_bits: &std::sync::atomic::AtomicU64,
+    mut next: super::SystemView,
+) {
+    view_tx.send_modify(|v| {
+        next.tidi_factor = clamp_tidi_factor_bits(tidi_factor_bits);
+        *v = Arc::new(next);
+    });
 }
 
 /// Rank-checked `Ballpark` lock wrapper that automatically refreshes the published
@@ -332,60 +346,21 @@ impl SystemHandle {
         self.view_rx.borrow().clone()
     }
 
-    pub(in crate::system_actor) fn take_stopped_cooldown_persist_payload(
-        actor_state: &RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>,
-        solar_system_id: SolarSystemId,
-        gate: &super::CooldownPersistGate,
-        eff_tidi: f64,
-        reg_has_tidi_history: bool,
-    ) -> Option<super::module_cooldowns::ModuleCooldownPersistPayload> {
-        let mut st = actor_state.write().unwrap_or_else(|e| e.into_inner());
-        super::module_cooldowns::take_stopped_cooldown_persist_payload_in_state(
-            &mut st, solar_system_id, gate, eff_tidi, reg_has_tidi_history,
-        )
-    }
-
     pub(in crate::system_actor) fn has_in_flight_post_unlock(&self) -> bool {
         self.post_unlock_in_flight
             .load(std::sync::atomic::Ordering::SeqCst)
             > 0
     }
 
-    /// Publishes a fresh [`super::SystemView`] by reading `ballpark` (and `actor_state`
-    /// when rank-safe). Callers that already hold a `ballpark` guard must call
-    /// [`Self::publish_view_from`] instead to avoid self-deadlocking.
-    #[allow(dead_code)] // Follow-up `cycles.rs` sync helpers (deferred on lock) & Track 2 callers call this (#1342).
-    pub(crate) fn publish_view(&self) {
-        super::module_cooldowns::publish_ballpark_view(&self.ballpark);
-    }
-
-    /// Publishes a fresh [`super::SystemView`] from an already-locked `ballpark` (and
-    /// optional `actor_state`). When `actor_state` is `None`, reads `self.actor_state`
-    /// non-blockingly if rank-safe, otherwise preserves prior active-module flags.
+    /// Publishes a fresh [`super::SystemView`] from an already-locked `ballpark` and `actor_state`.
     pub(crate) fn publish_view_from(
         &self,
         ballpark: &Ballpark,
-        actor_state: Option<&super::SystemActorState>,
+        actor_state: &super::SystemActorState,
     ) {
         let tidi = self.tidi_factor();
-        let prev = { self.view_rx.borrow().clone() };
-        let next = if actor_state.is_some() {
-            super::SystemView::from_ballpark(ballpark, actor_state, tidi, Some(prev.as_ref()))
-        } else if !eve_db::lock_rank::held_lock_ranks()
-            .iter()
-            .any(|&r| r >= eve_db::lock_rank::RANK_ACTOR_STATE)
-        {
-            let actor_st_guard = try_read_recover_poison(&self.actor_state);
-            super::SystemView::from_ballpark(
-                ballpark,
-                actor_st_guard.as_deref(),
-                tidi,
-                Some(prev.as_ref()),
-            )
-        } else {
-            super::SystemView::from_ballpark(ballpark, None, tidi, Some(prev.as_ref()))
-        };
-        let _ = self.view_tx.send(Arc::new(next));
+        let next = super::SystemView::from_ballpark(ballpark, Some(actor_state), tidi, None);
+        send_view_preserving_atomic_tidi(&self.view_tx, &self.tidi_factor_bits, next);
     }
 
     #[track_caller]
@@ -1066,14 +1041,17 @@ impl SystemHandle {
         if clamped < 0.999_999 {
             self.cooldown_persist_gate.mark_tidi_history();
         }
-        if (clamped - prev_clamped).abs() > f64::EPSILON
-            && !eve_db::lock_rank::held_lock_ranks()
-                .iter()
-                .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
-        {
-            if let Some(bp) = try_read_recover_poison(&self.ballpark) {
-                self.publish_view_from(&bp, None);
-            }
+        if (clamped - prev_clamped).abs() > f64::EPSILON {
+            self.view_tx.send_if_modified(|v| {
+                let latest = clamp_tidi_factor_bits(&self.tidi_factor_bits);
+                if (v.tidi_factor - latest).abs() <= f64::EPSILON {
+                    return false;
+                }
+                let mut next = (**v).clone();
+                next.tidi_factor = latest;
+                *v = Arc::new(next);
+                true
+            });
         }
         prev_clamped
     }
@@ -1626,13 +1604,7 @@ impl SystemHandle {
         };
         if let Some(ref entries) = output.condition_checkpoint {
             if !entries.is_empty() && !worker_alive {
-                let db_opt = self
-                    .actor_state
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .db_opt
-                    .clone();
-                if let Some(ref db) = db_opt {
+                if let Some(ref db) = self.fighter_ctx.db_opt {
                     let _ = crate::sp6_lifecycle::apply_condition_checkpoint_for_system_in_db(
                         db,
                         self.solar_system_id,
@@ -2335,6 +2307,7 @@ pub struct SystemHandle {
     pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<super::PostUnlockHookAction>, RANK_LEAF>>,
     pub(in crate::system_actor) actor_flush_thread:
         Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
+    pub(in crate::system_actor) published_live: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) cooldown_persist_gate: Arc<super::CooldownPersistGate>,
 }
 

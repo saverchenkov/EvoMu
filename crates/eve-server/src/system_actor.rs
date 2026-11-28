@@ -299,17 +299,10 @@ fn flush_post_unlock_actions_on_actor(
 fn build_next_system_view(
     ballpark: &Ballpark,
     actor_st: &SystemActorState,
-    view_tx: &tokio::sync::watch::Sender<Arc<SystemView>>,
     tidi_factor_bits: &std::sync::atomic::AtomicU64,
-) -> Arc<SystemView> {
+) -> SystemView {
     let cur_tidi = celestials::clamp_tidi_factor_bits(tidi_factor_bits);
-    let prev_view = { view_tx.borrow().clone() };
-    Arc::new(SystemView::from_ballpark(
-        ballpark,
-        Some(actor_st),
-        cur_tidi,
-        Some(prev_view.as_ref()),
-    ))
+    SystemView::from_ballpark(ballpark, Some(actor_st), cur_tidi, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -323,9 +316,8 @@ fn finalize_reader_facing_end_of_command(
     cooldown_persist_gate: &Arc<CooldownPersistGate>,
     cmd_tx_weak: &tokio::sync::mpsc::WeakSender<SystemCommand>,
     tidi_factor_bits: &std::sync::atomic::AtomicU64,
-    view_tx: &tokio::sync::watch::Sender<Arc<SystemView>>,
     always_build_view: bool,
-) -> (bool, Option<Arc<SystemView>>) {
+) -> (bool, Option<SystemView>) {
     let post_tidi_cmd = celestials::clamp_tidi_factor_bits(tidi_factor_bits);
     let had_deact_hook = cmd_post_unlock_ops.has_deactivation_hook();
     let mut_flag = ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
@@ -339,7 +331,7 @@ fn finalize_reader_facing_end_of_command(
         post_tidi_cmd,
     );
     let view_opt = (always_build_view || mut_flag || had_deact_hook)
-        .then(|| build_next_system_view(ballpark, actor_st, view_tx, tidi_factor_bits));
+        .then(|| build_next_system_view(ballpark, actor_st, tidi_factor_bits));
     (mut_flag, view_opt)
 }
 
@@ -389,13 +381,12 @@ fn recover_reader_facing_state_after_panic(
             cooldown_persist_gate,
             cmd_tx_weak,
             tidi_factor_bits,
-            view_tx,
             true,
         )
         .1
         .expect("always_build_view=true must produce a SystemView")
     };
-    let _ = view_tx.send(next_view);
+    celestials::send_view_preserving_atomic_tidi(view_tx, tidi_factor_bits, next_view);
 }
 
 #[derive(Clone, Debug)]
@@ -475,7 +466,7 @@ pub struct SystemRegistry {
     pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
     pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     notify_tx_opt: Option<broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
-    pub cluster_nodes: RankedRwLock<ClusterNodeRegistry, RANK_SERVICE_STATE>,
+    pub cluster_nodes: Arc<RankedRwLock<ClusterNodeRegistry, RANK_SERVICE_STATE>>,
     pub(in crate::system_actor) fighter_persist: Arc<fighters_persistence::FighterPersistCoord>,
     /// When true, stargates whose destination solar system is not yet loaded start as `CLOSED (0)`
     /// (`#1080`) and transition `CLOSED -> ACTIVATING -> OPEN` once destination loads.
@@ -762,12 +753,7 @@ impl<'a> post_unlock::DirectActorCallbackExecutor for ActorCallbackState<'a> {
                     cur_tidi,
                 );
                 let next_view_opt = mutated.then(|| {
-                    build_next_system_view(
-                        bp,
-                        actor_st,
-                        self.view_tx_actor,
-                        self.tidi_factor_bits_actor,
-                    )
+                    build_next_system_view(bp, actor_st, self.tidi_factor_bits_actor)
                 });
                 let cooldown_hooks = ops
                     .intents
@@ -781,7 +767,11 @@ impl<'a> post_unlock::DirectActorCallbackExecutor for ActorCallbackState<'a> {
             })?;
         if mutated {
             if let Some(next_view) = next_view_opt {
-                let _ = self.view_tx_actor.send(next_view);
+                celestials::send_view_preserving_atomic_tidi(
+                    self.view_tx_actor,
+                    self.tidi_factor_bits_actor,
+                    next_view,
+                );
             }
         }
         Some(cooldown_hooks)
@@ -817,14 +807,13 @@ impl<'a> post_unlock::DirectActorCallbackExecutor for ActorCallbackState<'a> {
                 bp,
                 self.event_tx_actor.receiver_count(),
             );
-            build_next_system_view(
-                bp,
-                actor_st,
-                self.view_tx_actor,
-                self.tidi_factor_bits_actor,
-            )
+            build_next_system_view(bp, actor_st, self.tidi_factor_bits_actor)
         })?;
-        let _ = self.view_tx_actor.send(next_view);
+        celestials::send_view_preserving_atomic_tidi(
+            self.view_tx_actor,
+            self.tidi_factor_bits_actor,
+            next_view,
+        );
         Some(())
     }
 
@@ -874,15 +863,14 @@ impl<'a> post_unlock::DirectActorCallbackExecutor for ActorCallbackState<'a> {
                 bp,
                 self.event_tx_actor.receiver_count(),
             );
-            let next_view = build_next_system_view(
-                bp,
-                actor_st,
-                self.view_tx_actor,
-                self.tidi_factor_bits_actor,
-            );
+            let next_view = build_next_system_view(bp, actor_st, self.tidi_factor_bits_actor);
             (cleanup_ops, next_view)
         })?;
-        let _ = self.view_tx_actor.send(next_view);
+        celestials::send_view_preserving_atomic_tidi(
+            self.view_tx_actor,
+            self.tidi_factor_bits_actor,
+            next_view,
+        );
         Some(cleanup_ops)
     }
 
@@ -933,7 +921,7 @@ impl SystemRegistry {
             tactical_state: Arc::new(RankedRwLock::new(Default::default())),
             pending_notifications_opt: None,
             notify_tx_opt: None,
-            cluster_nodes: RankedRwLock::new(ClusterNodeRegistry::default()),
+            cluster_nodes: Arc::new(RankedRwLock::new(ClusterNodeRegistry::default())),
             fighter_persist: Arc::new(fighters_persistence::FighterPersistCoord::default()),
             lazy_stargate_activation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unrebased_clock_offset_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1751,6 +1739,8 @@ impl SystemRegistry {
             Arc::clone(&tidi_factor_bits),
         ));
         ballpark_shared.attach_drone_hydration(initial_actor_state.drone_hydration.clone());
+        let fighters_needs_sqlite_hydration = initial_actor_state.fighters_needs_sqlite_hydration;
+        let fighters_dirty_stamp = Arc::clone(&initial_actor_state.fighters_dirty_stamp);
         let actor_state_shared: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>> =
             Arc::new(RankedRwLock::new(initial_actor_state));
         ballpark_shared.attach_actor_state(&actor_state_shared);
@@ -1774,6 +1764,8 @@ impl SystemRegistry {
             view_rx,
             ballpark_shared,
             actor_state_shared,
+            fighters_needs_sqlite_hydration,
+            fighters_dirty_stamp,
             initial_post_unlock_ops,
             staged_claims,
         })
@@ -1789,7 +1781,9 @@ impl SystemRegistry {
             committed_warp_balls, warp_stopped_at, active_module_ships, hibernated,
             hibernated_since_unix, idle_ticks, dynamic_ball_count, pending_destroyed_balls,
             broadcast_seq_gate_actor, tidi_factor_bits, view_tx, view_rx,
-            ballpark_shared, actor_state_shared, initial_post_unlock_ops, staged_claims: _,
+            ballpark_shared, actor_state_shared,
+            fighters_needs_sqlite_hydration, fighters_dirty_stamp,
+            initial_post_unlock_ops, staged_claims: _,
         } = prepared;
         let (ct_driver, actor_rt_handle, ct_sentinel) = match rt_handle.runtime_flavor() {
             tokio::runtime::RuntimeFlavor::CurrentThread => {
@@ -1835,6 +1829,9 @@ impl SystemRegistry {
         let actor_flush_thread_actor = Arc::clone(&actor_flush_thread);
         let cooldown_persist_gate_actor = self.cooldown_persist_gate(solar_system_id);
         let post_unlock_actions_for_handle = Arc::clone(&post_unlock_actions_actor);
+        let published_live = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let published_live_actor = Arc::clone(&published_live);
+        let cluster_nodes_actor = Arc::clone(&self.cluster_nodes);
         let cooldown_persist_gate_for_handle = Arc::clone(&cooldown_persist_gate_actor);
         let ball_positions_actor = ball_positions.clone();
         let scrambled_balls_actor = scrambled_balls.clone();
@@ -1936,6 +1933,68 @@ impl SystemRegistry {
             Some((rx, done_tx, exited)) => (Some(rx), ActorExitGuard(Some((done_tx, exited)))),
             None => (None, ActorExitGuard(None)),
         };
+        struct ActorShutdownCooldownInner {
+            solar_system_id: SolarSystemId,
+            published_live: Arc<std::sync::atomic::AtomicBool>,
+            actor_state_actor: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
+            tidi_factor_bits_actor: Arc<std::sync::atomic::AtomicU64>,
+            cooldown_persist_gate_actor: Arc<CooldownPersistGate>,
+            cluster_nodes_actor: Arc<RankedRwLock<ClusterNodeRegistry, RANK_SERVICE_STATE>>,
+        }
+
+        struct ActorShutdownCooldownGuard(Option<ActorShutdownCooldownInner>);
+
+        impl ActorShutdownCooldownGuard {
+            fn flush_now(&mut self) {
+                let Some(inner) = self.0.take() else {
+                    return;
+                };
+                if inner.solar_system_id == 0
+                    || !inner.published_live.load(std::sync::atomic::Ordering::Acquire)
+                    || !module_cooldowns::can_write_sqlite_safely()
+                    || held_lock_ranks().iter().any(|&r| r >= RANK_ACTOR_STATE)
+                {
+                    return;
+                }
+                let captured_tidi =
+                    celestials::clamp_tidi_factor_bits(&inner.tidi_factor_bits_actor);
+                let payload_opt = {
+                    let mut st = inner
+                        .actor_state_actor
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
+                    module_cooldowns::take_stopped_cooldown_persist_payload_in_state(
+                        &mut st,
+                        inner.solar_system_id,
+                        &inner.cooldown_persist_gate_actor,
+                        &inner.cluster_nodes_actor,
+                        captured_tidi,
+                    )
+                };
+                if let Some(payload) = payload_opt {
+                    let _ = module_cooldowns::persist_cooldown_payload_with_gate_in_db(
+                        inner.solar_system_id,
+                        &inner.cooldown_persist_gate_actor,
+                        payload,
+                    );
+                }
+            }
+        }
+
+        impl Drop for ActorShutdownCooldownGuard {
+            fn drop(&mut self) {
+                self.flush_now();
+            }
+        }
+
+        let shutdown_cooldown_guard = ActorShutdownCooldownGuard(Some(ActorShutdownCooldownInner {
+            solar_system_id,
+            published_live: published_live_actor,
+            actor_state_actor: Arc::clone(&actor_state_actor),
+            tidi_factor_bits_actor: Arc::clone(&tidi_factor_bits_actor),
+            cooldown_persist_gate_actor: Arc::clone(&cooldown_persist_gate_actor),
+            cluster_nodes_actor,
+        }));
         let drone_hydration_actor = ballpark_shared.drone_hydration_shared().cloned().unwrap_or_default();
         actor_rt_handle.spawn(async move {
             let _actor_exit_guard = actor_exit_guard;
@@ -1943,6 +2002,7 @@ impl SystemRegistry {
             let mut post_unlock_tx_opt = post_unlock_shutdown;
             let mut shutdown_reply = ShutdownReplyGuard(None);
             let mut cmd_rx = cmd_rx;
+            let mut shutdown_cooldown_guard = shutdown_cooldown_guard;
             let (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor) =
                 (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor);
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
@@ -2836,11 +2896,14 @@ impl SystemRegistry {
                         &cooldown_persist_gate_actor,
                         &cmd_tx_weak_actor,
                         &tidi_factor_bits_actor,
-                        &view_tx_actor,
                         false,
                     );
                     if let Some(next_view) = next_view_opt {
-                        let _ = view_tx_actor.send(next_view);
+                        celestials::send_view_preserving_atomic_tidi(
+                            &view_tx_actor,
+                            &tidi_factor_bits_actor,
+                            next_view,
+                        );
                     }
                     mut_flag
                 };
@@ -2921,14 +2984,13 @@ impl SystemRegistry {
                     let next_view = {
                         let ballpark = ballpark_actor.read().unwrap_or_else(|e| e.into_inner());
                         let actor_st = actor_state_actor.read().unwrap_or_else(|e| e.into_inner());
-                        build_next_system_view(
-                            &ballpark,
-                            &actor_st,
-                            &view_tx_actor,
-                            &tidi_factor_bits_actor,
-                        )
+                        build_next_system_view(&ballpark, &actor_st, &tidi_factor_bits_actor)
                     };
-                    let _ = view_tx_actor.send(next_view);
+                    celestials::send_view_preserving_atomic_tidi(
+                        &view_tx_actor,
+                        &tidi_factor_bits_actor,
+                        next_view,
+                    );
                 }
                 weapon_effects::flush_actor_weapon_effects(
                     solar_system_id, &ballpark_actor, &actor_state_actor, &view_tx_actor,
@@ -3124,6 +3186,13 @@ impl SystemRegistry {
                 );
             }
             flush_actor_active_drones(true);
+            flush_post_unlock_actions_on_actor(
+                &post_unlock_actions_actor,
+                &actor_flush_thread_actor,
+                solar_system_id,
+                &command_panics_actor,
+            );
+            shutdown_cooldown_guard.flush_now();
             let leftover_post_unlock_actions = {
                 let mut actions = post_unlock_actions_actor.lock().unwrap_or_else(|e| e.into_inner());
                 std::mem::take(&mut *actions)
@@ -3134,12 +3203,10 @@ impl SystemRegistry {
             drop((cmd_rx, shutdown_reply));
         });
 
-        let (fighters_needs_hydration, dirty_stamp) = {
-            let st = actor_state_shared.read().unwrap_or_else(|e| e.into_inner());
-            (Arc::new(std::sync::atomic::AtomicBool::new(st.fighters_needs_sqlite_hydration)), Arc::clone(&st.fighters_dirty_stamp))
-        };
+        let fighters_needs_hydration =
+            Arc::new(std::sync::atomic::AtomicBool::new(fighters_needs_sqlite_hydration));
         let fighter_ctx = Arc::new(fighters_persistence::FighterHandleCtx {
-            dirty_stamp, persist: Arc::clone(&self.fighter_persist), db_opt: self.db.clone(), sde_opt: self.sde.clone(),
+            dirty_stamp: fighters_dirty_stamp, persist: Arc::clone(&self.fighter_persist), db_opt: self.db.clone(), sde_opt: self.sde.clone(),
         });
         let handle = SystemHandle {
             solar_system_id, cmd_tx,
@@ -3163,6 +3230,7 @@ impl SystemRegistry {
             system_step_hook: Arc::clone(&self.system_step_hook),
             post_unlock_actions: post_unlock_actions_for_handle,
             actor_flush_thread,
+            published_live,
             cooldown_persist_gate: cooldown_persist_gate_for_handle,
         };
         (handle, lazy_gates)

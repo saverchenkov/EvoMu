@@ -1138,15 +1138,13 @@ pub(in crate::system_actor) fn flush_actor_weapon_effects(
         );
         if st.weapon_effects_needs_sqlite_hydration {
             let _ = merge_loaded_weapon_effects_in_state(&mut st, solar_system_id, loaded);
-            celestials::update_system_hibernation_flag(&mut st, &bp, active_subscribers);
-            let prev_view = view_tx_actor.borrow().clone();
-            let cur_tidi = celestials::clamp_tidi_factor_bits(tidi_factor_bits_actor);
-            let _ = view_tx_actor.send(Arc::new(SystemView::from_ballpark(
+            publish_weapon_effects_view(
                 &bp,
-                Some(&st),
-                cur_tidi,
-                Some(prev_view.as_ref()),
-            )));
+                &st,
+                view_tx_actor,
+                tidi_factor_bits_actor,
+                active_subscribers,
+            );
         }
     }
     let (op_opt, db_arc_opt, already_flushed) = {
@@ -1176,19 +1174,17 @@ pub(in crate::system_actor) fn flush_actor_weapon_effects(
         }
     };
     if already_flushed {
-        let (bp, mut st) = (
+        let (bp, st) = (
             ballpark_actor.read().unwrap_or_else(|e| e.into_inner()),
-            actor_state_actor.write().unwrap_or_else(|e| e.into_inner()),
+            actor_state_actor.read().unwrap_or_else(|e| e.into_inner()),
         );
-        celestials::update_system_hibernation_flag(&mut st, &bp, active_subscribers);
-        let prev_view = view_tx_actor.borrow().clone();
-        let cur_tidi = celestials::clamp_tidi_factor_bits(tidi_factor_bits_actor);
-        let _ = view_tx_actor.send(Arc::new(SystemView::from_ballpark(
+        publish_weapon_effects_view(
             &bp,
-            Some(&st),
-            cur_tidi,
-            Some(prev_view.as_ref()),
-        )));
+            &st,
+            view_tx_actor,
+            tidi_factor_bits_actor,
+            active_subscribers,
+        );
         return;
     }
     let Some(op) = op_opt else {
@@ -1246,16 +1242,27 @@ pub(in crate::system_actor) fn flush_actor_weapon_effects(
             st.weapon_effects_dirty = false;
             st.weapon_effects_coord.dirty.store(false, Ordering::Release);
         }
-        celestials::update_system_hibernation_flag(&mut st, &bp, active_subscribers);
-        let prev_view = view_tx_actor.borrow().clone();
-        let cur_tidi = celestials::clamp_tidi_factor_bits(tidi_factor_bits_actor);
-        let _ = view_tx_actor.send(Arc::new(SystemView::from_ballpark(
+        publish_weapon_effects_view(
             &bp,
-            Some(&st),
-            cur_tidi,
-            Some(prev_view.as_ref()),
-        )));
+            &st,
+            view_tx_actor,
+            tidi_factor_bits_actor,
+            active_subscribers,
+        );
     }
+}
+
+fn publish_weapon_effects_view(
+    bp: &eve_destiny::Ballpark,
+    st: &SystemActorState,
+    view_tx_actor: &tokio::sync::watch::Sender<Arc<SystemView>>,
+    tidi_factor_bits_actor: &std::sync::atomic::AtomicU64,
+    active_subscribers: usize,
+) {
+    celestials::update_system_hibernation_flag(st, bp, active_subscribers);
+    let cur_tidi = celestials::clamp_tidi_factor_bits(tidi_factor_bits_actor);
+    let next = SystemView::from_ballpark(bp, Some(st), cur_tidi, None);
+    celestials::send_view_preserving_atomic_tidi(view_tx_actor, tidi_factor_bits_actor, next);
 }
 
 fn upsert_entropic_spool_activation_in_state(

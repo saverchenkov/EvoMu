@@ -41,6 +41,7 @@ pub(in crate::system_actor) struct TickEnvRefs<'a> {
     pub(in crate::system_actor) cmd_tx_weak: Option<tokio::sync::mpsc::WeakSender<SystemCommand>>,
     pub(in crate::system_actor) pending_destroyed_balls: &'a PendingDestroyedOutbox,
     pub(in crate::system_actor) cooldown_persist_gate: &'a Arc<CooldownPersistGate>,
+    pub(in crate::system_actor) tidi_factor_bits: &'a std::sync::atomic::AtomicU64,
     pub(in crate::system_actor) view_tx: &'a watch::Sender<Arc<SystemView>>,
 }
 
@@ -73,6 +74,7 @@ impl<'a> TickEnvRefs<'a> {
             cmd_tx_weak: Some(exec_ctx.cmd_tx_weak.clone()),
             pending_destroyed_balls: exec_ctx.pending_destroyed_actor,
             cooldown_persist_gate: exec_ctx.cooldown_persist_gate_actor,
+            tidi_factor_bits: exec_ctx.tidi_factor_bits_actor,
             view_tx: exec_ctx.view_tx_actor,
         };
         (
@@ -115,6 +117,7 @@ impl<'a> TickEnvRefs<'a> {
             cmd_tx_weak: Some(handle.cmd_tx.downgrade()),
             pending_destroyed_balls: &handle.pending_destroyed_balls,
             cooldown_persist_gate: &handle.cooldown_persist_gate,
+            tidi_factor_bits: &handle.tidi_factor_bits,
             view_tx: &handle.view_tx,
         }
     }
@@ -145,10 +148,15 @@ fn defer_opt_reply<T: Send + 'static>(
     }
 }
 
-fn publish_view_snapshot(view_tx: &watch::Sender<Arc<SystemView>>, bp: &Ballpark, st: &SystemActorState, tidi: f64) {
-    let prev = view_tx.borrow().clone();
-    let next = SystemView::from_ballpark(bp, Some(st), tidi, Some(prev.as_ref()));
-    let _ = view_tx.send(Arc::new(next));
+fn publish_view_snapshot(
+    view_tx: &watch::Sender<Arc<SystemView>>,
+    tidi_factor_bits: &std::sync::atomic::AtomicU64,
+    bp: &Ballpark,
+    st: &SystemActorState,
+    tidi: f64,
+) {
+    let next = SystemView::from_ballpark(bp, Some(st), tidi, None);
+    celestials::send_view_preserving_atomic_tidi(view_tx, tidi_factor_bits, next);
 }
 
 pub(in crate::system_actor) fn refresh_stargate_activation_in_ctx(
@@ -588,7 +596,7 @@ pub(in crate::system_actor) fn step_manual_in_ctx(
     super::clear_landed_warp_tracking_from_events(bp, &events, &mut st.warp_state);
     sync_ball_positions(bp, env.ball_positions, env.scrambled_balls);
     protection::sync_all_protection_registry_in_actor(bp, st);
-    publish_view_snapshot(env.view_tx, bp, st, env.tidi);
+    publish_view_snapshot(env.view_tx, env.tidi_factor_bits, bp, st, env.tidi);
     let fx_floor = env.last_visible_stamp.load(Ordering::Acquire).max(env.last_fx_stamp.load(Ordering::Acquire)).min(u64::from(u32::MAX)) as u32;
     let broadcast = belts::build_tick_broadcast_with_fx_floor(
         env.solar_system_id, bp, events, fx_floor, Some(env.last_visible_stamp), Some(env.last_fx_stamp),
@@ -782,7 +790,7 @@ pub(in crate::system_actor) fn step_full_tick_in_ctx(
     celestials::update_system_hibernation_flag(st, bp, env.event_tx.receiver_count());
     let ops_was_empty = post_unlock_ops.is_empty();
     protection::sync_all_protection_registry_in_actor(bp, st);
-    publish_view_snapshot(env.view_tx, bp, st, env.tidi);
+    publish_view_snapshot(env.view_tx, env.tidi_factor_bits, bp, st, env.tidi);
 
     let fx_floor = env.last_visible_stamp.load(Ordering::Acquire).max(env.last_fx_stamp.load(Ordering::Acquire)).min(u64::from(u32::MAX)) as u32;
     let broadcast = belts::build_tick_broadcast_with_fx_floor(
