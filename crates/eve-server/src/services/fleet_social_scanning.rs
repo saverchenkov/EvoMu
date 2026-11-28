@@ -2056,6 +2056,7 @@ pub(crate) fn emit_signal_tracker_site_removed_with_db(
         };
         for &(cid, uid) in &recips {
             crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+                db.next_notification_seq_id(),
                 Some(pending_notifications),
                 Some(notify_tx),
                 cid,
@@ -2074,6 +2075,7 @@ pub(crate) fn emit_signal_tracker_site_removed_with_db(
         };
         for &(cid, uid) in &recips {
             crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+                db.next_notification_seq_id(),
                 Some(pending_notifications),
                 Some(notify_tx),
                 cid,

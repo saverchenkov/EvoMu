@@ -11,10 +11,9 @@ use crate::router::cache_notifications::{
     assemble_pending_notification, current_dispatch_staging_scope_id,
     current_dispatch_staging_scope_liveness, enqueue_or_stage_pending_batch,
     find_staged_notification_by_seq, insert_before_staged_seq_or_stage, is_active_dispatch_char,
-    next_notification_seq_id, pending_notifications_ptr, push_pending_notification_capped,
-    try_stage_dispatch_notification, with_matching_dispatch_transitioned_chars, NotificationTarget,
-    PendingMachoNotification, MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR,
-    MAX_PENDING_NOTIFICATIONS_PER_CHAR,
+    pending_notifications_ptr, push_pending_notification_capped, try_stage_dispatch_notification,
+    with_matching_dispatch_transitioned_chars, NotificationTarget, PendingMachoNotification,
+    MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR, MAX_PENDING_NOTIFICATIONS_PER_CHAR,
 };
 use crate::router::context::ServerContext;
 use crate::router::delta_projection::{
@@ -458,6 +457,7 @@ fn dispatch_tx_effects(
             .map(|(k, owner_id, _)| (k.clone(), *owner_id));
         for (cid, uid) in recipients {
             let notif = assemble_pending_notification(
+                db.next_notification_seq_id(),
                 cid,
                 uid,
                 &effect.event,
@@ -633,7 +633,11 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                         true
                     })
                     .collect();
-                let materialized = materialize_pending_notifications(filtered, now_ft);
+                let materialized = materialize_pending_notifications(
+                    filtered,
+                    now_ft,
+                    || db.next_notification_seq_id(),
+                );
                 if !materialized.is_empty() {
                     enqueue_or_stage_pending_batch(&*pend, &notify_tx, &materialized);
                     for notif in materialized {
@@ -722,6 +726,7 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                             now_ft,
                             &active_fuel_reserves,
                             db_key,
+                            || db.next_notification_seq_id(),
                         );
                     if !built.covered_industry_monitors.is_empty() {
                         let mut ledger =
@@ -957,6 +962,7 @@ pub(crate) fn try_handle_legacy_account_change_emit(
     for &(cid, uid) in recipients {
         let make_notif = || {
             assemble_pending_notification(
+                ctx.next_notification_seq_id(),
                 cid,
                 uid,
                 "OnAccountChange",
@@ -992,7 +998,7 @@ pub(crate) fn try_handle_legacy_account_change_emit(
                 }
                 if let Some(pos) = latest_pos {
                     let mut notif = make_notif();
-                    let new_tail_seq = next_notification_seq_id();
+                    let new_tail_seq = ctx.next_notification_seq_id();
                     notif.seq_id = latest.seq_id;
                     queue[pos].seq_id = new_tail_seq;
                     insert_before_pos_with_cap(queue, pos, notif.clone());
@@ -1029,6 +1035,7 @@ pub(crate) fn try_handle_legacy_account_change_emit(
                 {
                     let mut notif = make_notif();
                     if let Some(new_tail_seq) = insert_before_staged_seq_or_stage(
+                        &ctx.db,
                         &*ctx.pending_notifications,
                         &ctx.notify_tx,
                         latest.seq_id,

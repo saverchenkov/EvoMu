@@ -671,6 +671,7 @@ fn emit_structure_left_space_and_spawn_drops(
     corp_recips.dedup_by_key(|(cid, _)| *cid);
     for (cid, uid) in &sys_recips {
         emit_typed_target_to_char_with_id_type(
+            ctx.next_notification_seq_id(),
             Some(&ctx.pending_notifications),
             Some(&ctx.notify_tx),
             *cid,
@@ -685,6 +686,7 @@ fn emit_structure_left_space_and_spawn_drops(
     }
     for (cid, uid) in corp_recips {
         emit_typed_target_to_char_with_id_type(
+            ctx.next_notification_seq_id(),
             Some(&ctx.pending_notifications),
             Some(&ctx.notify_tx),
             cid,
@@ -711,6 +713,7 @@ fn emit_structure_left_space_and_spawn_drops(
                     .map(|os| os.user_id)
             });
         emit_typed_target_to_char_with_id_type(
+            ctx.next_notification_seq_id(),
             Some(&ctx.pending_notifications),
             Some(&ctx.notify_tx),
             owner_cid,
@@ -759,6 +762,7 @@ fn emit_structure_left_space_and_spawn_drops(
         for (cid, uid) in &all_recips {
             if is_sov_hub {
                 emit_typed_target_to_char_with_id_type(
+                    ctx.next_notification_seq_id(),
                     Some(&ctx.pending_notifications),
                     Some(&ctx.notify_tx),
                     *cid,
@@ -772,6 +776,7 @@ fn emit_structure_left_space_and_spawn_drops(
                 );
             }
             emit_typed_target_to_char_with_id_type(
+                ctx.next_notification_seq_id(),
                 Some(&ctx.pending_notifications),
                 Some(&ctx.notify_tx),
                 *cid,
@@ -921,6 +926,7 @@ fn push_char_notification<N: TypedNotification>(
     };
     let now_ft = ctx.now_blueos_filetime_ticks();
     emit_typed_target_to_char_with_id_type(
+        ctx.next_notification_seq_id(),
         Some(&ctx.pending_notifications),
         Some(&ctx.notify_tx),
         char_id,

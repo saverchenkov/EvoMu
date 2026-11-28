@@ -397,6 +397,7 @@ pub fn push_dungeon_room_trigger_notify_typed<N: TypedNotification>(
         return;
     };
     let notif = build_pending_typed_notification(
+        db.next_notification_seq_id(),
         recipient_char_id,
         None,
         N::DEFAULT_ID_TYPE,
@@ -634,6 +635,7 @@ pub fn emit_incursion_completion_combat_notifications(
 
     for (target_char_id, target_user_id) in chars {
         emit_typed_target_to_char_with_id_type(
+            db.next_notification_seq_id(),
             pending_notifications,
             notify_tx,
             target_char_id,
@@ -648,6 +650,7 @@ pub fn emit_incursion_completion_combat_notifications(
 
         if result.incursion_ended {
             emit_typed_target_to_char_with_id_type(
+                db.next_notification_seq_id(),
                 pending_notifications,
                 notify_tx,
                 target_char_id,
@@ -1068,6 +1071,7 @@ fn push_expedition_sys_notif<N: TypedNotification + Clone>(
     for cid in recipients {
         let uid_opt = db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.user_id));
         emit_typed_target_to_char_capped(
+            db.next_notification_seq_id(),
             Some(pending_notifications),
             Some(notify_tx),
             cid,

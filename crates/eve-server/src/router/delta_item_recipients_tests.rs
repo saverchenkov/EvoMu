@@ -882,7 +882,7 @@ async fn commit_industry_materials_causal_order_queue_cap_and_singleton_bpo() {
 
     // 4. 20k batch cap retains exact trailing MAX_PENDING_NOTIFICATIONS_PER_CHAR entries.
     let batch: Vec<_> = (0..20_000_i64)
-        .map(|i| assemble_pending_notification(pilot_id, Some(1), "OnItemChange", "charid", vec![PyRep::Integer(i)], i)).collect();
+        .map(|i| assemble_pending_notification(ctx.next_notification_seq_id(), pilot_id, Some(1), "OnItemChange", "charid", vec![PyRep::Integer(i)], i)).collect();
     enqueue_or_stage_pending_batch(&*ctx.pending_notifications, &ctx.notify_tx, &batch);
     let queued = ctx.drain_notifications_for_char(pilot_id);
     assert_eq!(queued.len(), MAX_PENDING_NOTIFICATIONS_PER_CHAR);

@@ -568,6 +568,7 @@ pub struct WorldRepository {
     pub(crate) next_listener_id: std::sync::atomic::AtomicU64,
     pub(crate) fault_plan: std::sync::atomic::AtomicU64,
     pub(crate) next_system_lifecycle_generation: std::sync::atomic::AtomicU64,
+    pub(crate) next_notification_seq_id: std::sync::atomic::AtomicU64,
     /// Explicit per-repository gate controlling lazy host-local wiki PvE catalog autoloading (`#1583`).
     pub(crate) host_wiki_pve_catalog_autoload: std::sync::atomic::AtomicBool,
     /// Ephemeral per-repository runtime slots (not persisted across snapshots/SQLite).
@@ -648,6 +649,7 @@ impl WorldRepository {
             next_listener_id: std::sync::atomic::AtomicU64::new(1),
             fault_plan: std::sync::atomic::AtomicU64::new(0),
             next_system_lifecycle_generation: std::sync::atomic::AtomicU64::new(1),
+            next_notification_seq_id: std::sync::atomic::AtomicU64::new(1),
             host_wiki_pve_catalog_autoload: std::sync::atomic::AtomicBool::new(false),
             transient_runtime_slots: RankedRwLock::new(HashMap::new()),
             tx_error_hook: std::sync::RwLock::new(None),
@@ -875,6 +877,12 @@ impl WorldRepository {
     /// Allocates a monotonically increasing, non-zero lifecycle generation scoped to this repository.
     pub fn allocate_system_lifecycle_generation(&self) -> u64 {
         self.next_system_lifecycle_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Returns a monotonically increasing sequence ID for `PendingMachoNotification` scoped to this repository (`#1583`).
+    pub fn next_notification_seq_id(&self) -> u64 {
+        self.next_notification_seq_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 

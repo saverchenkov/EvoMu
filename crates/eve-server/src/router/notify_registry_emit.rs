@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::cache_notifications::{
-    next_notification_seq_id, push_or_stage_pending_notification, PendingMachoNotification,
+    push_or_stage_pending_notification, PendingMachoNotification,
 };
 #[cfg(any(test, feature = "testkit"))]
 use crate::router::notify_registry::assert_registered_entry_shape;
@@ -32,6 +32,7 @@ pub fn emit_typed_char_core<N: TypedNotification>(
     }
     let now_ft = db.clock().now_blueos_filetime_ticks();
     build_and_push_typed_notification(
+        db.next_notification_seq_id(),
         pending_notifications,
         notify_tx,
         char_id,
@@ -61,7 +62,9 @@ pub fn emit_typed_char_with_db<N: TypedNotification>(
 
 /// Builds and pushes a typed notification to a single recipient's pending queue + live broadcast
 /// using the standard router [`push_pending_notification_capped`] queue bound.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_typed_target_to_char_with_id_type<N: TypedNotification>(
+    seq_id: u64,
     pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
     notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
@@ -71,6 +74,7 @@ pub fn emit_typed_target_to_char_with_id_type<N: TypedNotification>(
     notif: N,
 ) {
     build_and_push_typed_notification(
+        seq_id,
         pending_notifications,
         notify_tx,
         char_id,
@@ -86,6 +90,7 @@ pub fn emit_typed_target_to_char_with_id_type<N: TypedNotification>(
 /// with an explicit FIFO queue bound (used by lifecycle hooks retaining a 512-entry bound).
 #[allow(clippy::too_many_arguments)]
 pub fn emit_typed_target_to_char_capped<N: TypedNotification>(
+    seq_id: u64,
     pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
     notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
@@ -96,6 +101,7 @@ pub fn emit_typed_target_to_char_capped<N: TypedNotification>(
     notif: N,
 ) {
     build_and_push_typed_notification(
+        seq_id,
         pending_notifications,
         notify_tx,
         char_id,
@@ -136,7 +142,7 @@ pub fn emit_typed_to_fleet_members_core<N: TypedNotification>(
             continue;
         }
         let pending = PendingMachoNotification {
-            seq_id: next_notification_seq_id(),
+            seq_id: db.next_notification_seq_id(),
             recipient_char_id: member_id,
             event: N::EVENT.to_string(),
             id_type: N::DEFAULT_ID_TYPE.to_string(),
@@ -193,7 +199,7 @@ pub fn emit_typed_to_solar_system_in_space_core<N: TypedNotification>(
             args.clone(),
         );
         let pending = PendingMachoNotification {
-            seq_id: next_notification_seq_id(),
+            seq_id: db.next_notification_seq_id(),
             recipient_char_id: cid,
             event: N::EVENT.to_string(),
             id_type: N::DEFAULT_ID_TYPE.to_string(),
@@ -266,6 +272,7 @@ pub fn push_pending_session_notification(
 }
 
 fn build_pending_notification_for_event(
+    seq_id: u64,
     recipient_char_id: i64,
     user_id_opt: Option<u64>,
     event: &str,
@@ -281,7 +288,7 @@ fn build_pending_notification_for_event(
         args.clone(),
     );
     PendingMachoNotification {
-        seq_id: next_notification_seq_id(),
+        seq_id,
         recipient_char_id,
         event: event.to_string(),
         id_type: id_type.to_string(),
@@ -297,6 +304,7 @@ fn build_pending_notification_for_event(
 /// without pushing it to any queue (used by callers applying custom queue coalescing).
 #[track_caller]
 pub fn build_pending_typed_notification<N: TypedNotification>(
+    seq_id: u64,
     recipient_char_id: i64,
     user_id_opt: Option<u64>,
     id_type: &str,
@@ -306,6 +314,7 @@ pub fn build_pending_typed_notification<N: TypedNotification>(
     let scene_scope = notif.scene_scope();
     let args = typed_args_checked(notif);
     build_pending_notification_for_event(
+        seq_id,
         recipient_char_id,
         user_id_opt,
         N::EVENT,
@@ -339,6 +348,7 @@ pub fn push_pending_char_notification_256(
 /// and `args.len()` satisfies its registered arity bounds.
 #[track_caller]
 pub fn build_pending_registered_notification(
+    seq_id: u64,
     recipient_char_id: i64,
     user_id_opt: Option<u64>,
     event: &str,
@@ -353,6 +363,7 @@ pub fn build_pending_registered_notification(
     #[cfg(any(test, feature = "testkit"))]
     assert_registered_entry_shape(entry, &args);
     Some(build_pending_notification_for_event(
+        seq_id,
         recipient_char_id,
         user_id_opt,
         entry.event,
@@ -365,6 +376,7 @@ pub fn build_pending_registered_notification(
 #[track_caller]
 #[allow(clippy::too_many_arguments)]
 fn build_and_push_typed_notification<N: TypedNotification>(
+    seq_id: u64,
     pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
     notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
     char_id: i64,
@@ -378,6 +390,7 @@ fn build_and_push_typed_notification<N: TypedNotification>(
         return;
     }
     let pending = build_pending_typed_notification(
+        seq_id,
         char_id,
         user_id_opt,
         id_type,

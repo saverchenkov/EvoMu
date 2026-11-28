@@ -885,6 +885,7 @@ pub fn notify_stronghold_destruction(
 
     for cid in system_chars {
         crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+            db.next_notification_seq_id(),
             pending_notifications,
             notify_tx,
             cid,
@@ -895,6 +896,7 @@ pub fn notify_stronghold_destruction(
         );
         if let Some(ref fs_notif) = full_supp_notif {
             crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+                db.next_notification_seq_id(),
                 pending_notifications,
                 notify_tx,
                 cid,

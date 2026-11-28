@@ -588,6 +588,7 @@ pub fn queue_pi_notification(
     }
     match event {
         "PlanetStorageFull" => crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+            ctx.next_notification_seq_id(),
             Some(&*ctx.pending_notifications),
             None,
             recipient_char_id,
@@ -597,6 +598,7 @@ pub fn queue_pi_notification(
             crate::router::notify_registry::PlanetStorageFull { planet_id, pin_id },
         ),
         "PlanetExtractorFinished" => crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+            ctx.next_notification_seq_id(),
             Some(&*ctx.pending_notifications),
             None,
             recipient_char_id,

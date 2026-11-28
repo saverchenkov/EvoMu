@@ -65,7 +65,6 @@ pub const MAX_GRPC_FRAME_BUFFER_BYTES: usize = H2_INITIAL_STREAM_WINDOW_BYTES as
 /// Maximum uncompressed or wire gRPC message payload size (`1 MiB - 5` bytes so a complete frame fits in one stream window).
 pub const MAX_GRPC_MESSAGE_BYTES: usize = MAX_GRPC_FRAME_BUFFER_BYTES - 5;
 
-pub use crate::router::NEXT_TRANSPORT_SESSION_ID as NEXT_GRPC_SESSION_ID;
 static LAST_REJECTED_BEARER_WARN_UNIX: AtomicU64 = AtomicU64::new(0);
 
 fn warn_rejected_bearer_token(now_unix: u64, peer_ip: Option<std::net::IpAddr>, reason: &str) {
@@ -271,7 +270,7 @@ async fn handle_grpc_stream(
             let Some(mut identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
                 return reject_unauthenticated_headers(&ctx, &mut respond, peer_ip, &path);
             };
-            let grpc_session_id = NEXT_GRPC_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+            let grpc_session_id = ctx.alloc_transport_session_id();
             let mut send = send_grpc_headers(&mut respond, false)?;
             let mut reader = GrpcFrameReader::new(request.into_body(), grpc_encoding);
 
@@ -362,7 +361,7 @@ async fn handle_grpc_stream(
             let Some(mut identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
                 return reject_unauthenticated_headers(&ctx, &mut respond, peer_ip, &path);
             };
-            let grpc_session_id = NEXT_GRPC_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+            let grpc_session_id = ctx.alloc_transport_session_id();
             let mut session =
                 match build_session_for_identity(&ctx, grpc_session_id, &mut identity, None) {
                     Ok(s) => s,
@@ -485,7 +484,7 @@ async fn handle_grpc_stream(
             let Some(mut identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
                 return reject_unauthenticated_headers(&ctx, &mut respond, peer_ip, &path);
             };
-            let grpc_session_id = NEXT_GRPC_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+            let grpc_session_id = ctx.alloc_transport_session_id();
             let mut send = send_grpc_headers(&mut respond, false)?;
             let mut reader = GrpcFrameReader::new(request.into_body(), grpc_encoding);
 

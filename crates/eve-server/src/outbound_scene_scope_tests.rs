@@ -1207,6 +1207,7 @@ fn try_solar_system_rejects_zero_and_emit_in_ballpark_and_pending_push_enforce_s
     // `OutboundSceneScope::solar_system(Some(sys_a), None)` (`requires_in_space: false`) still enforces system match
     // across docked and unsystemed sessions (`F-03`).
     let mut sys_scoped_notif = crate::router::notify_registry::build_pending_registered_notification(
+        1,
         char_id,
         Some(uid),
         "OnDungeonCompleted",

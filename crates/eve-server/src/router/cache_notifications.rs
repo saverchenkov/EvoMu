@@ -152,14 +152,6 @@ pub enum NotificationTarget {
     All,
 }
 
-static NEXT_NOTIFICATION_SEQ_ID: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
-
-/// Returns a monotonically increasing sequence ID for [`PendingMachoNotification`].
-pub fn next_notification_seq_id() -> u64 {
-    NEXT_NOTIFICATION_SEQ_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
 /// Queued binary-marshaled `MachoPacket` (`Notification` = `12`) ready for delivery (`P-5`).
 #[derive(Debug, Clone)]
 pub struct PendingMachoNotification {
@@ -177,6 +169,7 @@ pub struct PendingMachoNotification {
 impl PendingMachoNotification {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        seq_id: u64,
         recipient_char_id: i64,
         event: impl Into<String>,
         id_type: impl Into<String>,
@@ -186,7 +179,7 @@ impl PendingMachoNotification {
         created_filetime: i64,
     ) -> Self {
         Self {
-            seq_id: next_notification_seq_id(),
+            seq_id,
             recipient_char_id,
             event: event.into(),
             id_type: id_type.into(),
@@ -383,6 +376,7 @@ pub(crate) fn find_staged_notification_by_seq(
 }
 
 pub(crate) fn insert_before_staged_seq_or_stage(
+    db: &eve_db::WorldRepository,
     pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
     seq_id: u64,
@@ -396,7 +390,7 @@ pub(crate) fn insert_before_staged_seq_or_stage(
                 return None;
             }
             let pos = stage.staged.iter().position(|i| i.notif.seq_id == seq_id)?;
-            let tail_seq = next_notification_seq_id();
+            let tail_seq = db.next_notification_seq_id();
             notif.seq_id = seq_id;
             stage.staged[pos].notif.seq_id = tail_seq;
             stage.staged.insert(pos, StagedDispatchNotification {
@@ -415,7 +409,9 @@ pub(crate) fn insert_before_staged_seq_or_stage(
     new_tail_seq
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_pending_notification(
+    seq_id: u64,
     cid: i64,
     uid: Option<u64>,
     event: &str,
@@ -424,7 +420,7 @@ pub(crate) fn assemble_pending_notification(
     now_ft: i64,
 ) -> PendingMachoNotification {
     let (pkt, raw) = ServerContext::build_macho_notification_packet(cid, uid, event, id_type, args.clone());
-    PendingMachoNotification::new(cid, event, id_type, args, pkt, raw, now_ft)
+    PendingMachoNotification::new(seq_id, cid, event, id_type, args, pkt, raw, now_ft)
 }
 
 #[inline]
@@ -603,12 +599,28 @@ pub(crate) fn flush_staged_dispatch_notifications(
     }
 }
 
+#[inline]
+pub(crate) fn assign_fallback_seq_id_if_zero(
+    queue: &[PendingMachoNotification],
+    notif: &mut PendingMachoNotification,
+) {
+    if notif.seq_id == 0 {
+        notif.seq_id = queue
+            .iter()
+            .map(|n| n.seq_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+    }
+}
+
 fn push_pending_notification_with_cap(
     queue: &mut Vec<PendingMachoNotification>,
-    notif: PendingMachoNotification,
+    mut notif: PendingMachoNotification,
     explicit_queue_cap: Option<usize>,
 ) {
     if let Some(cap) = explicit_queue_cap {
+        assign_fallback_seq_id_if_zero(queue, &mut notif);
         let cap = cap.max(1);
         if queue.len() >= cap {
             let evict = queue.len() + 1 - cap;
@@ -623,7 +635,7 @@ fn push_pending_notification_with_cap(
 pub(crate) fn push_or_stage_pending_notification(
     pend: Option<&dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
-    notif: PendingMachoNotification,
+    mut notif: PendingMachoNotification,
     explicit_queue_cap: Option<usize>,
 ) {
     if try_stage_dispatch_notification(pend, notify_tx, &notif, explicit_queue_cap) {
@@ -633,6 +645,7 @@ pub(crate) fn push_or_stage_pending_notification(
     if let Some(pend) = pend {
         let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
         let queue = queues.entry(cid).or_default();
+        assign_fallback_seq_id_if_zero(queue, &mut notif);
         push_pending_notification_with_cap(queue, notif.clone(), explicit_queue_cap);
     }
     if let Some(tx) = notify_tx {
@@ -645,8 +658,9 @@ pub(crate) fn push_or_stage_pending_notification(
 /// by the in-flight RPC are preserved up to [`MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR`] until the post-RPC drain.
 pub fn push_pending_notification_capped(
     queue: &mut Vec<PendingMachoNotification>,
-    notif: PendingMachoNotification,
+    mut notif: PendingMachoNotification,
 ) {
+    assign_fallback_seq_id_if_zero(queue, &mut notif);
     let cap = if is_active_dispatch_char(notif.recipient_char_id) {
         MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR
     } else {
@@ -1358,6 +1372,7 @@ impl ServerContext {
             let recipient_scope = self.bind_recipient_scene_scope(scene_scope, cid, uid);
             emitted.push(
                 assemble_pending_notification(
+                    self.next_notification_seq_id(),
                     cid,
                     uid,
                     event,
@@ -1424,7 +1439,7 @@ impl ServerContext {
             .unwrap_or_else(|e| e.into_inner());
         for notif in notifs {
             let q = queues.entry(notif.recipient_char_id).or_default();
-            if !q.iter().any(|existing| existing.seq_id == notif.seq_id) {
+            if notif.seq_id == 0 || !q.iter().any(|existing| existing.seq_id == notif.seq_id) {
                 push_pending_notification_capped(q, notif);
             }
         }
@@ -1600,6 +1615,7 @@ impl ServerContext {
             ];
             let (packet, marshaled_packet) = Self::build_macho_notification_packet(char_id, user_id, "OnNotificationReceived", "charid", args.clone());
             let notif = PendingMachoNotification::new(
+                self.next_notification_seq_id(),
                 char_id,
                 "OnNotificationReceived",
                 "charid",

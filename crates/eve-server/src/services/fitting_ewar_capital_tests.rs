@@ -262,12 +262,10 @@ async fn prepare_ewar_and_capital_module_validates_hull_groups_and_prepares_adc_
 
 #[tokio::test]
 async fn combat_charge_depletion_corp_wallet_balance_and_role_authority_invariants() {
-    use crate::router::NEXT_TRANSPORT_SESSION_ID;
     use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, IskCents};
     use eve_destiny::{Ball, CombatState, MovementMode, TargetLock};
     use eve_machonet::SessionState;
     use glam::DVec3;
-    use std::sync::atomic::Ordering;
 
     let ctx = ServerContext::with_sde_and_repository(
         shared_sde(),
@@ -318,12 +316,17 @@ async fn combat_charge_depletion_corp_wallet_balance_and_role_authority_invarian
     assert_eq!(bind_tuple_err.code, "BindAuthorizationDenied");
     assert!(bind_tuple_err.message.contains(&i64::MAX.to_string()));
 
-    // 2. #852: Shared transport session ID allocator across machoNet, gRPC, and Bridge
-    let s1 = crate::macho_listener::NEXT_MACHO_SESSION_ID.fetch_add(1, Ordering::Relaxed);
-    let s2 = crate::quasar_grpc::NEXT_GRPC_SESSION_ID.fetch_add(1, Ordering::Relaxed);
-    let s3 = NEXT_TRANSPORT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
-    assert_eq!(s2, s1 + 1);
-    assert_eq!(s3, s2 + 1);
+    // 2. #852/#1583: Per-ServerContext transport session ID allocator across transports
+    let s1 = ctx.alloc_transport_session_id();
+    let s2 = ctx.alloc_transport_session_id();
+    let s3 = ctx.alloc_transport_session_id();
+    assert_eq!((s1, s2, s3), (10_000, 10_001, 10_002));
+    let ctx_a = ServerContext::new();
+    let ctx_b = ServerContext::new();
+    assert_eq!(ctx_a.alloc_transport_session_id(), 10_000);
+    assert_eq!(ctx_a.alloc_transport_session_id(), 10_001);
+    assert_eq!(ctx_b.alloc_transport_session_id(), 10_000);
+    assert_eq!(ctx.alloc_transport_session_id(), 10_003);
 
     // 3. #938 + #837: `account.GetCashBalance(1)` returns corp wallet balance for authorized role
     //    and denies unauthorized members even if `session.corp_role` is stale `u64::MAX`.

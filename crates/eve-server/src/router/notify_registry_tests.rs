@@ -346,6 +346,7 @@ fn typed_notification_into_args_preserves_registered_arity() {
         vec![PyRep::Integer(90_000_001), PyRep::Integer(42)]
     );
     let pending = build_pending_typed_notification(
+        1,
         90_000_001,
         Some(1),
         OnFittingAdded::DEFAULT_ID_TYPE,
@@ -1093,6 +1094,7 @@ fn ballpark_marked_notifications_enforce_scene_field_and_registry_set() {
     );
     assert!(
         super::notify_registry::build_pending_registered_notification(
+            0,
             90_000_001,
             None,
             "OnTarget",
@@ -1466,6 +1468,7 @@ fn emit_typed_panics_on_mismatched_pyrep_arg() {
 #[should_panic(expected = "for event 'OnWeaponBanksChanged': sample[0] failed at arg[1]")]
 fn build_pending_typed_notification_panics_on_mismatched_pyrep_arg() {
     let _ = super::notify_registry::build_pending_typed_notification(
+        0,
         90_000_001,
         Some(1),
         "charid",

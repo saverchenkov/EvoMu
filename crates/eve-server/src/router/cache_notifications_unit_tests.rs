@@ -1305,6 +1305,7 @@ async fn intermediate_insertion_preserves_monotonic_seq_ids_and_prevents_rpc_rep
     {
         let mut queues = ctx.pending_notifications.write().expect("write pending");
         let n = assemble_pending_notification(
+            ctx.next_notification_seq_id(),
             pilot_id,
             Some(uid),
             "OnSkillForcedRefresh",

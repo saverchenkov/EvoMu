@@ -2338,3 +2338,27 @@ fn server_context_scopes_bound_and_fighter_counters_and_random_instance_ids() {
     assert_eq!(right.next_fighter_reservation_id(), -300_000);
     assert_eq!(right.next_fighter_reservation_id(), -300_001);
 }
+
+#[test]
+fn server_context_isolates_transport_session_and_notification_seq_counters() {
+    let left = ServerContext::new();
+    let right = ServerContext::new();
+
+    let left_clone = left.clone();
+    let left_upgraded = left.downgrade().upgrade().expect("live ServerContext upgrade");
+
+    assert_eq!(left.alloc_transport_session_id(), 10_000);
+    assert_eq!(left_clone.alloc_transport_session_id(), 10_001);
+    assert_eq!(left_upgraded.alloc_transport_session_id(), 10_002);
+    assert_eq!(right.alloc_transport_session_id(), 10_000);
+    assert_eq!(right.alloc_transport_session_id(), 10_001);
+    assert_eq!(left.alloc_transport_session_id(), 10_003);
+
+    assert_eq!(left.next_notification_seq_id(), 1);
+    assert_eq!(left_clone.next_notification_seq_id(), 2);
+    assert_eq!(left_upgraded.next_notification_seq_id(), 3);
+    assert_eq!(left.db.next_notification_seq_id(), 4);
+    assert_eq!(right.next_notification_seq_id(), 1);
+    assert_eq!(right.db.next_notification_seq_id(), 2);
+    assert_eq!(left.next_notification_seq_id(), 5);
+}

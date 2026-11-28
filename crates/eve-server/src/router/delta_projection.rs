@@ -1855,6 +1855,7 @@ pub fn resolve_all_notifications(
 pub fn materialize_pending_notifications(
     resolved: Vec<ResolvedNotification>,
     now_filetime: i64,
+    mut seq_alloc: impl FnMut() -> u64,
 ) -> Vec<PendingMachoNotification> {
     resolved
         .into_iter()
@@ -1868,6 +1869,7 @@ pub fn materialize_pending_notifications(
             // matching `cache_notifications.rs` (`client_compat` pads trailing `None` on TCP wire).
             if notif.event == OnItemChange::EVENT && notif.args.len() == 2 {
                 return Some(crate::router::cache_notifications::assemble_pending_notification(
+                    seq_alloc(),
                     notif.recipient_char_id,
                     notif.recipient_user_id,
                     notif.event,
@@ -1877,6 +1879,7 @@ pub fn materialize_pending_notifications(
                 ));
             }
             build_pending_registered_notification(
+                seq_alloc(),
                 notif.recipient_char_id,
                 notif.recipient_user_id,
                 notif.event,

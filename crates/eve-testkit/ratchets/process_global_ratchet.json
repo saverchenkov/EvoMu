@@ -20,7 +20,7 @@
     },
     "C_counters": {
       "zero_required": false,
-      "max_count": 3,
+      "max_count": 1,
       "rationale_required": false,
       "description": "Process-global monotonic ID/sequence counters whose values reach game state or wire messages (#1583 Group C)."
     },
@@ -340,26 +340,10 @@
     },
     {
       "crate_name": "eve-server",
-      "rel_file": "router/binding.rs",
-      "symbol": "NEXT_TRANSPORT_SESSION_ID",
-      "kind": "static_sync",
-      "group": "C_counters",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
       "rel_file": "router/cache_notifications.rs",
       "symbol": "DISPATCH_STAGED_NOTIFICATIONS",
       "kind": "task_local",
       "group": "D_ambient_scopes",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "router/cache_notifications.rs",
-      "symbol": "NEXT_NOTIFICATION_SEQ_ID",
-      "kind": "static_sync",
-      "group": "C_counters",
       "max_count": 1
     },
     {

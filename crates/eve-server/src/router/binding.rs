@@ -15,17 +15,7 @@ use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
-
-/// Unified cluster-wide transport session ID allocator shared by `machoNet` TCP,
-/// Python Client Bridge TCP, and Quasar HTTP/2 gRPC listeners (`#852`).
-pub static NEXT_TRANSPORT_SESSION_ID: AtomicU64 = AtomicU64::new(10_000);
-
-/// Allocates a globally unique transport `session_id` across all client listeners (`#852`).
-pub fn alloc_transport_session_id() -> u64 {
-    NEXT_TRANSPORT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
-}
 
 const ERR_BIND_AUTH_DENIED: &str = "BindAuthorizationDenied";
 pub(crate) const ERR_BOUND_OWNERSHIP: &str = "BoundObjectOwnershipViolation";
@@ -1827,6 +1817,7 @@ impl ServerContext {
                 PyRep::Integer(effect_id),
             ]);
             emit_typed_target_to_char_capped(
+                db.next_notification_seq_id(),
                 Some(&**pending),
                 Some(notify_tx),
                 char_id,
@@ -1908,6 +1899,7 @@ impl ServerContext {
                                 let mut notif = sfx_notif.clone();
                                 notif.scene = recip_scene;
                                 emit_typed_target_to_char_capped(
+                                    db.next_notification_seq_id(),
                                     Some(&**pending),
                                     Some(notify_tx),
                                     recip_cid,
@@ -1940,6 +1932,7 @@ impl ServerContext {
             });
             if let Some((mod_ids, charge_tid, reload_ms)) = auto_reload_ev {
                 emit_typed_target_to_char_capped(
+                    db.next_notification_seq_id(),
                     Some(&**pending),
                     Some(notify_tx),
                     char_id,
@@ -1981,6 +1974,7 @@ impl ServerContext {
             let now = db_lock.clock().now_blueos_filetime_ticks();
             let enqueue_target_ev = |rcpt_char: i64, rcpt_user: Option<u64>, sub_ev: &str, item_id: i64| {
                 emit_typed_target_to_char_capped(
+                    db_lock.next_notification_seq_id(),
                     Some(&*pending_lock),
                     Some(&notify_tx_lock),
                     rcpt_char,

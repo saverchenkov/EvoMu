@@ -328,6 +328,7 @@ pub(crate) fn build_switched_item_commit_notifications(
     now_ft: i64,
     active_fuel_reserves: &crate::services::tactical_modules::ActiveFuelReserveTracker,
     db_key: usize,
+    mut seq_alloc: impl FnMut() -> u64,
 ) -> SwitchedCommitNotifications {
     let SwitchedCommitBatch {
         item_specs: specs,
@@ -429,6 +430,7 @@ pub(crate) fn build_switched_item_commit_notifications(
             &spec.args,
         );
         notifs.push(assemble_pending_notification(
+            seq_alloc(),
             recipient_char_id,
             Some(recipient_user_id),
             "OnItemChange",
@@ -446,6 +448,7 @@ pub(crate) fn build_switched_item_commit_notifications(
                         &mat_args,
                     );
                     notifs.push(assemble_pending_notification(
+                        seq_alloc(),
                         recipient_char_id,
                         Some(ind_user_id),
                         "OnIndustryMaterials",
@@ -464,6 +467,7 @@ pub(crate) fn build_switched_item_commit_notifications(
                 &multi_args,
             );
             notifs.push(assemble_pending_notification(
+                seq_alloc(),
                 recipient_char_id,
                 Some(recipient_user_id),
                 "OnMultipleItemChange",
@@ -482,6 +486,7 @@ pub(crate) fn build_switched_item_commit_notifications(
             &bp_args,
         );
         notifs.push(assemble_pending_notification(
+            seq_alloc(),
             bp_spec.recipient_char_id,
             Some(bp_spec.recipient_user_id),
             "OnBlueprintsUpdated",

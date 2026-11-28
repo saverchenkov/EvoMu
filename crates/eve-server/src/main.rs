@@ -15,7 +15,6 @@ use eve_server::macho_listener::handle_macho_client;
 use eve_server::quasar_grpc::handle_quasar_grpc_connection;
 use eve_server::router::ServerContext;
 use eve_server::sso::handle_http_connection;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,7 +23,6 @@ use tokio::sync::{watch, Semaphore};
 use tokio::time::{timeout, timeout_at, Instant};
 use tracing::{error, info, warn};
 
-use eve_server::router::NEXT_TRANSPORT_SESSION_ID as NEXT_SESSION_ID;
 const MAX_CONCURRENT_CONNECTIONS: usize = 512;
 const SHUTDOWN_RPC_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -825,7 +823,7 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
         .peer_addr()
         .map(|a| a.to_string())
         .unwrap_or_else(|_| "127.0.0.1:0".to_string());
-    let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+    let session_id = ctx.alloc_transport_session_id();
     // New sessions start strictly unauthenticated (`user_id: None`, `role: 0`)
     let mut session = SessionState::new(session_id);
     session.address = peer_addr;

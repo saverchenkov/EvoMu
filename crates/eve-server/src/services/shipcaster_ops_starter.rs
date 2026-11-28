@@ -128,6 +128,7 @@ pub(crate) fn emit_shipcaster_target_state_changed_core(
     let now_ft = db.clock().now_blueos_filetime_ticks();
     for (cid, uid) in recipients {
         crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+            db.next_notification_seq_id(),
             Some(pws),
             Some(notify_tx),
             cid,

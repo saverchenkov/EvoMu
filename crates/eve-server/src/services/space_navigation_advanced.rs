@@ -1067,6 +1067,7 @@ pub(crate) fn step_zarzakh_gravity_hazard_with_notifications(
                 _ => PyRep::None,
             };
             crate::router::notify_registry::emit_typed_target_to_char_capped(
+                db_opt.map_or(0, |db| db.next_notification_seq_id()),
                 pending_notifications_opt,
                 notify_tx_opt,
                 cid,

@@ -286,6 +286,7 @@ pub fn install_macho_notify_sink(ctx: &crate::router::ServerContext) {
         let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
         for (cid, uid) in recipients {
             let Some(notif) = crate::router::notify_registry::build_pending_registered_notification(
+                clk_db.next_notification_seq_id(),
                 cid,
                 uid,
                 event,
