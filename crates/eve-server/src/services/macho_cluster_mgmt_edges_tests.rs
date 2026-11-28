@@ -559,7 +559,12 @@ async fn start_load_wakes_cold_system_with_gm_command_while_rejected_calls_stay_
     let ok = handle(&ctx, &mut gm, "loadService", "StartLoad", &[PyRep::Integer(3)], &kw)
         .unwrap()
         .expect("GM StartLoad succeeds");
-    assert_eq!(ok.dict_get("ticksExecuted").and_then(|v| v.as_i64()), Some(3));
+    assert_eq!(ok, PyRep::None);
+    assert_eq!(
+        ctx.db
+            .with_snapshot(|s| s.cluster_and_runtime.load_service_state.ticks_executed),
+        3
+    );
     assert_eq!(
         ctx.systems.last_wake_reason(target_sys),
         Some(crate::system_actor::SystemWakeReason::GmCommand(

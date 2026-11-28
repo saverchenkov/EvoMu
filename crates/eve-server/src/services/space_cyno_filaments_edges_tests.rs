@@ -503,6 +503,15 @@ async fn cyno_and_filament_jumps_record_session_arrival_jump_and_rollback_on_wak
             }
             put_item(snap, fil_ship, 587, fil_char, i64::from(wh_sys), InventoryFlag::None, 1, true);
             put_item(snap, fil_item, needlejack_tid, fil_char, fil_ship, InventoryFlag::Cargo, 2, false);
+            snap.fleets.insert(
+                90_901,
+                eve_db::types::FleetRecord {
+                    fleet_id: 90_901,
+                    boss_id: fil_char,
+                    members: vec![fil_char],
+                    ..Default::default()
+                },
+            );
         });
         let wh_h = ctx.systems.get_or_spawn(wh_sys);
         spawn_ship(&wh_h, fil_ship, 587, 25, 6, pos, DVec3::ZERO, false).await;
@@ -559,6 +568,15 @@ async fn cyno_and_filament_jumps_record_session_arrival_jump_and_rollback_on_wak
             }
             put_item(snap, fil_ship, 587, fil_char, i64::from(wh_sys), InventoryFlag::None, 1, true);
             put_item(snap, fil_item, needlejack_tid, fil_char, fil_ship, InventoryFlag::Cargo, 2, false);
+            snap.fleets.insert(
+                90_901,
+                eve_db::types::FleetRecord {
+                    fleet_id: 90_901,
+                    boss_id: fil_char,
+                    members: vec![fil_char],
+                    ..Default::default()
+                },
+            );
         });
         let wh_h = ctx_fail.systems.get_or_spawn(wh_sys);
         spawn_ship(&wh_h, fil_ship, 587, 25, 6, pos, DVec3::ZERO, false).await;
@@ -789,7 +807,7 @@ async fn cyno_and_filament_jumps_record_session_arrival_jump_and_rollback_on_wak
             if let Some(it) = snap.items.get_mut(&fuel_iid) {
                 it.quantity = 5_000;
             }
-            snap.character_session_timers.remove(&cid);
+            snap.sp6_lifecycle.session_change_timers.remove(&cid);
             let _ = sid;
         }
     });
