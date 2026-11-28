@@ -1274,19 +1274,28 @@ async fn in_space_cold_handlers_fail_closed_with_ship_not_in_space_and_preserve_
     assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
 
     // 5. mining_compression: self-compression succeeds without waking cold_sys
+    use crate::services::mining_advanced::mining_compression::resolve_compressor_hull_limits;
+    let rorqual_group = ctx.sde.types.get(&28352).map(|t| t.group_id).unwrap_or(883);
+    let fits_rorqual = |t: &eve_sde::InvType| {
+        let (types, groups) = resolve_compressor_hull_limits(t);
+        (types.is_empty() && groups.is_empty())
+            || types.contains(&28352)
+            || groups.contains(&rorqual_group)
+    };
     let core_tid = ctx
         .sde
         .types
         .values()
-        .find(|t| t.group_id == 515)
+        .find(|t| t.group_id == 515 && fits_rorqual(t))
         .map(|t| t.type_id)
-        .expect("Industrial Core in SDE");
+        .expect("Rorqual Industrial Core in SDE");
     let comp_tid = ctx
         .sde
         .types
         .values()
         .find(|t| {
             t.group_id == 4174
+                && fits_rorqual(t)
                 && t.default_attributes
                     .get(&3255)
                     .and_then(|id| ctx.sde.type_lists.get(&(id.round() as u32)))
@@ -1294,7 +1303,7 @@ async fn in_space_cold_handlers_fail_closed_with_ship_not_in_space_and_preserve_
                     .is_some_and(|(tl, ore)| tl.contains(ore))
         })
         .map(|t| t.type_id)
-        .expect("Ore Compressor matching Veldspar in SDE");
+        .expect("Rorqual Ore Compressor matching Veldspar in SDE");
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             core_mod_id,
