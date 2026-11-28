@@ -180,6 +180,8 @@ impl WorldStateWalDelta {
             && old.market_order_meta == new.market_order_meta
             && old.market_history == new.market_history
             && old.cosmic_signatures == new.cosmic_signatures
+            && old.scanned_signatures == new.scanned_signatures
+            && old.character_scan_progress == new.character_scan_progress
             && old.cosmic_anomalies == new.cosmic_anomalies
             && old.incursions == new.incursions
             && old.last_mission_decline_times == new.last_mission_decline_times
@@ -1205,6 +1207,8 @@ impl WorldRepository {
             applied_ship_skins: CowCell::new(HashMap::new()),
             chat_channels: CowCell::new(HashMap::new()),
             cosmic_signatures: CowCell::new(HashMap::new()),
+            scanned_signatures: CowCell::new(HashSet::new()),
+            character_scan_progress: CowCell::new(HashMap::new()),
             read_mails: CowCell::new(HashSet::new()),
             deleted_mails: CowCell::new(HashSet::new()),
             mail_labels: CowCell::new(HashMap::new()),

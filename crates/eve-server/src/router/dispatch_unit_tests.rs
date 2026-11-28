@@ -718,11 +718,7 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
         vec![],
     );
     assert_eq!(wal_ctx.pending_notifications.read().unwrap()[&90_000_001].len(), 1);
-    wal_ctx
-        .scanned_signatures
-        .write()
-        .unwrap()
-        .insert((90_000_001, 30_000_142, 777));
+    assert!(wal_ctx.mark_signature_scanned(90_000_001, 30_000_142, 777));
     wal_ctx
         .db
         .set_fault_plan_for_test(eve_db::TxFaultPlan::FailAtCommit);
@@ -748,7 +744,7 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
         .db
         .with_snapshot(|s| s.corp_governance.contains_key(&wal_corp_id)));
     assert_eq!(wal_ctx.pending_notifications.read().unwrap()[&90_000_001].len(), 1);
-    let _ = wal_ctx.scanned_signatures.write().unwrap().clear();
+    assert!(wal_ctx.has_scanned_signature(90_000_001, 30_000_142, 777));
     drop(wal_ctx);
     let _ = std::fs::remove_file(&wal_db);
     let _ = std::fs::remove_file(&wal_db_wal);

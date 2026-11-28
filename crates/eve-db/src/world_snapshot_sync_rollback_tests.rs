@@ -446,6 +446,9 @@ pub(crate) fn populate_world_core_entities(snap: &mut WorldStateSnapshot) {
             cleared: false,
         }],
     );
+    snap.scanned_signatures.insert((2001, 30000142, 700_001));
+    snap.character_scan_progress
+        .insert((2001, 30000142, "ABC-123".into()), 0.5);
     snap.read_mails.insert((2001, 9501));
     snap.deleted_mails.insert((2002, 9501));
     snap.trashed_mails.insert((2001, 9502));
@@ -557,4 +560,72 @@ pub(crate) fn populate_world_core_entities(snap: &mut WorldStateSnapshot) {
             timestamp_unix: 1_700_000_000,
         },
     );
+}
+
+#[test]
+fn scanned_signatures_and_scan_progress_sync_rollback_and_json_roundtrip() {
+    use crate::persistence::WorldRepository;
+    use crate::DbError;
+
+    let path = std::env::temp_dir().join(format!(
+        "evomu_scan_rollback_{}_{:?}.sqlite",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    let repo = WorldRepository::open_sqlite(&path).expect("open sqlite");
+    repo.with_mut_snapshot(populate_world_core_entities);
+
+    // JSON roundtrip via `cow_cell_sorted_set_serde` and `cow_cell_tuple3_map_serde`.
+    let encoded = repo.with_snapshot(|snap| serde_json::to_vec(snap).expect("serialize snapshot"));
+    let decoded: WorldStateSnapshot =
+        serde_json::from_slice(&encoded).expect("deserialize snapshot");
+    assert!(decoded.scanned_signatures.contains(&(2001, 30_000_142, 700_001)));
+    assert_eq!(
+        decoded
+            .character_scan_progress
+            .get(&(2001, 30_000_142, "ABC-123".into())),
+        Some(&0.5)
+    );
+
+    // Aborted tx rolls back both in-memory snapshot and durable SQLite rows.
+    let err = repo.try_with_mut_snapshot(|snap| {
+        snap.scanned_signatures.insert((2001, 30_000_142, 700_002));
+        snap.character_scan_progress
+            .insert((2001, 30_000_142, "ABC-123".into()), 1.0);
+        Err::<(), DbError>(DbError::ValidationError("abort scan update".into()))
+    });
+    assert!(matches!(err, Err(DbError::ValidationError(_))));
+    repo.with_snapshot(|snap| {
+        assert!(!snap.scanned_signatures.contains(&(2001, 30_000_142, 700_002)));
+        assert_eq!(
+            snap.character_scan_progress
+                .get(&(2001, 30_000_142, "ABC-123".into())),
+            Some(&0.5)
+        );
+    });
+
+    // Committed mutation survives close + reopen.
+    repo.with_mut_snapshot(|snap| {
+        snap.scanned_signatures.insert((2001, 30_000_142, 700_002));
+        snap.character_scan_progress
+            .insert((2001, 30_000_142, "ABC-123".into()), 1.0);
+    });
+    drop(repo);
+
+    let reopened = WorldRepository::open_sqlite(&path).expect("reopen sqlite");
+    reopened.with_snapshot(|loaded| {
+        assert!(loaded.scanned_signatures.contains(&(2001, 30_000_142, 700_001)));
+        assert!(loaded.scanned_signatures.contains(&(2001, 30_000_142, 700_002)));
+        assert_eq!(
+            loaded
+                .character_scan_progress
+                .get(&(2001, 30_000_142, "ABC-123".into())),
+            Some(&1.0)
+        );
+    });
+
+    drop(reopened);
+    let _ = std::fs::remove_file(&path);
 }

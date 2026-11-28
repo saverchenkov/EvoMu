@@ -75,7 +75,6 @@ pub struct ServerContext {
     pub notification_records: Arc<RankedRwLock<Vec<crate::router::cache_notifications::NotificationRecord>, RANK_LEAF>>,
     pub pending_notifications: Arc<RankedRwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>, RANK_LEAF>>,
     pub notify_tx: tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>,
-    pub map_landmarks: Arc<RankedRwLock<Vec<(i64, String, f64, f64, f64)>, RANK_LEAF>>,
     pub session_closers: Arc<RankedRwLock<HashMap<u64, tokio::sync::mpsc::UnboundedSender<(String, String)>>, RANK_LEAF>>,
     pub ship_fittings: Arc<RankedRwLock<HashMap<i64, ShipFittingEngine>, RANK_LEAF>>,
     pub ship_fit_revs: Arc<RankedRwLock<HashMap<i64, eve_dogma::FitRev>, RANK_LEAF>>,
@@ -83,8 +82,6 @@ pub struct ServerContext {
     pub active_scanner_probes: Arc<RankedRwLock<HashMap<i64, ActiveScannerProbe>, RANK_LEAF>>,
     pub(crate) active_probe_scan_contexts: Arc<RankedRwLock<HashMap<i64, Vec<crate::services::space_destiny::space_probe_scanning::ActiveProbeScanContext>>, RANK_LEAF>>,
     pub active_moon_probes: Arc<RankedRwLock<Vec<ActiveMoonSurveyProbe>, RANK_LEAF>>,
-    pub scanned_signatures: Arc<RankedRwLock<HashSet<(i64, u32, i64)>, RANK_LEAF>>,
-    pub character_scan_progress: Arc<RankedRwLock<HashMap<(i64, u32, String), f64>, RANK_LEAF>>,
     pub invention_roll_override: Arc<RankedRwLock<Option<f64>, RANK_LEAF>>,
     pub mechanic_rng: Arc<crate::rng::MechanicRng>, // seeded test RNG: shared with `systems`; OS CSPRNG unless seeded
     /// Repeating mining-module cycles keyed by module item ID (`MN-04`).
@@ -176,7 +173,6 @@ pub(crate) struct ServerContextWeak {
     notification_records: std::sync::Weak<RankedRwLock<Vec<crate::router::cache_notifications::NotificationRecord>, RANK_LEAF>>,
     pending_notifications: std::sync::Weak<RankedRwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>, RANK_LEAF>>,
     notify_tx: tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>,
-    map_landmarks: std::sync::Weak<RankedRwLock<Vec<(i64, String, f64, f64, f64)>, RANK_LEAF>>,
     session_closers: std::sync::Weak<RankedRwLock<HashMap<u64, tokio::sync::mpsc::UnboundedSender<(String, String)>>, RANK_LEAF>>,
     ship_fittings: std::sync::Weak<RankedRwLock<HashMap<i64, ShipFittingEngine>, RANK_LEAF>>,
     ship_fit_revs: std::sync::Weak<RankedRwLock<HashMap<i64, eve_dogma::FitRev>, RANK_LEAF>>,
@@ -184,8 +180,6 @@ pub(crate) struct ServerContextWeak {
     active_scanner_probes: std::sync::Weak<RankedRwLock<HashMap<i64, ActiveScannerProbe>, RANK_LEAF>>,
     active_probe_scan_contexts: std::sync::Weak<RankedRwLock<HashMap<i64, Vec<crate::services::space_destiny::space_probe_scanning::ActiveProbeScanContext>>, RANK_LEAF>>,
     active_moon_probes: std::sync::Weak<RankedRwLock<Vec<ActiveMoonSurveyProbe>, RANK_LEAF>>,
-    scanned_signatures: std::sync::Weak<RankedRwLock<HashSet<(i64, u32, i64)>, RANK_LEAF>>,
-    character_scan_progress: std::sync::Weak<RankedRwLock<HashMap<(i64, u32, String), f64>, RANK_LEAF>>,
     invention_roll_override: std::sync::Weak<RankedRwLock<Option<f64>, RANK_LEAF>>,
     mechanic_rng: std::sync::Weak<crate::rng::MechanicRng>,
     mining_cycles: std::sync::Weak<RankedRwLock<HashMap<i64, crate::services::mining_cycle::ActiveMiningCycle>, RANK_LEAF>>,
@@ -255,7 +249,6 @@ impl ServerContextWeak {
             notification_records: self.notification_records.upgrade()?,
             pending_notifications: self.pending_notifications.upgrade()?,
             notify_tx: self.notify_tx.clone(),
-            map_landmarks: self.map_landmarks.upgrade()?,
             session_closers: self.session_closers.upgrade()?,
             ship_fittings: self.ship_fittings.upgrade()?,
             ship_fit_revs: self.ship_fit_revs.upgrade()?,
@@ -263,8 +256,6 @@ impl ServerContextWeak {
             active_scanner_probes: self.active_scanner_probes.upgrade()?,
             active_probe_scan_contexts: self.active_probe_scan_contexts.upgrade()?,
             active_moon_probes: self.active_moon_probes.upgrade()?,
-            scanned_signatures: self.scanned_signatures.upgrade()?,
-            character_scan_progress: self.character_scan_progress.upgrade()?,
             invention_roll_override: self.invention_roll_override.upgrade()?,
             mechanic_rng: self.mechanic_rng.upgrade()?,
             mining_cycles: self.mining_cycles.upgrade()?,
@@ -464,7 +455,6 @@ impl ServerContext {
             notification_records: Arc::downgrade(&self.notification_records),
             pending_notifications: Arc::downgrade(&self.pending_notifications),
             notify_tx: self.notify_tx.clone(),
-            map_landmarks: Arc::downgrade(&self.map_landmarks),
             session_closers: Arc::downgrade(&self.session_closers),
             ship_fittings: Arc::downgrade(&self.ship_fittings),
             ship_fit_revs: Arc::downgrade(&self.ship_fit_revs),
@@ -472,8 +462,6 @@ impl ServerContext {
             active_scanner_probes: Arc::downgrade(&self.active_scanner_probes),
             active_probe_scan_contexts: Arc::downgrade(&self.active_probe_scan_contexts),
             active_moon_probes: Arc::downgrade(&self.active_moon_probes),
-            scanned_signatures: Arc::downgrade(&self.scanned_signatures),
-            character_scan_progress: Arc::downgrade(&self.character_scan_progress),
             invention_roll_override: Arc::downgrade(&self.invention_roll_override),
             mechanic_rng: Arc::downgrade(&self.mechanic_rng),
             mining_cycles: Arc::downgrade(&self.mining_cycles),
@@ -651,7 +639,6 @@ impl ServerContext {
             notification_records: Arc::new(RankedRwLock::new(persisted_notifications)),
             pending_notifications,
             notify_tx,
-            map_landmarks: Arc::new(RankedRwLock::new(Vec::new())),
             session_closers: Arc::new(RankedRwLock::new(HashMap::new())),
             ship_fittings,
             ship_fit_revs,
@@ -659,8 +646,6 @@ impl ServerContext {
             active_scanner_probes: Arc::new(RankedRwLock::new(persisted_probes)),
             active_probe_scan_contexts: Arc::new(RankedRwLock::new(HashMap::new())),
             active_moon_probes: Arc::new(RankedRwLock::new(Vec::new())),
-            scanned_signatures: Arc::new(RankedRwLock::new(HashSet::new())),
-            character_scan_progress: Arc::new(RankedRwLock::new(HashMap::new())),
             invention_roll_override,
             mechanic_rng,
             mining_cycles: Arc::new(RankedRwLock::new(HashMap::new())),
@@ -1231,11 +1216,11 @@ impl ServerContext {
     }
 
     pub fn mark_signature_scanned(&self, char_id: i64, solar_system_id: u32, sig_ball_id: i64) -> bool {
-        let inserted = self
-            .scanned_signatures
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert((char_id, solar_system_id, sig_ball_id));
+        // Release the DB write lock before dispatching progression side effects to preserve lock hierarchy.
+        let inserted = self.db.with_mut_snapshot(|snap| {
+            snap.scanned_signatures
+                .insert((char_id, solar_system_id, sig_ball_id))
+        });
         if inserted {
             crate::quasar_gateway::isolate_side_effect("router.context.mark_signature_scanned", || {
                 self.quasar_gateway.progression.daily_goals.on_gameplay_event(char_id as u32, 3, 1, &self.quasar_gateway);
@@ -1262,10 +1247,10 @@ impl ServerContext {
         solar_system_id: u32,
         sig_ball_id: i64,
     ) -> bool {
-        self.scanned_signatures
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&(char_id, solar_system_id, sig_ball_id))
+        self.db.with_snapshot(|snap| {
+            snap.scanned_signatures
+                .contains(&(char_id, solar_system_id, sig_ball_id))
+        })
     }
 
     pub fn record_character_scan_progress(
@@ -1275,13 +1260,13 @@ impl ServerContext {
         signature_id: &str,
         strength: f64,
     ) {
-        self.character_scan_progress
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                (char_id, solar_system_id, signature_id.to_string()),
-                strength,
-            );
+        if !strength.is_finite() {
+            return;
+        }
+        self.db.with_mut_snapshot(|snap| {
+            snap.character_scan_progress
+                .insert((char_id, solar_system_id, signature_id.to_string()), strength);
+        });
     }
 
     pub fn get_character_scan_progress(
@@ -1290,11 +1275,11 @@ impl ServerContext {
         solar_system_id: u32,
         signature_id: &str,
     ) -> Option<f64> {
-        self.character_scan_progress
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&(char_id, solar_system_id, signature_id.to_string()))
-            .copied()
+        self.db.with_snapshot(|snap| {
+            snap.character_scan_progress
+                .get(&(char_id, solar_system_id, signature_id.to_string()))
+                .copied()
+        })
     }
 
     pub fn effective_signature_signal_strength(

@@ -481,6 +481,8 @@ impl WorldRepository {
             applied_ship_skins: Default::default(),
             chat_channels: Default::default(),
             cosmic_signatures: Default::default(),
+            scanned_signatures: Default::default(),
+            character_scan_progress: Default::default(),
             read_mails: Default::default(),
             deleted_mails: Default::default(),
             mail_labels: Default::default(),

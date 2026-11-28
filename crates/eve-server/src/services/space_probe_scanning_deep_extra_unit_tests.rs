@@ -324,10 +324,8 @@ async fn trilateration_1_2_3_4_probes_and_combat_probe_ship_drone_abyssal_scanni
     ] {
         ctx.db.with_mut_snapshot(|snap| {
             snap.cosmic_signatures.get_mut(&sys_id).unwrap()[0].signal_strength = 0.0;
+            snap.character_scan_progress.clear();
         });
-        if let Ok(mut progress) = ctx.character_scan_progress.write() {
-            progress.clear();
-        }
         set_active_probes_for_char(&ctx, char_id, make_n_probes(n, SYNTH_STRONG_PROBE_TID, 0.25));
         let rep = handle_scan_and_wormhole_extras(&ctx, &mut session, None, "scanMgr", "RequestScans", &[], &kw)
             .await.unwrap().unwrap();

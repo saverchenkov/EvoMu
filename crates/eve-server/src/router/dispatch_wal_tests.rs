@@ -431,10 +431,18 @@ fn test_issue_874_rehydrate_preserves_live_runtime_maps_on_checkpoint_sql_error(
     let ctx = crate::router::ServerContext::from_sqlite(&db_path).expect("from_sqlite");
 
     // Seed live runtime state across checkpointed and crash-lost maps.
-    ctx.scanned_signatures
+    ctx.active_moon_probes
         .write()
         .unwrap()
-        .insert((90_000_001, 30_000_142, 874));
+        .push(crate::router::ActiveMoonSurveyProbe {
+            probe_id: 874,
+            probe_type_id: 22_778,
+            owner_char_id: 90_000_001,
+            solar_system_id: 30_000_142,
+            hit_moon_id: None,
+            arrival_unix_secs: 1_800_000_060,
+        });
+    assert!(ctx.mark_signature_scanned(90_000_001, 30_000_142, 874));
     ctx.tactical_state
         .write()
         .unwrap()
@@ -462,11 +470,16 @@ fn test_issue_874_rehydrate_preserves_live_runtime_maps_on_checkpoint_sql_error(
     ctx.rehydrate_runtime_from_db();
 
     assert!(
-        ctx.scanned_signatures
+        ctx.active_moon_probes
             .read()
             .unwrap()
-            .contains(&(90_000_001, 30_000_142, 874)),
-        "checkpoint read error must not wipe scanned_signatures (#874)"
+            .iter()
+            .any(|p| p.probe_id == 874 && p.solar_system_id == 30_000_142),
+        "checkpoint read error must not wipe active_moon_probes (#874)"
+    );
+    assert!(
+        ctx.has_scanned_signature(90_000_001, 30_000_142, 874),
+        "checkpoint read error must not wipe DB-owned scanned_signatures (#874)"
     );
     assert_eq!(
         ctx.tactical_state

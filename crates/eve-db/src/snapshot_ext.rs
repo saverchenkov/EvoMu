@@ -687,6 +687,10 @@ pub struct WorldStateSnapshot {
     #[serde(default)]
     pub cosmic_signatures: CowCell<HashMap<SolarSystemId, Vec<CosmicSignatureRecord>>>,
     #[serde(default, with = "crate::durable_domain_types::cow_cell_sorted_set_serde")]
+    pub scanned_signatures: CowCell<HashSet<(i64, SolarSystemId, i64)>>,
+    #[serde(default, with = "cow_cell_tuple3_map_serde")]
+    pub character_scan_progress: CowCell<HashMap<(i64, SolarSystemId, String), f64>>,
+    #[serde(default, with = "crate::durable_domain_types::cow_cell_sorted_set_serde")]
     pub read_mails: CowCell<HashSet<(i64, i64)>>,
     #[serde(default, with = "crate::durable_domain_types::cow_cell_sorted_set_serde")]
     pub deleted_mails: CowCell<HashSet<(i64, i64)>>,
@@ -1098,6 +1102,43 @@ mod market_transactions_cow_serde {
         }
 
         deserializer.deserialize_any(MarketTxVisitor)
+    }
+}
+
+mod cow_cell_tuple3_map_serde {
+    use crate::cow::CowCell;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+    use std::hash::Hash;
+
+    pub fn serialize<S, K1, K2, K3, V>(
+        cell: &CowCell<HashMap<(K1, K2, K3), V>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K1: Serialize + Clone + Ord,
+        K2: Serialize + Clone + Ord,
+        K3: Serialize + Clone + Ord,
+        V: Serialize,
+    {
+        let mut entries: Vec<(&(K1, K2, K3), &V)> = cell.as_inner().iter().collect();
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, K1, K2, K3, V>(
+        deserializer: D,
+    ) -> Result<CowCell<HashMap<(K1, K2, K3), V>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K1: Deserialize<'de> + Eq + Hash,
+        K2: Deserialize<'de> + Eq + Hash,
+        K3: Deserialize<'de> + Eq + Hash,
+        V: Deserialize<'de>,
+    {
+        let entries: Vec<((K1, K2, K3), V)> = Vec::deserialize(deserializer)?;
+        Ok(CowCell::new(entries.into_iter().collect()))
     }
 }
 

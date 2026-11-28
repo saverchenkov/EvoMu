@@ -153,14 +153,8 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
                 warp_end_ft: Some(133_500_000_000_000_000),
             },
         );
-        ctx.scanned_signatures
-            .write()
-            .unwrap()
-            .insert((cid, sys_id, 55));
-        ctx.character_scan_progress
-            .write()
-            .unwrap()
-            .insert((cid, sys_id, "ABC-123".into()), 0.75);
+        assert!(ctx.mark_signature_scanned(cid, sys_id, 55));
+        ctx.record_character_scan_progress(cid, sys_id, "ABC-123", 0.75);
         fighter_test_helpers::insert_active_fighter(
             &ctx,
             fighter_id,
@@ -196,10 +190,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             },
         );
         record_session_change_timer(&ctx, cid, 1_700_000_000, sys_id, 10, "undock");
-        ctx.map_landmarks
-            .write()
-            .unwrap()
-            .push((sys_id as i64, "Jita IV".into(), 1.0, 2.0, 3.0));
         ctx.fleet_extras
             .lock()
             .unwrap()
@@ -352,17 +342,10 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             assert_eq!(probes.get(&probe_id).map(|p| p.state), Some(0));
             assert_eq!(probes.get(&probe_id).and_then(|p| p.warp_end_ft), None);
         }
-        assert!(ctx2
-            .scanned_signatures
-            .read()
-            .unwrap()
-            .contains(&(cid, sys_id, 55)));
+        assert!(ctx2.has_scanned_signature(cid, sys_id, 55));
         assert_eq!(
-            ctx2.character_scan_progress
-                .read()
-                .unwrap()
-                .get(&(cid, sys_id, "ABC-123".into())),
-            Some(&0.75)
+            ctx2.get_character_scan_progress(cid, sys_id, "ABC-123"),
+            Some(0.75)
         );
         assert_eq!(
             fighter_test_helpers::active_fighter(&ctx2, fighter_id).map(|f| f.squadron_size),
@@ -385,12 +368,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
         // Crash-lost runtime kinds must remain cleared across restart (`#920`, `#875`).
         assert!(ctx2.mining_cycles.read().unwrap().is_empty());
         assert!(crate::router::session_transition::get_session_change_timer(&ctx2, cid).is_some());
-        assert!(ctx2
-            .map_landmarks
-            .read()
-            .unwrap()
-            .iter()
-            .any(|(s, n, ..)| *s == sys_id as i64 && n == "Jita IV"));
         assert_eq!(
             crate::services::tactical_modules::tactical_test_helpers::get_lance_caster_lock_until_for_scope(
                 &ctx2,
@@ -942,8 +919,6 @@ async fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync(
         let db = Arc::new(WorldRepository::open_sqlite(&p).expect("open sqlite"));
         let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
         ctx.active_moon_probes.write().unwrap().clear();
-        ctx.scanned_signatures.write().unwrap().clear();
-        ctx.character_scan_progress.write().unwrap().clear();
         fighter_test_helpers::clear_active_fighters(&ctx);
         fighter_test_helpers::clear_all_fighter_cooldowns(&ctx);
         fighter_test_helpers::clear_all_fighter_charges(&ctx);
@@ -953,7 +928,6 @@ async fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync(
         ctx.phased_asteroid_fields.write().unwrap().clear();
         crate::router::session_transition::clear_all_session_change_timers(&ctx);
         ctx.systems.clear_all_ewar_state_sync();
-        ctx.map_landmarks.write().unwrap().clear();
         ctx.global_config_values.write().unwrap().clear();
         ctx.fw_idle_last_step_unix.write().unwrap().clear();
         ctx.combat_rng_seq.store(0, Ordering::Relaxed);
@@ -1245,23 +1219,6 @@ async fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync(
             },
             &|c| c.active_moon_probes.write().unwrap().clear(),
         );
-        check_one(
-            "scanned_signatures",
-            &|c| {
-                c.scanned_signatures.write().unwrap().insert((1, 30_000_142, 2));
-            },
-            &|c| c.scanned_signatures.write().unwrap().clear(),
-        );
-        check_one(
-            "character_scan_progress",
-            &|c| {
-                c.character_scan_progress
-                    .write()
-                    .unwrap()
-                    .insert((1, 30_000_142, "ABC-123".into()), 0.5);
-            },
-            &|c| c.character_scan_progress.write().unwrap().clear(),
-        );
         let _ = ctx.systems.get_or_spawn(30_000_142);
         check_one(
             "module_reactivation_cooldowns",
@@ -1361,16 +1318,6 @@ async fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync(
                 c.record_active_ewar_start_for_test(Some(30_000_142), 1, 2, 3, "ecm");
             },
             &|c| c.systems.clear_all_ewar_state_sync(),
-        );
-        check_one(
-            "map_landmarks",
-            &|c| {
-                c.map_landmarks
-                    .write()
-                    .unwrap()
-                    .push((30_000_142, "LM".into(), 1.0, 2.0, 3.0));
-            },
-            &|c| c.map_landmarks.write().unwrap().clear(),
         );
         // Fleet extras sub-fields
         check_one(
@@ -1677,6 +1624,8 @@ fn legacy_runtime_snapshot_with_location_change_invuln_fields_loads_cleanly() {
             "location_change_invuln": {
                 "90000001": 1800000060
             },
+            "scanned_signatures": [[90000001, 30000142, 555]],
+            "character_scan_progress": [[[90000001, 30000142, "LEG-555"], 0.85]],
             "map_landmarks": [[1, "Gate-Ref", 10.0, 20.0, 30.0]]
         }"#;
         db.with_mut_snapshot(|snap| {
@@ -1694,7 +1643,11 @@ fn legacy_runtime_snapshot_with_location_change_invuln_fields_loads_cleanly() {
             assert_eq!(st.started_tick, 42);
             assert_eq!(st.reason, "stargate_jump");
         }
-        assert_eq!(ctx.map_landmarks.read().unwrap().len(), 1);
+        assert!(ctx.has_scanned_signature(90_000_001, 30_000_142, 555));
+        assert_eq!(
+            ctx.get_character_scan_progress(90_000_001, 30_000_142, "LEG-555"),
+            Some(0.85)
+        );
     }
 
     // 2. Pre-Step-2B SQLite `system_checkpoint` rows containing legacy `kind = "location_change_invuln"`
