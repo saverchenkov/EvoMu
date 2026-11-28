@@ -3378,13 +3378,13 @@ async fn test_wallet_bills_lp_trade_market_and_industry_notifications() {
 
     call(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(trade_item_id)]).await;
     let n_to2 = ctx.drain_notifications_for_char(P2);
-    assert_eq!(events_from(&n_to2, "OnTradeOffer"), vec![vec![PyRep::Integer(trade_id), PyRep::Bool(false), PyRep::Bool(false),]]);
+    assert_eq!(events_from(&n_to2, "OnTradeOffer"), vec![vec![PyRep::Integer(trade_id), PyRep::Bool(false)]]);
     assert_eq!(events_from(&n_to2, "OnTradeOfferReset"), vec![vec![PyRep::Integer(trade_id), PyRep::Bool(false)]]);
     ctx.drain_notifications_for_char(P1);
 
     call(&ctx, &mut s2, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id), PyRep::Real(5_000.0)]).await;
     let n_tm1 = ctx.drain_notifications_for_char(P1);
-    assert_eq!(events_from(&n_tm1, "OnTradeMoneyOffer"), vec![vec![PyRep::Integer(trade_id), PyRep::Real(0.0), PyRep::Real(5_000.0),]]);
+    assert_eq!(events_from(&n_tm1, "OnTradeMoneyOffer"), vec![vec![PyRep::Integer(trade_id), PyRep::Real(5_000.0)]]);
     ctx.drain_notifications_for_char(P2);
 
     call(&ctx, &mut s1, "trademgr", "MakeOffer", &[PyRep::Integer(trade_id), PyRep::Bool(true)]).await;

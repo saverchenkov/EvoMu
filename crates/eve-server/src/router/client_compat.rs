@@ -418,20 +418,6 @@ fn normalize_damage_message_dict(rep: PyRep) -> PyRep {
     PyRep::Dict(entries)
 }
 
-fn normalize_damage_state_tuple(rep: PyRep) -> PyRep {
-    let PyRep::Tuple(mut state) = rep else {
-        return rep;
-    };
-    if state.len() == 3 {
-        if let Some(PyRep::Tuple(shield_tuple)) = state.first() {
-            if let Some(shield_ratio) = shield_tuple.first().cloned() {
-                state[0] = shield_ratio;
-            }
-        }
-    }
-    PyRep::Tuple(state)
-}
-
 /// Returns `true` when a server notification uses an internal test-only tuple shape that
 /// has no bound MachoNet moniker on the live TCP client wire.
 pub fn should_suppress_macho_notification(event: &str, args: &[PyRep]) -> bool {
@@ -492,21 +478,6 @@ pub fn normalize_macho_notification_with_sde(
     sde: Option<&eve_sde::SdeRegistry>,
 ) -> Vec<PyRep> {
     match event {
-        "OnContractCreated" => Vec::new(),
-        "OnDockingAccepted" => {
-            if args.len() >= 3 {
-                vec![args[2].clone()]
-            } else {
-                args
-            }
-        }
-        "OnChannelJoined" | "OnChannelLeft" | "OnSystemWideEffectRemove" => {
-            if let Some(first) = args.into_iter().next() {
-                vec![first]
-            } else {
-                Vec::new()
-            }
-        }
         "OnSharedBookmarksFolderUpdated" => {
             if let Some(PyRep::List(entries)) = args.first_mut() {
                 for entry in entries.iter_mut() {
@@ -532,32 +503,6 @@ pub fn normalize_macho_notification_with_sde(
                 }
             }
             args
-        }
-        "OnCorporationRecruitmentAdChanged" => Vec::new(),
-        "OnOrganizationContactsUpdated" => {
-            let Some(owner_id) = args.first().cloned() else {
-                return Vec::new();
-            };
-            let mut updates_out = Vec::new();
-            if let Some(PyRep::List(items)) = args.get(1) {
-                for it in items {
-                    let cid = it
-                        .dict_get("contactID")
-                        .cloned()
-                        .unwrap_or(PyRep::Integer(0));
-                    let rel = it
-                        .dict_get("standing")
-                        .or_else(|| it.dict_get("relationshipID"))
-                        .cloned()
-                        .unwrap_or(PyRep::Real(0.0));
-                    let mask = it
-                        .dict_get("labelMask")
-                        .cloned()
-                        .unwrap_or(PyRep::Integer(0));
-                    updates_out.push(PyRep::Tuple(vec![cid, rel, mask]));
-                }
-            }
-            vec![owner_id, PyRep::List(updates_out)]
         }
         "OnTargetClear" => {
             if args.is_empty() {
@@ -608,19 +553,6 @@ pub fn normalize_macho_notification_with_sde(
                 args
             }
         }
-        "OnNotificationReceived" => {
-            if args.is_empty() {
-                vec![
-                    PyRep::Integer(0),
-                    PyRep::Integer(0),
-                    PyRep::None,
-                    PyRep::Integer(0),
-                    PyRep::None,
-                ]
-            } else {
-                args
-            }
-        }
         "OnTarget" => {
             if args.len() == 2 {
                 let (what, tid) = match (&args[0], &args[1]) {
@@ -651,10 +583,6 @@ pub fn normalize_macho_notification_with_sde(
                 args
             }
         }
-        "OnTradeOffer" | "OnTradeMoneyOffer" => {
-            args.truncate(2);
-            args
-        }
         "OnServerSkillsChanged" => {
             if args
                 .get(1)
@@ -662,19 +590,6 @@ pub fn normalize_macho_notification_with_sde(
                 .is_some_and(|s| !s.starts_with("On"))
             {
                 args[1] = PyRep::None;
-            }
-            args
-        }
-        "OnDamageStateChange" => {
-            if args.len() >= 2 {
-                let dmg = std::mem::replace(&mut args[1], PyRep::None);
-                args[1] = normalize_damage_state_tuple(dmg);
-            }
-            args
-        }
-        "OnSlimItemChange" => {
-            if args.len() == 2 && matches!(args.first(), Some(PyRep::Integer(_))) {
-                args[0] = args[1].clone();
             }
             args
         }
@@ -701,20 +616,6 @@ pub fn normalize_macho_notification_with_sde(
             .collect(),
         "OnSpecialFX" => normalize_on_special_fx(args),
         "OnGodmaShipEffect" => normalize_on_godma_ship_effect(args, sde),
-        "OnCombatMessage" => {
-            if let Some(PyRep::String(ref mut key)) = args.first_mut() {
-                let mapped = match key.as_str() {
-                    "AttackHit" => Some("AttackHits"),
-                    "AttackedBy" => Some("AttackHitsR"),
-                    "AttackMissBy" => Some("AttackMissR"),
-                    _ => None,
-                };
-                if let Some(m) = mapped {
-                    *key = m.to_string();
-                }
-            }
-            args
-        }
         "OnDamageMessage" => {
             // V24.01 `Logger.OnDamageMessage(self, damageMessagesArgs)` (`loggerSvc.pyj:322`)
             // takes 1 argument (`damageMessagesArgs: dict`) and passes it to

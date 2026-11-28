@@ -2868,10 +2868,10 @@ define_notifications! {
         fields: { owner_id: i64, updates: PyRep },
         samples: || vec![vec![
             PyRep::Integer(98_000_001),
-            PyRep::List(vec![PyRep::keyval([
-                ("contactID", PyRep::Integer(90_000_002)),
-                ("standing", PyRep::Real(5.0)),
-                ("labelMask", PyRep::Integer(0)),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(90_000_002),
+                PyRep::Real(5.0),
+                PyRep::Integer(0),
             ])]),
         ]],
     },
@@ -3621,11 +3621,7 @@ define_notifications! {
     },
     OnChannelJoined => "OnChannelJoined" ("channelid") {
         fields: { channel: String },
-        optional: { character_id: Option<i64> },
-        samples: || vec![
-            vec![PyRep::String("solarsystemid2:30000142".into())],
-            vec![PyRep::String("solarsystemid2:30000142".into()), PyRep::Integer(90_000_001)],
-        ],
+        samples: || vec![vec![PyRep::String("solarsystemid2:30000142".into())]],
     },
     OnClientEventChatMessageSent => "OnClientEvent_ChatMessageSent" ("channelid") {
         samples: || vec![vec![]],
@@ -4062,11 +4058,7 @@ define_notifications! {
         ],
     },
     OnCorporationRecruitmentAdChanged => "OnCorporationRecruitmentAdChanged" ("corpid") {
-        optional: { corp_id: Option<i64>, ad_id: Option<i64> },
-        samples: || vec![
-            vec![],
-            vec![PyRep::Integer(98_000_001), PyRep::Integer(1)],
-        ],
+        samples: || vec![vec![]],
     },
     OnCorporationStructuresUpdated => "OnCorporationStructuresUpdated" ("corpid") {
         samples: || vec![vec![]],
@@ -6213,13 +6205,11 @@ define_notifications! {
         ]],
     },
     OnTradeMoneyOffer => "OnTradeMoneyOffer" ("charid") {
-        fields: { container_id: i64, arg1: PyRep },
-        optional: { arg2: Option<PyRep> },
+        fields: { container_id: i64, money: f64 },
         samples: || vec![vec![PyRep::Integer(1), PyRep::Real(5_000.0)]],
     },
     OnTradeOffer => "OnTradeOffer" ("charid") {
-        fields: { container_id: i64, arg1: PyRep },
-        optional: { arg2: Option<PyRep> },
+        fields: { container_id: i64, state: bool },
         samples: || vec![vec![PyRep::Integer(1), PyRep::Bool(true)]],
     },
     OnTradeOfferReset => "OnTradeOfferReset" ("charid") {
