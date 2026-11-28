@@ -126,6 +126,10 @@ pub async fn step_encounter_wave_on_kill(
     killed_ball_id: i64,
     pos: DVec3,
 ) {
+    // Cold solar systems must not advance `current_wave` or spawn wave NPCs via `get_or_spawn`.
+    if ctx.systems.get_handle(solar_system_id).is_none() {
+        return;
+    }
     let triggered_info: Option<(u32, u32, Vec<u32>, DVec3)> = with_mut_combat_runtime(ctx, |rt| {
         let mut spawn_req = None;
         for enc in rt.encounter_waves.values_mut() {
@@ -492,7 +496,7 @@ async fn handle_npc_destroyed_in_space_inner(
                 });
             }
         }
-        if drop_drifter_sleeper_loot && killer > 0 {
+        if drop_drifter_sleeper_loot && killer > 0 && systems.get_handle(solar_system_id).is_some() {
             let _ = crate::services::pve_exploration_sites::drop_sleeper_wreck_core(
                 db,
                 systems,
@@ -1104,7 +1108,10 @@ pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id:
     if pending.is_empty() {
         return;
     }
-    let handle_opt = ctx.systems.get_handle(solar_system_id);
+    // Cold systems do not materialize DB wrecks, lifetime entries, or cascade kills after draining pending cache.
+    let Some(handle) = ctx.systems.get_handle(solar_system_id) else {
+        return;
+    };
     let now_unix = ctx.now_unix();
     for npc in pending {
         with_mut_combat_runtime(ctx, |rt| {
@@ -1201,37 +1208,35 @@ pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id:
                 .unwrap_or_else(|e| e.into_inner())
                 .get_or_create(killer_char_id)
                 .is_criminal(now_unix);
-        if let Some(ref handle) = handle_opt {
-            let _ = handle
-                .spawn_ball_with_meta(
-                    eve_destiny::Ball {
-                        id: wreck_id,
-                        type_id: wreck_tid,
-                        position: npc.spawn_position,
-                        velocity: DVec3::ZERO,
-                        max_velocity: 0.0,
-                        inertia: 1.0,
-                        mass: 1_000.0,
-                        radius: 25.0,
-                        speed_fraction: 0.0,
-                        mode: eve_destiny::MovementMode::Stop,
-                    },
-                    ctx.build_type_combat_state(wreck_tid),
-                    eve_destiny::SlimItemMeta {
-                        group_id: wreck_group_id,
-                        category_id: wreck_category_id,
-                        owner_id: killer_char_id,
-                        char_id: None,
-                        corp_id: -1,
-                        alliance_id: -1,
-                        security_status: 0.0,
-                        is_cloaked: false,
-                        name: wreck_name,
-                        ..Default::default()
-                    },
-                )
-                .await;
-        }
+        let _ = handle
+            .spawn_ball_with_meta(
+                eve_destiny::Ball {
+                    id: wreck_id,
+                    type_id: wreck_tid,
+                    position: npc.spawn_position,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 1_000.0,
+                    radius: 25.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                ctx.build_type_combat_state(wreck_tid),
+                eve_destiny::SlimItemMeta {
+                    group_id: wreck_group_id,
+                    category_id: wreck_category_id,
+                    owner_id: killer_char_id,
+                    char_id: None,
+                    corp_id: -1,
+                    alliance_id: -1,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                    name: wreck_name,
+                    ..Default::default()
+                },
+            )
+            .await;
         crate::services::combat_crimewatch::register_container_lifetime(
             ctx,
             wreck_id,

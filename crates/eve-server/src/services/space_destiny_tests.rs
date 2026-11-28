@@ -3924,9 +3924,9 @@ async fn cold_system_ticks_cleanups_and_tourney_return_do_not_spawn() {
         service_roles::ROLE_GMH,
     );
     gm_sess.user_id = Some(gm_uid);
-    // Keep referee docked (`departing.in_space == false`) so TeleportRefHome exercises
-    // `tourney_return_ops::handle_teleport_ref_home` without triggering out-of-scope
-    // `teardown_registry` -> `drone_return::abandon_drones_and_fighters_for_ship_sync`.
+    // Keep referee docked (`departing.in_space == false`) so TeleportRefHome directly
+    // exercises `tourney_return_ops::handle_teleport_ref_home` (`sp6_lifecycle/drone_return`
+    // already gates teardown via `get_handle`).
     gm_sess.station_id = Some(other_st_id);
     assert!(ctx.systems.get_handle(arena_sys).is_none());
     assert!(ctx.systems.get_handle(home_sys).is_none());
@@ -4254,10 +4254,19 @@ async fn cold_system_ticks_cleanups_and_tourney_return_do_not_spawn() {
         assert!(s.ghost_detonated);
     });
 
-    // 10. combat_npc_encounters::handle_npc_destroyed_in_space_with_ctx & finalize_cycle_destroyed_npcs
+    // 10. combat_npc_encounters::handle_npc_destroyed_in_space_with_ctx -> finalize_cycle_destroyed_npcs & step_encounter_wave_on_kill
     let enc_id: u32 = 956_500;
     let enc_trigger_bid: i64 = 956_501;
-    let cycle_npc_bid: i64 = 956_502;
+    let drifter_bid: i64 = 956_502;
+    let (enc_items_before, enc_next_id_before) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.items
+                .values()
+                .filter(|it| it.location_id == enc_sys as i64)
+                .count(),
+            snap.next_entity_id,
+        )
+    });
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.encounter_waves.insert(
             enc_id,
@@ -4275,22 +4284,58 @@ async fn cold_system_ticks_cleanups_and_tourney_return_do_not_spawn() {
                 next_wave_pending: false,
             },
         );
-        rt.destroyed_npc_cache.insert(
-            cycle_npc_bid,
-            crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
-                cycle_npc_bid,
-                10_001,
-                enc_sys,
-                "Pirate",
-            ),
+        let mut trig_npc = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+            enc_trigger_bid,
+            10_001,
+            enc_sys,
+            "Pirate",
         );
+        trig_npc.target_id = Some(p_red);
+        rt.npc_entities.insert(enc_trigger_bid, trig_npc);
+
+        let mut drifter_npc = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+            drifter_bid,
+            10_001,
+            enc_sys,
+            "Drifter",
+        );
+        drifter_npc.target_id = Some(p_red);
+        drifter_npc.sleeper_wh_class = 5;
+        drifter_npc.custom_cargo_loot = Some((30_001, 2));
+        rt.npc_entities.insert(drifter_bid, drifter_npc);
     });
     assert!(ctx.systems.get_handle(enc_sys).is_none());
     crate::services::combat_crimewatch::combat_npc_encounters::handle_npc_destroyed_in_space_with_ctx(
         &ctx,
         enc_sys,
         enc_trigger_bid,
-        None,
+        Some(p_red),
+    )
+    .await;
+    crate::services::combat_crimewatch::combat_npc_encounters::handle_npc_destroyed_in_space_with_ctx(
+        &ctx,
+        enc_sys,
+        drifter_bid,
+        Some(p_red),
+    )
+    .await;
+    assert!(ctx.systems.get_handle(enc_sys).is_none());
+    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.npc_entities.contains_key(&enc_trigger_bid));
+        assert!(!rt.npc_entities.contains_key(&drifter_bid));
+        assert!(rt.destroyed_npc_cache.contains_key(&enc_trigger_bid));
+        assert!(rt.destroyed_npc_cache.contains_key(&drifter_bid));
+    });
+
+    crate::services::combat_crimewatch::combat_npc_encounters::finalize_cycle_destroyed_npcs(
+        &ctx, enc_sys,
+    )
+    .await;
+    crate::services::combat_crimewatch::combat_npc_encounters::step_encounter_wave_on_kill(
+        &ctx,
+        enc_sys,
+        enc_trigger_bid,
+        DVec3::ZERO,
     )
     .await;
     assert!(ctx.systems.get_handle(enc_sys).is_none());
@@ -4299,16 +4344,25 @@ async fn cold_system_ticks_cleanups_and_tourney_return_do_not_spawn() {
         assert_eq!(enc.current_wave, 1, "cold system must not advance current_wave");
         assert!(!enc.completed);
         assert_eq!(enc.active_wave_ball_ids, vec![enc_trigger_bid]);
+        assert!(!rt.destroyed_npc_cache.contains_key(&enc_trigger_bid));
+        assert!(!rt.destroyed_npc_cache.contains_key(&drifter_bid));
     });
-
-    crate::services::combat_crimewatch::combat_npc_encounters::finalize_cycle_destroyed_npcs(
-        &ctx, enc_sys,
-    )
-    .await;
-    assert!(ctx.systems.get_handle(enc_sys).is_none());
-    assert!(crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-        !rt.destroyed_npc_cache.contains_key(&cycle_npc_bid)
-    }));
+    ctx.db.with_snapshot(|snap| {
+        let enc_items: Vec<_> = snap
+            .items
+            .values()
+            .filter(|it| it.location_id == enc_sys as i64)
+            .collect();
+        assert_eq!(
+            enc_items.len(),
+            enc_items_before,
+            "cold system must not insert orphaned wreck or sleeper loot items"
+        );
+        assert!(
+            !enc_items.iter().any(|it| it.item_id > enc_next_id_before),
+            "cold system must not mint new DB items on NPC death finalization"
+        );
+    });
 
     // 11. tourney_arena::TeleportToStation on cold old_sys
     ctx.db.with_mut_snapshot(|snap| {
@@ -4324,8 +4378,8 @@ async fn cold_system_ticks_cleanups_and_tourney_return_do_not_spawn() {
         }
     });
     // Keep referee docked (`departing.in_space == false`) while DB char + ship point to
-    // cold `arena_cold_sys`, so `TeleportToStation` hits `tourney_arena.rs:347` without
-    // triggering out-of-scope `teardown_registry` -> `drone_return::abandon_drones_and_fighters_for_ship_sync`.
+    // cold `arena_cold_sys`, so `TeleportToStation` exercises `tourney_arena.rs:347`
+    // (`sp6_lifecycle/drone_return` already gates teardown via `get_handle`).
     gm_sess.solar_system_id = Some(arena_cold_sys);
     gm_sess.station_id = Some(other_st_id);
     gm_sess.ship_id = Some(gm_ship);
