@@ -558,3 +558,105 @@ async fn claim_loading_replays_in_flight_transitions_before_pending_in_fifo_orde
     let cg = gate.inner.lock().unwrap();
     assert!(cg.phase == CooldownGatePhase::Live && cg.in_flight_loading_transitions.is_empty() && cg.pending_transitions.is_empty());
 }
+
+fn ra_entry(source_ship_id: i64, module_id: i64, bonus_pct: f64) -> ProjectedRemoteAssistance {
+    ProjectedRemoteAssistance {
+        source_ship_id,
+        module_id,
+        module_type_id: 1964,
+        max_target_range_bonus_pct: bonus_pct,
+        scan_resolution_bonus_pct: bonus_pct,
+        sensor_strength_bonus_pct: 0.0,
+        optimal_range_bonus_pct: 0.0,
+        falloff_bonus_pct: 0.0,
+        tracking_speed_bonus_pct: 0.0,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_assistance_and_in_flight_superweapons_live_in_actor_ewar_state() {
+    let (reg, _db, _sde) = test_registry_with_db();
+    let (jita, amarr) = (30_000_142_u32, 30_002_187_u32);
+    let (h_jita, h_amarr) = (reg.get_or_spawn(jita), reg.get_or_spawn(amarr));
+
+    let e1 = ra_entry(800_001, 700_001, 25.0);
+    let e1_updated = ra_entry(800_001, 700_001, 35.0);
+    let e2 = ra_entry(800_002, 700_002, 15.0);
+    h_jita.upsert_remote_assistance_sync(900_001, e1).unwrap();
+    h_jita.upsert_remote_assistance_sync(900_001, e1_updated.clone()).unwrap();
+    h_jita.upsert_remote_assistance_sync(900_001, e2.clone()).unwrap();
+    h_jita.upsert_remote_assistance_sync(900_002, e1_updated.clone()).unwrap();
+
+    assert_eq!(h_jita.view().remote_assistance_for(900_001), Some([e1_updated.clone(), e2.clone()].as_slice()));
+    assert_eq!(reg.ship_remote_assistance(900_001), vec![e1_updated.clone(), e2.clone()]);
+    assert!(h_amarr.view().remote_assistance_for(900_001).is_none());
+    assert!(!h_jita.view().ewar.is_empty());
+
+    // Wrong source ship must not remove entry.
+    assert!(h_jita.remove_remote_assistance_by_module_sync(800_999, 700_001).unwrap().is_empty());
+    // Matching source ship removes across targets and prunes empty target entries.
+    let mut affected = h_jita.remove_remote_assistance_by_module_sync(800_001, 700_001).unwrap();
+    affected.sort_unstable();
+    assert_eq!(affected, vec![900_001, 900_002]);
+    assert_eq!(reg.ship_remote_assistance(900_001), vec![e2.clone()]);
+    assert!(h_jita.view().remote_assistance_for(900_002).is_none());
+
+    // SetRemoteAssistanceForTarget replaces and clears on empty vec.
+    h_jita.set_remote_assistance_for_target_sync(900_001, vec![e1_updated.clone()]).unwrap();
+    assert_eq!(reg.ship_remote_assistance(900_001), vec![e1_updated]);
+    h_jita.set_remote_assistance_for_target_sync(900_001, Vec::new()).unwrap();
+    assert!(h_jita.view().remote_assistance_for(900_001).is_none());
+
+    // In-flight superweapon acquire/release mutex & SystemView publication.
+    assert!(!reg.has_in_flight_superweapons());
+    assert!(h_jita.try_acquire_in_flight_superweapon(800_001).await.unwrap());
+    assert!(!h_jita.try_acquire_in_flight_superweapon(800_001).await.unwrap());
+    assert!(h_jita.try_acquire_in_flight_superweapon(800_002).await.unwrap());
+    assert!(h_jita.view().has_in_flight_superweapons() && reg.has_in_flight_superweapons());
+    assert!(h_jita.release_in_flight_superweapon(800_001).await.unwrap());
+    assert!(!h_jita.release_in_flight_superweapon(800_001).await.unwrap());
+    assert!(h_jita.view().has_in_flight_superweapons());
+
+    // `clear_all_ewar_state_sync` clears both `remote_assistance` and `in_flight_superweapons`.
+    h_jita.upsert_remote_assistance_sync(900_003, e2).unwrap();
+    assert!(!h_jita.ewar_state_snapshot().is_empty());
+    reg.clear_all_ewar_state_sync();
+    assert!(h_jita.ewar_state_snapshot().is_empty());
+    assert!(!reg.has_in_flight_superweapons());
+    assert!(reg.ship_remote_assistance(900_003).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn release_in_flight_superweapon_best_effort_handles_open_and_full_channels_without_blocking() {
+    let (reg, _db, _sde) = test_registry_with_db();
+    let h = reg.get_or_spawn(30_000_142);
+
+    assert!(h.try_acquire_in_flight_superweapon(810_001).await.unwrap());
+    h.release_in_flight_superweapon_best_effort(810_001);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while h.view().has_in_flight_superweapons() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("best-effort release clears SystemView");
+
+    // Verify TrySendError::Full fallback spawns async send when Tokio runtime is current.
+    let (full_tx, mut full_rx) = tokio::sync::mpsc::channel(1);
+    full_tx
+        .try_send(SystemCommand::ClearEwarState {
+            reply: tokio::sync::oneshot::channel().0,
+        })
+        .unwrap();
+    let mut full_h = h.clone();
+    full_h.cmd_tx = full_tx;
+    full_h.release_in_flight_superweapon_best_effort(810_002);
+    assert!(matches!(full_rx.recv().await.unwrap(), SystemCommand::ClearEwarState { .. }));
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), full_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        SystemCommand::ReleaseInFlightSuperweapon { ship_id: 810_002, reply: None }
+    ));
+}

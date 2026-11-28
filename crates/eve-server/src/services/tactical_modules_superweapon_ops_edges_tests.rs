@@ -539,6 +539,10 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
             .code,
         "TargetRequired"
     );
+    assert!(
+        !has_in_flight_superweapons(&ctx),
+        "in-flight superweapon guard must release and publish before returning TargetRequired"
+    );
     assert_eq!(
         activate_superweapon_or_lance(
             &ctx,
@@ -568,6 +572,10 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
         .unwrap_err()
         .code,
         "TargetNotInSpace"
+    );
+    assert!(
+        !has_in_flight_superweapons(&ctx),
+        "in-flight superweapon guard must release and publish before returning TargetNotInSpace"
     );
 
     // 8. Target cloaked, tethered, not locked, ineligible hull, out of range

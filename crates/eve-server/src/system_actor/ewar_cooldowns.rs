@@ -12,14 +12,29 @@ use super::{
 };
 use eve_db::lock_rank::{held_lock_ranks, RankedMutex, RankedRwLock, RANK_LEAF, RANK_WORLD_INNER};
 use eve_sde::SolarSystemId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectedRemoteAssistance {
+    pub source_ship_id: i64,
+    pub module_id: i64,
+    pub module_type_id: u32,
+    pub max_target_range_bonus_pct: f64,
+    pub scan_resolution_bonus_pct: f64,
+    pub sensor_strength_bonus_pct: f64,
+    pub optimal_range_bonus_pct: f64,
+    pub falloff_bonus_pct: f64,
+    pub tracking_speed_bonus_pct: f64,
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ActorEwarState {
     pub projected_ewar: HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>,
     pub projected_ewar_sources: HashMap<i64, i64>,
     pub active_ewar_starts: HashMap<(i64, i64), Vec<(i64, &'static str)>>,
+    pub remote_assistance: HashMap<i64, Vec<ProjectedRemoteAssistance>>,
+    pub in_flight_superweapons: HashSet<i64>,
 }
 
 impl ActorEwarState {
@@ -27,6 +42,8 @@ impl ActorEwarState {
         self.projected_ewar.is_empty()
             && self.projected_ewar_sources.is_empty()
             && self.active_ewar_starts.is_empty()
+            && self.remote_assistance.is_empty()
+            && self.in_flight_superweapons.is_empty()
     }
 }
 
@@ -158,6 +175,45 @@ fn flush_module_ewar_in_actor(
         source_module_id,
         allow_db_source_fallback,
     ))
+}
+
+pub(crate) fn upsert_remote_assistance_in_state(
+    ewar: &mut ActorEwarState,
+    target_ship_id: i64,
+    entry: ProjectedRemoteAssistance,
+) {
+    let list = ewar.remote_assistance.entry(target_ship_id).or_default();
+    list.retain(|e| e.module_id != entry.module_id);
+    list.push(entry);
+}
+
+pub(crate) fn remove_remote_assistance_by_module_in_state(
+    ewar: &mut ActorEwarState,
+    source_ship_id: i64,
+    source_module_id: i64,
+) -> Vec<i64> {
+    let mut affected_ships = Vec::new();
+    ewar.remote_assistance.retain(|&target_ship_id, list| {
+        let before = list.len();
+        list.retain(|e| !(e.source_ship_id == source_ship_id && e.module_id == source_module_id));
+        if list.len() < before {
+            affected_ships.push(target_ship_id);
+        }
+        !list.is_empty()
+    });
+    affected_ships
+}
+
+pub(crate) fn set_remote_assistance_for_target_in_state(
+    ewar: &mut ActorEwarState,
+    target_ship_id: i64,
+    entries: Vec<ProjectedRemoteAssistance>,
+) {
+    if entries.is_empty() {
+        ewar.remote_assistance.remove(&target_ship_id);
+    } else {
+        ewar.remote_assistance.insert(target_ship_id, entries);
+    }
 }
 
 
@@ -482,6 +538,37 @@ pub(in crate::system_actor) fn handle_ewar_and_cooldown_command(
             defer_reply(exec_ctx.deferred_replies, reply, Ok(()));
             None
         }
+        SystemCommand::UpsertRemoteAssistance { target_ship_id, entry, reply } => {
+            upsert_remote_assistance_in_state(&mut exec_ctx.actor_st.ewar_state, target_ship_id, entry);
+            defer_reply(exec_ctx.deferred_replies, reply, Ok(()));
+            None
+        }
+        SystemCommand::RemoveRemoteAssistanceByModule { source_ship_id, source_module_id, reply } => {
+            let affected = remove_remote_assistance_by_module_in_state(
+                &mut exec_ctx.actor_st.ewar_state,
+                source_ship_id,
+                source_module_id,
+            );
+            defer_reply(exec_ctx.deferred_replies, reply, Ok(affected));
+            None
+        }
+        SystemCommand::SetRemoteAssistanceForTarget { target_ship_id, entries, reply } => {
+            set_remote_assistance_for_target_in_state(&mut exec_ctx.actor_st.ewar_state, target_ship_id, entries);
+            defer_reply(exec_ctx.deferred_replies, reply, Ok(()));
+            None
+        }
+        SystemCommand::TryAcquireInFlightSuperweapon { ship_id, reply } => {
+            let acquired = exec_ctx.actor_st.ewar_state.in_flight_superweapons.insert(ship_id);
+            defer_reply(exec_ctx.deferred_replies, reply, Ok(acquired));
+            None
+        }
+        SystemCommand::ReleaseInFlightSuperweapon { ship_id, reply } => {
+            let removed = exec_ctx.actor_st.ewar_state.in_flight_superweapons.remove(&ship_id);
+            if let Some(reply) = reply {
+                defer_reply(exec_ctx.deferred_replies, reply, Ok(removed));
+            }
+            None
+        }
         SystemCommand::RecordModuleCooldown { ship_id, module_id, module_type_id, now_unix_f64, delay_s, tidi_factor, has_tidi_history, reply } => {
             let mut ctx = BallOpsCtx::from_exec_ctx(exec_ctx);
             let res = record_module_cooldown_in_actor(&mut ctx, RecordModuleCooldownReq {
@@ -574,6 +661,8 @@ impl SystemView {
     pub fn projected_ewar_for(&self, target_ship_id: i64) -> Option<&[eve_dogma::ProjectedEwarEffect]> { self.ewar.projected_ewar.get(&target_ship_id).map(Vec::as_slice) }
     pub fn projected_ewar_source(&self, source_module_id: i64) -> Option<i64> { self.ewar.projected_ewar_sources.get(&source_module_id).copied() }
     pub fn active_ewar_starts_for(&self, ship_id: i64, module_id: i64) -> Option<&[(i64, &'static str)]> { self.ewar.active_ewar_starts.get(&(ship_id, module_id)).map(Vec::as_slice) }
+    pub fn remote_assistance_for(&self, target_ship_id: i64) -> Option<&[ProjectedRemoteAssistance]> { self.ewar.remote_assistance.get(&target_ship_id).map(Vec::as_slice) }
+    pub fn has_in_flight_superweapons(&self) -> bool { !self.ewar.in_flight_superweapons.is_empty() }
     pub fn module_reactivation_cooldown(&self, key: &(i64, i64, u32)) -> Option<ModuleCooldownEntry> { self.module_cooldowns.reactivation_cooldowns.get(key).copied() }
     pub fn module_reload_sim_deadline(&self, module_id: i64) -> Option<ModuleReloadSimDeadline> { self.module_cooldowns.reload_sim_deadlines.get(&module_id).copied() }
 }
@@ -789,6 +878,141 @@ impl SystemHandle {
             |(), reply| SystemCommand::ClearEwarState { reply },
             |ctx, ()| { ctx.actor_st.ewar_state = ActorEwarState::default(); Ok(()) },
         )
+    }
+
+    pub fn upsert_remote_assistance_sync(
+        &self,
+        target_ship_id: i64,
+        entry: ProjectedRemoteAssistance,
+    ) -> Result<(), String> {
+        dispatch_actor_sync_with_deadline(
+            self,
+            "UpsertRemoteAssistance",
+            ACTOR_CMD_TIMEOUT,
+            (target_ship_id, entry),
+            |(target_ship_id, entry), reply| SystemCommand::UpsertRemoteAssistance {
+                target_ship_id,
+                entry,
+                reply,
+            },
+            |ctx, (target_ship_id, entry)| {
+                upsert_remote_assistance_in_state(&mut ctx.actor_st.ewar_state, target_ship_id, entry);
+                Ok(())
+            },
+        )
+    }
+
+    pub fn remove_remote_assistance_by_module_sync(
+        &self,
+        source_ship_id: i64,
+        source_module_id: i64,
+    ) -> Result<Vec<i64>, String> {
+        if !held_lock_ranks().is_empty() {
+            return Err(format!(
+                "refusing remove_remote_assistance_by_module_sync on system {} while holding ranked locks",
+                self.solar_system_id
+            ));
+        }
+        if self.is_on_actor_flush_thread() {
+            if self.cmd_tx.is_closed() {
+                return Err(format!("system {} actor closed", self.solar_system_id));
+            }
+            return Ok(super::ball_ops::run_direct_ball_op_on_current_thread(
+                self,
+                false,
+                |ctx| {
+                    remove_remote_assistance_by_module_in_state(
+                        &mut ctx.actor_st.ewar_state,
+                        source_ship_id,
+                        source_module_id,
+                    )
+                },
+            ));
+        }
+        dispatch_actor_sync_with_deadline(
+            self,
+            "RemoveRemoteAssistanceByModule",
+            ACTOR_CMD_TIMEOUT,
+            (source_ship_id, source_module_id),
+            |(source_ship_id, source_module_id), reply| {
+                SystemCommand::RemoveRemoteAssistanceByModule {
+                    source_ship_id,
+                    source_module_id,
+                    reply,
+                }
+            },
+            |ctx, (source_ship_id, source_module_id)| {
+                Ok(remove_remote_assistance_by_module_in_state(
+                    &mut ctx.actor_st.ewar_state,
+                    source_ship_id,
+                    source_module_id,
+                ))
+            },
+        )
+    }
+
+    pub fn set_remote_assistance_for_target_sync(
+        &self,
+        target_ship_id: i64,
+        entries: Vec<ProjectedRemoteAssistance>,
+    ) -> Result<(), String> {
+        dispatch_actor_sync_with_deadline(
+            self,
+            "SetRemoteAssistanceForTarget",
+            ACTOR_CMD_TIMEOUT,
+            (target_ship_id, entries),
+            |(target_ship_id, entries), reply| SystemCommand::SetRemoteAssistanceForTarget {
+                target_ship_id,
+                entries,
+                reply,
+            },
+            |ctx, (target_ship_id, entries)| {
+                set_remote_assistance_for_target_in_state(
+                    &mut ctx.actor_st.ewar_state,
+                    target_ship_id,
+                    entries,
+                );
+                Ok(())
+            },
+        )
+    }
+
+    pub async fn try_acquire_in_flight_superweapon(&self, ship_id: i64) -> Result<bool, String> {
+        call_actor_result_with_deadline(
+            self,
+            "TryAcquireInFlightSuperweapon",
+            ACTOR_CMD_TIMEOUT,
+            |reply| SystemCommand::TryAcquireInFlightSuperweapon { ship_id, reply },
+        )
+        .await
+    }
+
+    pub async fn release_in_flight_superweapon(&self, ship_id: i64) -> Result<bool, String> {
+        call_actor_result_with_deadline(
+            self,
+            "ReleaseInFlightSuperweapon",
+            ACTOR_CMD_TIMEOUT,
+            |reply| SystemCommand::ReleaseInFlightSuperweapon {
+                ship_id,
+                reply: Some(reply),
+            },
+        )
+        .await
+    }
+
+    pub fn release_in_flight_superweapon_best_effort(&self, ship_id: i64) {
+        let cmd = SystemCommand::ReleaseInFlightSuperweapon {
+            ship_id,
+            reply: None,
+        };
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) = self.cmd_tx.try_send(cmd) {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let tx = self.cmd_tx.clone();
+                handle.spawn(async move {
+                    let _ = tx.send(cmd).await;
+                });
+            }
+        }
     }
 
     pub(crate) fn enqueue_post_unlock_action(&self, action: PostUnlockHookAction) {
@@ -1036,6 +1260,30 @@ impl SystemRegistry {
             }
         }
         Vec::new()
+    }
+
+    /// Reads projected remote assistance targeting `target_ship_id` lock-free across live [`SystemView`]s.
+    pub fn ship_remote_assistance(&self, target_ship_id: i64) -> Vec<ProjectedRemoteAssistance> {
+        if let Some(handle) = self.find_ship_live_handle(target_ship_id) {
+            return handle
+                .view()
+                .remote_assistance_for(target_ship_id)
+                .map(<[ProjectedRemoteAssistance]>::to_vec)
+                .unwrap_or_default();
+        }
+        for (_, handle) in self.active_system_handles() {
+            if let Some(list) = handle.view().remote_assistance_for(target_ship_id) {
+                return list.to_vec();
+            }
+        }
+        Vec::new()
+    }
+
+    /// Returns `true` when any live system actor currently holds an in-flight superweapon guard.
+    pub fn has_in_flight_superweapons(&self) -> bool {
+        self.active_system_handles()
+            .into_iter()
+            .any(|(_, h)| h.view().has_in_flight_superweapons())
     }
 
     /// Clears transient in-space EWAR state across all currently loaded solar system actors.

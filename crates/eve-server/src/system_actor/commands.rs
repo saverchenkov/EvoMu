@@ -791,6 +791,29 @@ pub enum SystemCommand {
     ClearEwarState {
         reply: oneshot::Sender<Result<(), String>>,
     },
+    UpsertRemoteAssistance {
+        target_ship_id: i64,
+        entry: super::ProjectedRemoteAssistance,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveRemoteAssistanceByModule {
+        source_ship_id: i64,
+        source_module_id: i64,
+        reply: oneshot::Sender<Result<Vec<i64>, String>>,
+    },
+    SetRemoteAssistanceForTarget {
+        target_ship_id: i64,
+        entries: Vec<super::ProjectedRemoteAssistance>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    TryAcquireInFlightSuperweapon {
+        ship_id: i64,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
+    ReleaseInFlightSuperweapon {
+        ship_id: i64,
+        reply: Option<oneshot::Sender<Result<bool, String>>>,
+    },
     RecordModuleCooldown {
         ship_id: i64,
         module_id: i64,
@@ -1249,6 +1272,7 @@ impl SystemCommand {
                     }
                     Self::ApplyFitProjection { reply, .. } => park_optional_oneshot(reply),
                     Self::ApplyPersistedCooldownCommit { reply, .. } => park_optional_oneshot(reply),
+                    Self::ReleaseInFlightSuperweapon { reply, .. } => park_optional_oneshot(reply),
                     Self::RefreshStargateActivationStates { reply, .. } => park_optional_oneshot(reply),
                     Self::ActivateStargateTransitionForDest { reply, .. } => {
                         park_optional_oneshot(reply)
@@ -1411,6 +1435,10 @@ impl SystemCommand {
             ReplaceActiveEwarStarts,
             FlushModuleEwar,
             ClearEwarState,
+            UpsertRemoteAssistance,
+            RemoveRemoteAssistanceByModule,
+            SetRemoteAssistanceForTarget,
+            TryAcquireInFlightSuperweapon,
             RecordModuleCooldown,
             SeedModuleCooldownEntry,
             RemoveModuleCooldown,

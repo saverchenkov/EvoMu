@@ -534,6 +534,11 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::ReplaceActiveEwarStarts { .. } => "ReplaceActiveEwarStarts",
             SystemCommand::FlushModuleEwar { .. } => "FlushModuleEwar",
             SystemCommand::ClearEwarState { .. } => "ClearEwarState",
+            SystemCommand::UpsertRemoteAssistance { .. } => "UpsertRemoteAssistance",
+            SystemCommand::RemoveRemoteAssistanceByModule { .. } => "RemoveRemoteAssistanceByModule",
+            SystemCommand::SetRemoteAssistanceForTarget { .. } => "SetRemoteAssistanceForTarget",
+            SystemCommand::TryAcquireInFlightSuperweapon { .. } => "TryAcquireInFlightSuperweapon",
+            SystemCommand::ReleaseInFlightSuperweapon { .. } => "ReleaseInFlightSuperweapon",
             SystemCommand::RecordModuleCooldown { .. } => "RecordModuleCooldown",
             SystemCommand::SeedModuleCooldownEntry { .. } => "SeedModuleCooldownEntry",
             SystemCommand::RemoveModuleCooldown { .. } => "RemoveModuleCooldown",
@@ -1095,6 +1100,39 @@ fn system_command_all_variants_construct_and_match() {
         SystemCommand::ClearEwarState {
             reply: oneshot::channel().0,
         },
+        SystemCommand::UpsertRemoteAssistance {
+            target_ship_id: 2,
+            entry: crate::system_actor::ProjectedRemoteAssistance {
+                source_ship_id: 1,
+                module_id: 10,
+                module_type_id: 1964,
+                max_target_range_bonus_pct: 25.0,
+                scan_resolution_bonus_pct: 30.0,
+                sensor_strength_bonus_pct: 0.0,
+                optimal_range_bonus_pct: 0.0,
+                falloff_bonus_pct: 0.0,
+                tracking_speed_bonus_pct: 0.0,
+            },
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::RemoveRemoteAssistanceByModule {
+            source_ship_id: 1,
+            source_module_id: 10,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::SetRemoteAssistanceForTarget {
+            target_ship_id: 2,
+            entries: Vec::new(),
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::TryAcquireInFlightSuperweapon {
+            ship_id: 1,
+            reply: oneshot::channel().0,
+        },
+        SystemCommand::ReleaseInFlightSuperweapon {
+            ship_id: 1,
+            reply: None,
+        },
         SystemCommand::RecordModuleCooldown {
             ship_id: 1,
             module_id: 10,
@@ -1473,9 +1511,9 @@ fn system_command_all_variants_construct_and_match() {
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
     if cfg!(any(test, feature = "testkit")) {
-        assert_eq!(tags.len(), 190);
+        assert_eq!(tags.len(), 195);
     } else {
-        assert_eq!(tags.len(), 189);
+        assert_eq!(tags.len(), 194);
     }
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
@@ -1516,17 +1554,22 @@ fn system_command_all_variants_construct_and_match() {
     assert_eq!(tags[123], "SnapshotDirtyActiveDrones");
     assert_eq!(tags[124], "CommitActiveDronesFlushed");
     assert_eq!(tags[125], "UpsertProjectedEwar");
-    assert_eq!(tags[142], "ClearModuleReloadSimDeadline");
-    assert_eq!(tags[143], "ApplyLoadingCooldownTransitions");
-    assert_eq!(tags[144], "ApplyPersistedCooldownCommit");
-    assert_eq!(tags[145], "HydrateWeaponEffects");
-    assert_eq!(tags[157], "FlushWeaponEffectsCheckpoint");
-    assert_eq!(tags[158], "ShutdownActor");
-    assert_eq!(tags[159], "RefreshStargateActivationStates");
-    assert_eq!(tags[187], "StepFullTick");
-    assert_eq!(tags[188], "TryRemoveModuleCycle");
+    assert_eq!(tags[133], "UpsertRemoteAssistance");
+    assert_eq!(tags[134], "RemoveRemoteAssistanceByModule");
+    assert_eq!(tags[135], "SetRemoteAssistanceForTarget");
+    assert_eq!(tags[136], "TryAcquireInFlightSuperweapon");
+    assert_eq!(tags[137], "ReleaseInFlightSuperweapon");
+    assert_eq!(tags[147], "ClearModuleReloadSimDeadline");
+    assert_eq!(tags[148], "ApplyLoadingCooldownTransitions");
+    assert_eq!(tags[149], "ApplyPersistedCooldownCommit");
+    assert_eq!(tags[150], "HydrateWeaponEffects");
+    assert_eq!(tags[162], "FlushWeaponEffectsCheckpoint");
+    assert_eq!(tags[163], "ShutdownActor");
+    assert_eq!(tags[164], "RefreshStargateActivationStates");
+    assert_eq!(tags[192], "StepFullTick");
+    assert_eq!(tags[193], "TryRemoveModuleCycle");
     #[cfg(any(test, feature = "testkit"))]
-    assert_eq!(tags[189], "TestAccess");
+    assert_eq!(tags[194], "TestAccess");
 }
 
 #[test]
@@ -1683,6 +1726,44 @@ fn system_command_may_mutate_system_view_classifies_reads_vs_writes() {
     assert!(SystemCommand::MutateExternalActiveModule {
         op: crate::system_actor::ExternalActiveModuleOp::ClearAll,
         reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::UpsertRemoteAssistance {
+        target_ship_id: 2,
+        entry: crate::system_actor::ProjectedRemoteAssistance {
+            source_ship_id: 1,
+            module_id: 10,
+            module_type_id: 1964,
+            max_target_range_bonus_pct: 25.0,
+            scan_resolution_bonus_pct: 30.0,
+            sensor_strength_bonus_pct: 0.0,
+            optimal_range_bonus_pct: 0.0,
+            falloff_bonus_pct: 0.0,
+            tracking_speed_bonus_pct: 0.0,
+        },
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::RemoveRemoteAssistanceByModule {
+        source_ship_id: 1,
+        source_module_id: 10,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::SetRemoteAssistanceForTarget {
+        target_ship_id: 2,
+        entries: Vec::new(),
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::TryAcquireInFlightSuperweapon {
+        ship_id: 1,
+        reply: oneshot::channel().0,
+    }
+    .may_mutate_system_view());
+    assert!(SystemCommand::ReleaseInFlightSuperweapon {
+        ship_id: 1,
+        reply: None,
     }
     .may_mutate_system_view());
 }

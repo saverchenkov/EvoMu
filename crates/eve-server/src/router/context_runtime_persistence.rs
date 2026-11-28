@@ -87,12 +87,7 @@ impl PersistedTacticalModulesPayload {
         };
         let tag_of = |k: usize| -> u8 { u8::from(k == cur_inst_key) };
         let mut payload = Self {
-            remote_assistance: st
-                .remote_assistance
-                .iter()
-                .filter(|(&(k, _), _)| keep_key(k))
-                .map(|(&(k, sid), v)| ((tag_of(k), sid), v.clone()))
-                .collect(),
+            remote_assistance: Vec::new(),
             lance_caster_lock_until: Vec::new(),
             lance_victim_debuff_until: Vec::new(),
             pending_wubble_probes: st
@@ -127,7 +122,6 @@ impl PersistedTacticalModulesPayload {
                 .map(|(&(k, sys), &v)| ((tag_of(k), sys), v))
                 .collect(),
         };
-        payload.remote_assistance.sort_by_key(|(k, _)| *k);
         payload.active_wubble_debuffs.sort_by_key(|(k, _)| *k);
         payload.active_interdiction_probes.sort_by_key(|(k, _)| *k);
         payload.launcher_last_fire.sort_by_key(|(k, _)| *k);
@@ -155,11 +149,7 @@ impl PersistedTacticalModulesPayload {
         cur_inst_key: usize,
     ) -> LegacyTacticalDurableEntries {
         let untag = |tag: u8| -> usize { if tag == 1 { cur_inst_key } else { cur_db_key } };
-        st.remote_assistance = self
-            .remote_assistance
-            .into_iter()
-            .map(|((tag, sid), v)| ((untag(tag), sid), v))
-            .collect();
+        let _ = self.remote_assistance;
         st.pending_wubble_probes = self
             .pending_wubble_probes
             .into_iter()
@@ -598,7 +588,6 @@ fn clear_crash_lost_runtime_maps(ctx: &ServerContext) {
     ctx.systems.clear_all_ewar_state_sync();
     {
         let mut tac = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        tac.remote_assistance.clear();
         tac.pending_wubble_probes.clear();
         tac.active_wubble_debuffs.clear();
         tac.active_interdiction_probes.clear();
@@ -1165,21 +1154,6 @@ mod tests {
         assert!(PersistedTacticalModulesPayload::from_state(&st, inst_k).is_empty());
 
         // Populate entries keyed by both `db_k` (tag 0) and `inst_k` (tag 1) in reverse order to test sorting.
-        st.remote_assistance.insert(
-            (inst_k, 20),
-            vec![ProjectedRemoteAssistance {
-                source_ship_id: 1,
-                module_id: 2,
-                module_type_id: 3,
-                max_target_range_bonus_pct: 10.0,
-                scan_resolution_bonus_pct: 20.0,
-                sensor_strength_bonus_pct: 0.0,
-                optimal_range_bonus_pct: 0.0,
-                falloff_bonus_pct: 0.0,
-                tracking_speed_bonus_pct: 0.0,
-            }],
-        );
-        st.remote_assistance.insert((db_k, 10), Vec::new());
         st.pending_wubble_probes.push((
             inst_k,
             PendingWubbleProbe {
@@ -1222,9 +1196,7 @@ mod tests {
 
         let payload = PersistedTacticalModulesPayload::from_state(&st, inst_k);
         assert!(!payload.is_empty());
-        // Tag `0` (`db_k`) sorts before tag `1` (`inst_k`)
-        assert_eq!(payload.remote_assistance[0].0, (0, 10));
-        assert_eq!(payload.remote_assistance[1].0, (1, 20));
+        assert!(payload.remote_assistance.is_empty());
 
         // Remap into a fresh `new_db_k` and `new_inst_k`
         let new_db_k = 8_888_usize;
@@ -1232,13 +1204,33 @@ mod tests {
         let mut restored = TacticalModulesState::default();
         let legacy_durable = payload.apply_to_state(&mut restored, new_db_k, new_inst_k);
         assert!(legacy_durable.is_empty());
-        assert!(restored.remote_assistance.contains_key(&(new_db_k, 10)));
-        assert!(restored.remote_assistance.contains_key(&(new_inst_k, 20)));
         assert_eq!(restored.pending_wubble_probes[0].0, new_inst_k);
         assert!(restored.active_wubble_debuffs.contains_key(&(new_db_k, 100)));
         assert!(restored.active_interdiction_probes.contains_key(&(new_db_k, 130)));
         assert_eq!(restored.launcher_last_fire[&(new_inst_k, 140)].fired_unix, 500);
         assert_eq!(restored.system_sim_time_s[&(new_db_k, 30_000_142)], 42.5);
+
+        // Legacy checkpoint JSON carrying `remote_assistance` deserializes cleanly and stays crash-lost.
+        let legacy_ra_json = serde_json::json!({
+            "remote_assistance": [[[0, 10], [{
+                "source_ship_id": 1,
+                "module_id": 2,
+                "module_type_id": 3,
+                "max_target_range_bonus_pct": 10.0,
+                "scan_resolution_bonus_pct": 20.0,
+                "sensor_strength_bonus_pct": 0.0,
+                "optimal_range_bonus_pct": 0.0,
+                "falloff_bonus_pct": 0.0,
+                "tracking_speed_bonus_pct": 0.0
+            }]]]
+        });
+        let parsed_legacy_ra: PersistedTacticalModulesPayload =
+            serde_json::from_value(legacy_ra_json).expect("legacy remote_assistance json");
+        assert_eq!(parsed_legacy_ra.remote_assistance.len(), 1);
+        let mut legacy_restored = TacticalModulesState::default();
+        assert!(parsed_legacy_ra
+            .apply_to_state(&mut legacy_restored, new_db_k, new_inst_k)
+            .is_empty());
     }
 
     #[test]

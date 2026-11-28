@@ -16,19 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 pub use super::tactical_modules_probes::*;
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ProjectedRemoteAssistance {
-    pub source_ship_id: i64,
-    pub module_id: i64,
-    pub module_type_id: u32,
-    pub max_target_range_bonus_pct: f64,
-    pub scan_resolution_bonus_pct: f64,
-    pub sensor_strength_bonus_pct: f64,
-    pub optimal_range_bonus_pct: f64,
-    pub falloff_bonus_pct: f64,
-    pub tracking_speed_bonus_pct: f64,
-}
+pub use crate::system_actor::ProjectedRemoteAssistance;
 
 pub use eve_db::ActiveEntosisLinkRecord as ActiveEntosisLinkState;
 
@@ -236,13 +224,11 @@ impl Drop for ActiveFuelReserveGuard {
 
 #[derive(Default)]
 pub struct TacticalModulesState {
-    pub remote_assistance: HashMap<(usize, i64), Vec<ProjectedRemoteAssistance>>,
     pub pending_wubble_probes: Vec<(usize, PendingWubbleProbe)>,
     pub active_wubble_debuffs: HashMap<(usize, i64), ActiveWubbleDebuff>,
     pub active_interdiction_probes: HashMap<(usize, i64), super::tactical_module_mechanics::ActiveInterdictionProbe>,
     pub launcher_last_fire: HashMap<(usize, i64), super::tactical_module_mechanics::LauncherFireStamp>,
     pub system_sim_time_s: HashMap<(usize, u32), f64>,
-    pub(crate) in_flight_superweapons: std::collections::HashSet<(usize, i64)>,
 }
 
 /// Returns `true` if `ship_id` has an active Clone Vat Bay cycle at `now_unix` recorded in `WorldStateSnapshot`.
@@ -423,19 +409,32 @@ pub fn clear_entosis_warmup_on_unlock(ctx: &ServerContext, ship_id: i64, target_
 
 /// Removes any projected Remote Sensor Booster / Remote Tracking Computer entry from `(source_ship_id, source_module_id)`.
 pub fn remove_projected_remote_assistance(ctx: &ServerContext, source_ship_id: i64, source_module_id: i64) {
-    let db_key = db_key_of(ctx);
     let mut affected = Vec::new();
-    {
-        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        for (&(k, tid), list) in st.remote_assistance.iter_mut() {
-            if k == db_key {
-                let before = list.len();
-                list.retain(|e| !(e.source_ship_id == source_ship_id && e.module_id == source_module_id));
-                if list.len() != before { affected.push(tid); }
+    for (_, handle) in ctx.systems.active_system_handles() {
+        let may_match = handle
+            .view()
+            .ewar
+            .remote_assistance
+            .values()
+            .any(|list| {
+                list.iter()
+                    .any(|e| e.source_ship_id == source_ship_id && e.module_id == source_module_id)
+            });
+        if may_match {
+            if let Ok(ships) =
+                handle.remove_remote_assistance_by_module_sync(source_ship_id, source_module_id)
+            {
+                for tid in ships {
+                    if !affected.contains(&tid) {
+                        affected.push(tid);
+                    }
+                }
             }
         }
     }
-    for tid in affected { ctx.invalidate_and_push_fit(tid); }
+    for tid in affected {
+        ctx.invalidate_and_push_fit(tid);
+    }
 }
 
 /// Read-only character resolution and safety check for projected remote assistance (`209 | 290`) (`#1486`).
@@ -527,13 +526,15 @@ pub fn apply_projected_remote_assistance(
             tracking_speed_bonus_pct: mod_state.get_attribute(767, &ctx.sde) * falloff_mult,
         }
     };
-    let db_key = db_key_of(ctx);
-    let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-    let list = st.remote_assistance.entry((db_key, target_id)).or_default();
-    list.retain(|e| e.module_id != module_id);
-    list.push(entry);
-    drop(st);
-    ctx.invalidate_and_push_fit(target_id);
+    let handle_opt = ctx
+        .systems
+        .find_ship_live_handle(target_id)
+        .or_else(|| ctx.systems.find_ship_live_handle(ship_id))
+        .or_else(|| ctx.systems.get_handle(sys_id));
+    if let Some(handle) = handle_opt {
+        let _ = handle.upsert_remote_assistance_sync(target_id, entry);
+        ctx.invalidate_and_push_fit(target_id);
+    }
     Ok(())
 }
 
@@ -611,7 +612,6 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
         }
     }
 
-    let db_key = db_key_of(ctx);
     if tsb_penalty_active {
         if let Some(sr) = attrs.get_mut(&564) {
             *sr *= 0.75;
@@ -666,7 +666,7 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
     }
 
     let assist_mult = attrs.get(&2135).copied().unwrap_or(1.0);
-    let proj_list = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner()).remote_assistance.get(&(db_key, ship_id)).cloned().unwrap_or_default();
+    let proj_list = ctx.systems.ship_remote_assistance(ship_id);
     if !proj_list.is_empty() {
         let rs_extractors: [(u16, fn(&ProjectedRemoteAssistance) -> f64); 2] = [
             (76u16, |p: &ProjectedRemoteAssistance| p.max_target_range_bonus_pct),
@@ -711,8 +711,7 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
 
 /// Applies projected Remote Tracking Computer bonuses (with stacking penalty and `remoteAssistanceImpedance`) to module attributes.
 pub fn apply_projected_rtc_to_module_attrs(ctx: &ServerContext, ship_id: i64, mod_attrs: &mut HashMap<u16, f64>) {
-    let db_key = db_key_of(ctx);
-    let proj_list = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner()).remote_assistance.get(&(db_key, ship_id)).cloned().unwrap_or_default();
+    let proj_list = ctx.systems.ship_remote_assistance(ship_id);
     if proj_list.is_empty() {
         return;
     }
@@ -1629,23 +1628,36 @@ pub mod tactical_test_helpers {
         ship_id: i64,
         entries: Vec<ProjectedRemoteAssistance>,
     ) {
-        let db_key = db_key_of(ctx);
-        ctx.tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remote_assistance
-            .insert((db_key, ship_id), entries);
+        let handle = ctx.systems.find_ship_live_handle(ship_id).unwrap_or_else(|| {
+            let sys_id = ctx
+                .resolve_ship_system_opt(ship_id)
+                .or_else(|| {
+                    ctx.db.with_snapshot(|snap| {
+                        snap.items.get(&ship_id).and_then(|it| {
+                            snap.characters
+                                .get(&it.owner_id)
+                                .map(|c| c.solar_system_id)
+                                .filter(|&sid| sid > 0)
+                        })
+                    })
+                })
+                .unwrap_or(30_000_142);
+            ctx.systems.get_or_spawn(sys_id)
+        });
+        let _ = handle.set_remote_assistance_for_target_sync(ship_id, entries);
     }
 
     /// Returns `true` if any projected remote assistance entry on `ctx` originates from `source_ship_id`.
     #[cfg(test)]
     pub(crate) fn has_projected_remote_assistance_from_source(ctx: &ServerContext, source_ship_id: i64) -> bool {
-        let db_key = db_key_of(ctx);
-        ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner())
-            .remote_assistance.iter()
-            .filter(|(&(k, _), _)| k == db_key)
-            .flat_map(|(_, entries)| entries.iter())
-            .any(|e| e.source_ship_id == source_ship_id)
+        ctx.systems.active_system_handles().into_iter().any(|(_, h)| {
+            h.view()
+                .ewar
+                .remote_assistance
+                .values()
+                .flatten()
+                .any(|e| e.source_ship_id == source_ship_id)
+        })
     }
 
     /// Inserts or replaces an active Entosis Link entry for `ship_id`.
@@ -1853,13 +1865,7 @@ pub mod tactical_test_helpers {
     /// Returns `true` if any in-flight superweapon guard is active on `ctx`.
     #[cfg(test)]
     pub(crate) fn has_in_flight_superweapons(ctx: &ServerContext) -> bool {
-        let db_key = db_key_of(ctx);
-        ctx.tactical_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .in_flight_superweapons
-            .iter()
-            .any(|&(k, _)| k == db_key)
+        ctx.systems.has_in_flight_superweapons()
     }
 
     /// Begins a test silent fuel reservation guard for `item_ids` on `ctx`.
