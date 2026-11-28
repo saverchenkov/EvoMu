@@ -894,4 +894,75 @@ async fn cyno_and_filament_jumps_record_session_arrival_jump_and_rollback_on_wak
     assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&fleet_mod_id)));
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&77_902].quantity), 5_000);
     assert!(ctx.systems.get_handle(dst_sys).is_none());
+
+    // Read-only capacitor & fuel rejections must never wake Cold dst_sys (T4A-R3-01).
+    should_fail_dst.store(false, Ordering::Release);
+    for sid in [struct_ship, fleet_ship] {
+        let mut cs = cur_h.get_combat_state(sid).await.unwrap().unwrap();
+        cs.capacitor = 1.0;
+        cs.max_capacitor = 10_000.0;
+        cur_h.set_combat_state(sid, cs).await.unwrap();
+    }
+    let err_struct_cap = handle(
+        &ctx,
+        &mut struct_sess,
+        None,
+        "structureCynoBeaconMgr",
+        "CmdJumpToStructureBeacon",
+        &[PyRep::Integer(pharolux_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("low capacitor must reject structure jump without waking dst_sys");
+    assert_eq!(err_struct_cap.code, "NotEnoughCapacitor");
+    assert!(ctx.systems.get_handle(dst_sys).is_none());
+
+    let err_fleet_cap = handle_cmd_beacon_jump_fleet(
+        &ctx,
+        &mut fleet_sess,
+        &[PyRep::Integer(cyno_pilot), PyRep::Integer(cyno_ship), PyRep::Integer(i64::from(dst_sys))],
+    )
+    .await
+    .expect_err("low capacitor must reject fleet jump without waking dst_sys");
+    assert_eq!(err_fleet_cap.code, "NotEnoughCapacitor");
+    assert!(ctx.systems.get_handle(dst_sys).is_none());
+
+    for sid in [struct_ship, fleet_ship] {
+        let mut cs = cur_h.get_combat_state(sid).await.unwrap().unwrap();
+        cs.capacitor = 10_000.0;
+        cs.max_capacitor = 10_000.0;
+        cur_h.set_combat_state(sid, cs).await.unwrap();
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        for fuel_iid in [77_901_i64, 77_902_i64] {
+            if let Some(it) = snap.items.get_mut(&fuel_iid) {
+                it.quantity = 0;
+            }
+        }
+    });
+    let err_struct_fuel = handle(
+        &ctx,
+        &mut struct_sess,
+        None,
+        "structureCynoBeaconMgr",
+        "CmdJumpToStructureBeacon",
+        &[PyRep::Integer(pharolux_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("missing fuel must reject structure jump without waking dst_sys");
+    assert_eq!(err_struct_fuel.code, "InsufficientFuel");
+    assert!(ctx.systems.get_handle(dst_sys).is_none());
+
+    let err_fleet_fuel = handle_cmd_beacon_jump_fleet(
+        &ctx,
+        &mut fleet_sess,
+        &[PyRep::Integer(cyno_pilot), PyRep::Integer(cyno_ship), PyRep::Integer(i64::from(dst_sys))],
+    )
+    .await
+    .expect_err("missing fuel must reject fleet jump without waking dst_sys");
+    assert_eq!(err_fleet_fuel.code, "InsufficientFuel");
+    assert!(ctx.systems.get_handle(dst_sys).is_none());
 }

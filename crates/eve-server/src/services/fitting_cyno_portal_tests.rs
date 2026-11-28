@@ -1281,7 +1281,7 @@ async fn rpc_cyno_conduit_and_portal_jumps_atomic_on_wake_failure() {
             portal_module_id: portal_mod_id,
             portal_module_type_id: portal_mod_type,
             origin_system_id: origin_sys,
-            beacon,
+            beacon: beacon.clone(),
             distance_ly: 2.0,
             expires_at_unix: ctx.now_unix_secs() + 600,
             portal_ball_id: anchor_ship,
@@ -1373,4 +1373,130 @@ async fn rpc_cyno_conduit_and_portal_jumps_atomic_on_wake_failure() {
     assert!((after_cs.armor_hp - expected_armor).abs() < 1e-6);
     assert!((after_cs.structure_hp - expected_struct).abs() < 1e-6);
     assert!(after_cs.capacitor < 20_000.0);
+
+    // 6. Low-capacitor and missing-fuel rejections leave Cold dest_sys Cold across beacon, conduit, and bridge paths (T4A-R3-01).
+    let _ = dest_h.remove_ball(anchor_ship).await;
+    let _ = dest_h.remove_ball(pass_ship).await;
+    assert!(ctx.systems.stop_system(dest_sys).await);
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid) in [(anchor_id, anchor_ship), (pass_id, pass_ship)] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.solar_system_id = origin_sys;
+                ch.jump_cooldown_until_unix = 0;
+                ch.jump_fatigue_until_unix = 0;
+            }
+            if let Some(it) = snap.items.get_mut(&sid) {
+                it.location_id = i64::from(origin_sys);
+            }
+            snap.sp6_lifecycle.session_change_timers.remove(&cid);
+        }
+        if let Some(fuel_it) = snap.items.get_mut(&anchor_fuel) {
+            fuel_it.quantity = 10_000;
+        }
+    });
+    spawn_ship(&ctx, origin_sys, anchor_ship, ship_tid, anchor_id, DVec3::ZERO, 0.0, 20_000.0).await;
+    spawn_ship(&ctx, origin_sys, pass_ship, 587, pass_id, DVec3::new(1_000.0, 0.0, 0.0), 0.0, 1_000.0).await;
+    anchor_sess.solar_system_id = Some(origin_sys);
+    pass_sess.solar_system_id = Some(origin_sys);
+
+    let mut low_cap_cs = origin_h
+        .get_combat_state(anchor_ship)
+        .await
+        .unwrap()
+        .expect("anchor combat state");
+    low_cap_cs.capacitor = 1.0;
+    low_cap_cs.max_capacitor = 20_000.0;
+    origin_h.set_combat_state(anchor_ship, low_cap_cs).await.unwrap();
+    let err_cap = handle_cyno_portal(
+        &ctx,
+        &mut anchor_sess,
+        "beyonce",
+        "CmdJumpToFleetModuleBeacon",
+        &[
+            PyRep::Integer(cyno_pilot_id),
+            PyRep::Integer(i64::from(dest_sys)),
+            PyRep::Integer(beacon_id),
+        ],
+    )
+    .await
+    .expect("handled")
+    .expect_err("low capacitor must reject before waking dest_sys");
+    assert_eq!(err_cap.code, "NotEnoughCapacitor");
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+
+    let mut full_cap_cs = origin_h
+        .get_combat_state(anchor_ship)
+        .await
+        .unwrap()
+        .expect("anchor combat state");
+    full_cap_cs.capacitor = 20_000.0;
+    full_cap_cs.max_capacitor = 20_000.0;
+    origin_h.set_combat_state(anchor_ship, full_cap_cs).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(fuel_it) = snap.items.get_mut(&anchor_fuel) {
+            fuel_it.quantity = 0;
+        }
+    });
+
+    let err_single_fuel = handle_cyno_portal(
+        &ctx,
+        &mut anchor_sess,
+        "beyonce",
+        "CmdJumpToFleetModuleBeacon",
+        &[
+            PyRep::Integer(cyno_pilot_id),
+            PyRep::Integer(i64::from(dest_sys)),
+            PyRep::Integer(beacon_id),
+        ],
+    )
+    .await
+    .expect("handled")
+    .expect_err("missing fuel must reject solo jump without waking dest_sys");
+    assert_eq!(err_single_fuel.code, "NotEnoughFuel");
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+
+    let err_group_fuel = handle_cyno_portal(
+        &ctx,
+        &mut anchor_sess,
+        "beyonce",
+        "CmdGroupJumpToFleetModuleBeacon",
+        &[
+            PyRep::Integer(cyno_pilot_id),
+            PyRep::Integer(i64::from(dest_sys)),
+            PyRep::Integer(beacon_id),
+        ],
+    )
+    .await
+    .expect("handled")
+    .expect_err("missing fuel must reject conduit jump without waking dest_sys");
+    assert_eq!(err_group_fuel.code, "NotEnoughFuel");
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+
+    cyno_state(&ctx).state.write().unwrap().bridges.insert(
+        anchor_ship,
+        ActiveJumpBridge {
+            bridger_char_id: anchor_id,
+            bridger_ship_id: anchor_ship,
+            portal_module_id: portal_mod_id,
+            portal_module_type_id: portal_mod_type,
+            origin_system_id: origin_sys,
+            beacon,
+            distance_ly: 2.0,
+            expires_at_unix: ctx.now_unix_secs() + 600,
+            portal_ball_id: anchor_ship,
+        },
+    );
+    let err_bridge_fuel = handle_cyno_portal(
+        &ctx,
+        &mut pass_sess,
+        "beyonce",
+        "CmdJumpThroughFleet",
+        &[PyRep::Integer(anchor_id), PyRep::Integer(anchor_ship)],
+    )
+    .await
+    .expect("handled")
+    .expect_err("missing fuel must reject bridge passenger jump without waking dest_sys");
+    assert_eq!(err_bridge_fuel.code, "NotEnoughFuel");
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
 }

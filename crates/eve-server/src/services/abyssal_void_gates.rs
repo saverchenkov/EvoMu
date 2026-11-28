@@ -856,6 +856,9 @@ pub(crate) async fn handle_void_space_player_jump(
         client_error: None,
     };
     let origin_handle = origin_handle_opt.ok_or_else(ship_not_in_origin_err)?;
+    if ball_pos_opt.is_none() {
+        return Err(ship_not_in_origin_err());
+    }
     let void_handle = wake_jump_destination_system(ctx, VOID_SPACE_SYSTEM_ID).await?;
     let taken = origin_handle
         .take_ball(ship_id)
@@ -1166,26 +1169,32 @@ pub(crate) async fn handle_void_space_end_gate_activation(
             client_error: None,
         });
     }
-    if let Some((_, sb)) = void_handle.get_ball_snapshot(ship_id).await.ok().flatten() {
-        let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
-        if surface_dist > 2_500.0 {
-            return Err(BridgeRpcError {
-                code: "GateOutOfRange".into(),
-                message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
-                client_error: None,
-            });
-        }
+    let ship_not_in_void_err = || BridgeRpcError {
+        code: "SystemTransitionFailed".into(),
+        message: format!("Ship {ship_id} is no longer in solar system {cur_sys}"),
+        client_error: None,
+    };
+    let (_, sb) = void_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(ship_not_in_void_err)?;
+    let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
+    if surface_dist > 2_500.0 {
+        return Err(BridgeRpcError {
+            code: "GateOutOfRange".into(),
+            message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
+            client_error: None,
+        });
     }
 
     let origin_sys = vs.origin_solar_system_id;
     let origin_handle = wake_jump_destination_system(ctx, origin_sys).await?;
-    let Some(taken) = void_handle.take_ball(ship_id).await else {
-        return Err(BridgeRpcError {
-            code: "SystemTransitionFailed".into(),
-            message: format!("Ship {ship_id} is no longer in solar system {cur_sys}"),
-            client_error: None,
-        });
-    };
+    let taken = void_handle
+        .take_ball(ship_id)
+        .await
+        .ok_or_else(ship_not_in_void_err)?;
     let taken_exit_cs = taken.combat_state.clone();
     let exit_pos = [
         vs.origin_position[0] + 1_000.0,

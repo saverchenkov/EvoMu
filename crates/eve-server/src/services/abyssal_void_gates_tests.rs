@@ -1290,8 +1290,28 @@ async fn abyssal_and_void_gates_record_session_arrival_jump_and_rollback_on_wake
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&void_fil_id].quantity), 2);
     assert!(ctx.systems.get_handle(VOID_SPACE_SYSTEM_ID).is_none());
 
-    // Succeeding entry wakes cold VOID_SPACE_SYSTEM_ID with SessionArrival(Jump).
+    // Missing origin ship ball fails closed before waking Cold VOID_SPACE_SYSTEM_ID (T4A-R3-01).
     fail_void.store(false, Ordering::Release);
+    let taken_origin_ship = origin_handle
+        .take_ball(ship_id)
+        .await
+        .expect("take origin ship ball");
+    let void_no_ball_err = handle_void_space_player_jump(
+        &ctx,
+        &mut session,
+        char_id,
+        &[PyRep::Integer(void_fil_id), PyRep::Integer(1)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(void_no_ball_err.code, "SystemTransitionFailed");
+    assert!(ctx.systems.get_handle(VOID_SPACE_SYSTEM_ID).is_none());
+    origin_handle
+        .restore_ball(taken_origin_ship)
+        .await
+        .expect("restore origin ship ball");
+
+    // Succeeding entry wakes cold VOID_SPACE_SYSTEM_ID with SessionArrival(Jump).
     let void_ok = handle_void_space_player_jump(
         &ctx,
         &mut session,
@@ -1358,7 +1378,27 @@ async fn abyssal_and_void_gates_record_session_arrival_jump_and_rollback_on_wake
     assert!(with_abyssal_state(&ctx, |st| st.void_space_sessions.contains_key(&char_id)));
     assert!(ctx.systems.get_handle(origin_sys).is_none());
 
+    // Missing void ship ball fails closed before waking Cold origin_sys (T4A-R3-01).
     fail_origin.store(false, Ordering::Release);
+    let taken_void_ship = void_h
+        .take_ball(ship_id)
+        .await
+        .expect("take void ship ball");
+    let vexit_no_ball_err = handle_void_space_end_gate_activation(
+        &ctx,
+        &mut session,
+        char_id,
+        &[PyRep::Integer(888_001)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(vexit_no_ball_err.code, "SystemTransitionFailed");
+    assert!(ctx.systems.get_handle(origin_sys).is_none());
+    void_h
+        .restore_ball(taken_void_ship)
+        .await
+        .expect("restore void ship ball");
+
     let vexit_ok = handle_void_space_end_gate_activation(
         &ctx,
         &mut session,

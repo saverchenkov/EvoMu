@@ -676,11 +676,13 @@ pub(crate) async fn group_jump_to_resolved_beacon(
     if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, ctx.now_unix(), None).is_some() {
         return Err(err("SessionChangeTimerActive", "Session change timer is active"));
     }
+    let fuel_msg = |have: i64| {
+        format!("Conduit jump requires {fuel_qty} x type {fuel_type}, ship holds {have}")
+    };
+    super::check_ship_fuel_or_err(ctx, ship_id, fuel_type, fuel_qty, fuel_msg)?;
     let _ = super::wake_jump_destination_system(ctx, beacon.solar_system_id).await?;
     let (reserved_fuel, _reserved_diffs, fuel_guard) =
-        super::consume_or_err_with_guard(ctx, ship_id, fuel_type, fuel_qty, |have| {
-            format!("Conduit jump requires {fuel_qty} x type {fuel_type}, ship holds {have}")
-        })?;
+        super::consume_or_err_with_guard(ctx, ship_id, fuel_type, fuel_qty, fuel_msg)?;
     let max_passengers: usize = if is_blops || is_rorqual {
         30
     } else if matches!(ship_type.group_id, 547 | 659 | 5120) {
@@ -1110,13 +1112,17 @@ pub(super) async fn jump_through_fleet(
     if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, ctx.now_unix(), None).is_some() {
         return Err(err("SessionChangeTimerActive", "Session change timer is active"));
     }
+    let fuel_msg = |have: i64| {
+        format!("Bridge requires {fuel_qty} x type {fuel_type}, bridging ship holds {have}")
+    };
+    super::check_ship_fuel_or_err(ctx, bridge.bridger_ship_id, fuel_type, fuel_qty, fuel_msg)?;
     let _ = super::wake_jump_destination_system(ctx, beacon.solar_system_id).await?;
     let (reserved_fuel, _reserved_diffs, fuel_guard) = super::consume_or_err_with_guard(
         ctx,
         bridge.bridger_ship_id,
         fuel_type,
         fuel_qty,
-        |have| format!("Bridge requires {fuel_qty} x type {fuel_type}, bridging ship holds {have}"),
+        fuel_msg,
     )?;
     let pos = if landed_at_star {
         star_arrival_position(ctx, beacon.solar_system_id)

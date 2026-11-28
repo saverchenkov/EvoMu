@@ -1142,10 +1142,11 @@ async fn handle_cmd_jump_to_structure_beacon(
 
     nav::check_jump_activation(ctx, char_id)?;
     let cap_ship_type = if nav::type_attr(ctx, db_type_id, "jumpDriveCapacitorNeed").is_some() { db_type_id } else { current_ball.type_id };
-    let dest_handle = wake_jump_destination_system(ctx, target_sys_id).await?;
     let rem_cap = nav::validate_and_prepare_jump_capacitor(ctx, char_id, ship_id, cur_sys_id, cap_ship_type)
         .await?
         .map(|cs| cs.capacitor);
+    nav::check_jump_fuel(ctx, ship_id, &plan)?;
+    let dest_handle = wake_jump_destination_system(ctx, target_sys_id).await?;
     let Some(taken) = cur_sys_handle.take_ball(ship_id).await else {
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
@@ -1689,10 +1690,11 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     }
 
     nav::check_jump_activation(ctx, char_id)?;
-    let dest_handle = wake_jump_destination_system(ctx, target_sys_id).await?;
     let rem_cap = nav::validate_and_prepare_jump_capacitor(ctx, char_id, ship_id, cur_sys_id, db_type_id)
         .await?
         .map(|cs| cs.capacitor);
+    nav::check_jump_fuel(ctx, ship_id, &plan)?;
+    let dest_handle = wake_jump_destination_system(ctx, target_sys_id).await?;
     let Some(taken) = cur_sys_handle.take_ball(ship_id).await else {
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),

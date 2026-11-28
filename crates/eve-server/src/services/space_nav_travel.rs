@@ -594,34 +594,54 @@ pub fn plan_jump_drive(
     })
 }
 
+fn collect_jump_fuel_ids(
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    plan: &JumpDrivePlan,
+) -> Result<Vec<i64>, BridgeRpcError> {
+    use eve_db::InventoryFlag;
+    let ids: Vec<i64> = snap
+        .items
+        .values()
+        .filter(|i| {
+            i.location_id == ship_id
+                && i.type_id == plan.fuel_type_id
+                && matches!(i.flag, InventoryFlag::SpecializedFuelBay | InventoryFlag::Cargo)
+        })
+        .map(|i| i.item_id)
+        .collect();
+    let avail: i32 = ids.iter().filter_map(|id| snap.items.get(id)).map(|i| i.quantity).sum();
+    if avail < plan.fuel_units {
+        return Err(err(
+            "InsufficientFuel",
+            format!(
+                "Jump requires {} units of type {}, only {avail} available",
+                plan.fuel_units, plan.fuel_type_id
+            ),
+        ));
+    }
+    Ok(ids)
+}
+
+/// Verifies read-only that `ship_id` holds at least `plan.fuel_units` of `plan.fuel_type_id`
+/// in its fuel bay or cargo before waking a cold destination system.
+pub(crate) fn check_jump_fuel(
+    ctx: &ServerContext,
+    ship_id: i64,
+    plan: &JumpDrivePlan,
+) -> Result<(), BridgeRpcError> {
+    ctx.db
+        .with_snapshot(|snap| collect_jump_fuel_ids(snap, ship_id, plan).map(|_| ()))
+}
+
 /// Consumes `plan.fuel_units` of `plan.fuel_type_id` from the ship's fuel bay / cargo.
 pub(crate) fn consume_jump_fuel(
     ctx: &ServerContext,
     ship_id: i64,
     plan: &JumpDrivePlan,
 ) -> Result<(), BridgeRpcError> {
-    use eve_db::InventoryFlag;
     ctx.db.try_with_mut_snapshot(|snap| {
-        let ids: Vec<i64> = snap
-            .items
-            .values()
-            .filter(|i| {
-                i.location_id == ship_id
-                    && i.type_id == plan.fuel_type_id
-                    && matches!(i.flag, InventoryFlag::SpecializedFuelBay | InventoryFlag::Cargo)
-            })
-            .map(|i| i.item_id)
-            .collect();
-        let avail: i32 = ids.iter().filter_map(|id| snap.items.get(id)).map(|i| i.quantity).sum();
-        if avail < plan.fuel_units {
-            return Err(err(
-                "InsufficientFuel",
-                format!(
-                    "Jump requires {} units of type {}, only {avail} available",
-                    plan.fuel_units, plan.fuel_type_id
-                ),
-            ));
-        }
+        let ids = collect_jump_fuel_ids(snap, ship_id, plan)?;
         let mut rem = plan.fuel_units;
         for id in ids {
             if rem <= 0 {
