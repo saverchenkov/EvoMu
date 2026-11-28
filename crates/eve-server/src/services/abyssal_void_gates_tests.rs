@@ -263,6 +263,7 @@ async fn test_abyssal_gates_and_void_space_all_error_and_fleet_cleanup_branches(
             .code,
         "NoActiveShip"
     );
+    let origin_h = ctx.systems.get_or_spawn(origin_sys);
     assert_eq!(
         handle_void_space_player_jump(&ctx, &mut session, char_id, &[PyRep::Integer(0)])
             .await
@@ -270,8 +271,6 @@ async fn test_abyssal_gates_and_void_space_all_error_and_fleet_cleanup_branches(
             .code,
         "MissingRequiredArgument"
     );
-
-    let origin_h = ctx.systems.get_or_spawn(origin_sys);
     let far_pos = DVec3::splat(500_000_000.0);
     let _ = origin_h
         .spawn_ball_with_combat(
