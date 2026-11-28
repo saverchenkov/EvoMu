@@ -245,41 +245,42 @@ async fn handle_npc_destroyed_in_space_inner(
         );
     }
 
-    // 1. Advance encounter waves if killed_ball_id belongs to an active encounter
-    let triggered_info: Option<(u32, u32, Vec<u32>, DVec3)> =
-        with_mut_combat_runtime_with_locks(db, combat_ephemeral, |rt| {
-            let mut spawn_req = None;
-            for enc in rt.encounter_waves.values_mut() {
-                if enc.solar_system_id == solar_system_id && !enc.completed {
-                    enc.active_wave_ball_ids.retain(|&id| id != killed_ball_id);
-                    let is_trigger = killed_ball_id == enc.trigger_ball_id;
+    // 1. Advance encounter waves only when the solar system is already loaded so
+    // cold systems never increment `current_wave` without spawning wave NPC balls.
+    if let Some(handle) = systems.get_handle(solar_system_id) {
+        let triggered_info: Option<(u32, u32, Vec<u32>, DVec3)> =
+            with_mut_combat_runtime_with_locks(db, combat_ephemeral, |rt| {
+                let mut spawn_req = None;
+                for enc in rt.encounter_waves.values_mut() {
+                    if enc.solar_system_id == solar_system_id && !enc.completed {
+                        enc.active_wave_ball_ids.retain(|&id| id != killed_ball_id);
+                        let is_trigger = killed_ball_id == enc.trigger_ball_id;
 
-                    if is_trigger || enc.active_wave_ball_ids.is_empty() {
-                        if enc.current_wave < enc.max_waves {
-                            enc.current_wave += 1;
-                            let next_idx = (enc.current_wave - 1) as usize;
-                            let next_types = enc
-                                .wave_npc_types
-                                .get(next_idx)
-                                .cloned()
-                                .unwrap_or_else(|| vec![enc.npc_type_id, enc.npc_type_id]);
-                            spawn_req = Some((
-                                enc.encounter_id,
-                                enc.current_wave,
-                                next_types,
-                                enc.origin_position,
-                            ));
-                        } else if enc.active_wave_ball_ids.is_empty() {
-                            enc.completed = true;
+                        if is_trigger || enc.active_wave_ball_ids.is_empty() {
+                            if enc.current_wave < enc.max_waves {
+                                enc.current_wave += 1;
+                                let next_idx = (enc.current_wave - 1) as usize;
+                                let next_types = enc
+                                    .wave_npc_types
+                                    .get(next_idx)
+                                    .cloned()
+                                    .unwrap_or_else(|| vec![enc.npc_type_id, enc.npc_type_id]);
+                                spawn_req = Some((
+                                    enc.encounter_id,
+                                    enc.current_wave,
+                                    next_types,
+                                    enc.origin_position,
+                                ));
+                            } else if enc.active_wave_ball_ids.is_empty() {
+                                enc.completed = true;
+                            }
                         }
                     }
                 }
-            }
-            spawn_req
-        });
+                spawn_req
+            });
 
-    if let Some((enc_id, _wave_num, next_types, base_pos)) = triggered_info {
-        if let Some(handle) = systems.get_handle(solar_system_id) {
+        if let Some((enc_id, _wave_num, next_types, base_pos)) = triggered_info {
             let mut new_balls = Vec::new();
             let mut new_entities = Vec::with_capacity(next_types.len());
             for (i, &tid) in next_types.iter().enumerate() {

@@ -127,6 +127,7 @@ async fn deep_site_completion_error_gates_killer_attribution_and_mothership_fina
         s.killer_char_id = None;
         s.killer_fleet_id = None;
     });
+    let _ = ctx.systems.get_or_spawn(hq_sys);
     let hq_res = process_incursion_site_completion_and_payout(
         &ctx,
         None,
@@ -248,6 +249,7 @@ async fn deep_on_incursion_boss_destroyed_sec_status_gain_and_incursion_tale_rpc
             .unwrap()
             .boss_destroyed = false;
     });
+    let _ = ctx.systems.get_or_spawn(stg_sys);
     let boss_out = on_incursion_boss_destroyed(&ctx, stg_sys, stg_boss_bid, Some(char_id))
         .await
         .expect("boss kill triggers completion")

@@ -363,6 +363,7 @@ async fn staging_payout_solo_ball_offgrid_zero_payout_lockout_expiry_and_beacon_
     assert!(on_incursion_boss_destroyed(&ctx, ms_site.solar_system_id, 999_888_777, Some(solo_pid))
         .await
         .is_none());
+    let _ = ctx.systems.get_or_spawn(ms_site.solar_system_id);
     let fin = on_incursion_boss_destroyed(&ctx, ms_site.solar_system_id, last_escort_bid, Some(solo_pid))
         .await
         .unwrap()

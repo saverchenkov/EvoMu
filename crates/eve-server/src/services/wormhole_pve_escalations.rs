@@ -26,7 +26,7 @@ use eve_db::lock_rank::AnyRwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-async fn cleanup_unclaimed_wh_balls(
+pub(crate) async fn cleanup_unclaimed_wh_balls(
     ctx: &ServerContext,
     solar_system_id: SolarSystemId,
     ids: &[i64],

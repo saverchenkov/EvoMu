@@ -3463,6 +3463,41 @@ async fn cold_system_in_space_rpcs_reject_without_spawning() {
                 && sid != obs_sys
         })
         .expect("distinct fighter system");
+    let ess_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| {
+            s.solar_system_id >= 30_000_000
+                && s.solar_system_id < 31_000_000
+                && s.security_status <= 0.0
+                && s.solar_system_id != 30_100_000
+                && s.solar_system_id != dock_sys
+                && s.solar_system_id != anchor_sys
+                && s.solar_system_id != jb_sys_a
+                && s.solar_system_id != jb_sys_b
+                && s.solar_system_id != obs_sys
+                && s.solar_system_id != fighter_sys
+        })
+        .map(|s| s.solar_system_id)
+        .expect("distinct nullsec system for ESS reserve test");
+    let exp_sys = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| {
+            (30_000_000..31_000_000).contains(&sid)
+                && sid != 30_100_000
+                && sid != dock_sys
+                && sid != anchor_sys
+                && sid != jb_sys_a
+                && sid != jb_sys_b
+                && sid != obs_sys
+                && sid != fighter_sys
+                && sid != ess_sys
+        })
+        .expect("distinct expedition system");
 
     let jb_a: i64 = 1_000_000_955_001;
     let jb_b: i64 = 1_000_000_955_002;
@@ -3624,6 +3659,60 @@ async fn cold_system_in_space_rpcs_reject_without_spawning() {
     .unwrap_err();
     assert_eq!(fighter_err.code, "ShipNotInSpace");
     assert!(ctx.systems.get_handle(fighter_sys).is_none());
+
+    // 6. essMgr.RequestUnlockReserveBank (space_destiny.rs:443)
+    sess.solar_system_id = Some(ess_sys);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = ess_sys;
+        }
+    });
+    assert!(ctx.systems.get_handle(ess_sys).is_none());
+    let ess_err = handle(
+        &ctx,
+        &mut sess,
+        None,
+        "essMgr",
+        "RequestUnlockReserveBank",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(ess_err.code, "OutsideEssLinkRange");
+    assert!(ctx.systems.get_handle(ess_sys).is_none());
+
+    // 7. pve_expeditions::validate_and_advance_pve_site_room (pve_expeditions.rs:1316)
+    crate::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system.insert(
+            exp_sys,
+            vec![crate::services::pve_exploration::PveSiteInstance {
+                site_id: "COLD-EXP-DED".into(),
+                solar_system_id: exp_sys,
+                ded_rating: Some(4),
+                position: [50_000.0, 0.0, 0.0],
+                created_unix: ctx.now_unix(),
+                lifetime_seconds: 3_600,
+                ..Default::default()
+            }],
+        );
+    });
+    sess.solar_system_id = Some(exp_sys);
+    assert!(ctx.systems.get_handle(exp_sys).is_none());
+    let exp_err = crate::services::pve_expeditions::validate_and_advance_pve_site_room(
+        &ctx,
+        &mut sess,
+        exp_sys,
+        "COLD-EXP-DED",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(exp_err.code, "NotInSpace");
+    assert!(ctx.systems.get_handle(exp_sys).is_none());
 }
 
 #[tokio::test]
@@ -3872,6 +3961,389 @@ async fn cold_system_ticks_cleanups_and_tourney_return_do_not_spawn() {
     assert!(ctx.systems.get_handle(home_sys).is_none());
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&p_ship].location_id, home_st_id);
+        assert_eq!(snap.items[&gm_ship].location_id, home_st_id);
+    });
+
+    // 6. pve_fob_observatory (trigger_fob_defense_response, destroy_pirate_fob_and_payout, on_world_ark_boss_killed)
+    let fob_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| {
+            s.solar_system_id >= 30_000_000
+                && s.solar_system_id < 31_000_000
+                && s.security_status > 0.0
+                && s.solar_system_id != 30_100_000
+                && s.solar_system_id != home_sys
+                && s.solar_system_id != def_sys
+                && s.solar_system_id != hack_sys
+                && s.solar_system_id != arena_sys
+        })
+        .map(|s| s.solar_system_id)
+        .expect("FOB cold test system");
+    let ark_sys = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| {
+            (30_000_000..31_000_000).contains(&sid)
+                && sid != 30_100_000
+                && sid != home_sys
+                && sid != def_sys
+                && sid != hack_sys
+                && sid != arena_sys
+                && sid != fob_sys
+        })
+        .expect("World Ark cold test system");
+    let inc_sys = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| {
+            (30_000_000..31_000_000).contains(&sid)
+                && sid != 30_100_000
+                && sid != home_sys
+                && sid != def_sys
+                && sid != hack_sys
+                && sid != arena_sys
+                && sid != fob_sys
+                && sid != ark_sys
+        })
+        .expect("Incursion cold test system");
+    let enc_sys = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| {
+            (30_000_000..31_000_000).contains(&sid)
+                && sid != 30_100_000
+                && sid != home_sys
+                && sid != def_sys
+                && sid != hack_sys
+                && sid != arena_sys
+                && sid != fob_sys
+                && sid != ark_sys
+                && sid != inc_sys
+        })
+        .expect("Encounter cold test system");
+    let arena_cold_sys = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| {
+            (30_000_000..31_000_000).contains(&sid)
+                && sid != 30_100_000
+                && sid != home_sys
+                && sid != def_sys
+                && sid != hack_sys
+                && sid != arena_sys
+                && sid != fob_sys
+                && sid != ark_sys
+                && sid != inc_sys
+                && sid != enc_sys
+        })
+        .expect("Tourney TeleportToStation cold test system");
+
+    let fob_id: i64 = 1_897_956_101;
+    let ark_site_id: i64 = 1_899_000_000 + i64::from(ark_sys);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            fob_id,
+            UpwellStructureRecord {
+                structure_id: fob_id,
+                type_id: 47_512,
+                owner_corp_id: 500_010,
+                solar_system_id: fob_sys,
+                name: "ColdPirateFOB".into(),
+                position: [200_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                hull_hp: 100_000.0,
+                ..Default::default()
+            },
+        );
+        snap.fob_observatory_state.observatory_sites.insert(
+            ark_site_id,
+            eve_db::ObservatorySiteState {
+                site_id: ark_site_id,
+                solar_system_id: ark_sys,
+                gate_id: ark_site_id + 2,
+                world_ark_id: ark_site_id + 1,
+                site_pos: [400_000.0, 0.0, 0.0],
+                ..Default::default()
+            },
+        );
+    });
+    assert!(ctx.systems.get_handle(fob_sys).is_none());
+    let def_rep = crate::services::pve_fob_observatory::trigger_fob_defense_response(
+        &ctx,
+        fob_id,
+        &[p_ship],
+    )
+    .await
+    .expect("cold FOB defense response");
+    assert!(ctx.systems.get_handle(fob_sys).is_none());
+    if let PyRep::KeyVal(entries) = def_rep {
+        let count = entries
+            .iter()
+            .find(|(k, _)| k.as_str() == "defenderCount")
+            .map(|(_, v)| v.clone());
+        assert_eq!(count, Some(PyRep::Integer(0)));
+    } else {
+        panic!("expected PyRep::KeyVal from trigger_fob_defense_response");
+    }
+
+    let fob_destroy_rep =
+        crate::services::pve_fob_observatory::destroy_pirate_fob_and_payout(&ctx, fob_id, &[])
+            .await
+            .expect("cold FOB destroy payout");
+    assert!(ctx.systems.get_handle(fob_sys).is_none());
+    if let PyRep::KeyVal(entries) = fob_destroy_rep {
+        let destroyed_fob = entries
+            .iter()
+            .find(|(k, _)| k.as_str() == "fobID")
+            .map(|(_, v)| v.clone());
+        assert_eq!(destroyed_fob, Some(PyRep::Integer(fob_id)));
+    } else {
+        panic!("expected PyRep::KeyVal from destroy_pirate_fob_and_payout");
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&fob_id].state, "Destroyed");
+        assert!(snap.items.contains_key(&(fob_id + 90)));
+    });
+
+    assert!(ctx.systems.get_handle(ark_sys).is_none());
+    crate::services::pve_fob_observatory::on_world_ark_boss_killed(&ctx, ark_sys, p_red).await;
+    assert!(ctx.systems.get_handle(ark_sys).is_none());
+    assert!(ctx
+        .db
+        .with_snapshot(|snap| snap.fob_observatory_state.observatory_sites.contains_key(&ark_site_id)));
+
+    // 7. wormhole_pve_escalations::cleanup_unclaimed_wh_balls
+    let wh_orphan_bid: i64 = 956_250;
+    let wh_ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+        wh_orphan_bid,
+        30_191,
+        wh_step_sys,
+        "Sleeper",
+    );
+    crate::combat::npc_ai::npc_test_helpers::seed_npc_entity(&ctx, wh_ent);
+    assert!(ctx.systems.get_handle(wh_step_sys).is_none());
+    crate::services::wormhole_pve_escalations::cleanup_unclaimed_wh_balls(
+        &ctx,
+        wh_step_sys,
+        &[wh_orphan_bid],
+    )
+    .await;
+    assert!(ctx.systems.get_handle(wh_step_sys).is_none());
+    assert!(crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        !rt.npc_entities.contains_key(&wh_orphan_bid)
+    }));
+
+    // 8. pve_incursion_sites::process_incursion_site_completion_and_payout_core fails closed without DB mutation
+    let inc_boss_bid: i64 = 956_400;
+    crate::services::pve_special_sites::with_pve_special_reg_db(&ctx.db, ctx.now_unix(), |reg| {
+        reg.incursions.insert(
+            20_956_400,
+            crate::services::pve_incursion_sites::IncursionTaleRecord {
+                tale_id: 20_956_400,
+                constellation_id: 20_956_400,
+                constellation_name: "ColdIncConst".into(),
+                staging_solar_system_id: inc_sys,
+                vanguard_solar_system_ids: vec![inc_sys],
+                assault_solar_system_ids: vec![inc_sys],
+                hq_solar_system_id: inc_sys,
+                influence: 0.5,
+                state: "Established".into(),
+                lockout_until_filetime: None,
+                mothership_spawned: false,
+                mothership_defeated: false,
+                tale_stop_published: false,
+                sites: vec![crate::services::pve_incursion_sites::IncursionSiteEntry {
+                    site_id: "COLD-INC-1".into(),
+                    dungeon_id: 172,
+                    dungeon_name: "Sansha Vanguard".into(),
+                    tier: "Vanguard".into(),
+                    solar_system_id: inc_sys,
+                    position: [100_000.0, 0.0, 0.0],
+                    min_pilots: 1,
+                    max_optimal_pilots: 10,
+                    base_isk: 10_000_000,
+                    base_concord_lp: 1_000,
+                    influence_delta: 0.1,
+                    locked_until_low_influence: false,
+                    completed_count: 0,
+                    boss_npc_ball_id: inc_boss_bid,
+                    boss_type_id: 19_720,
+                    boss_destroyed: true,
+                    killer_char_id: None,
+                    killer_fleet_id: None,
+                    escort_spawns: vec![],
+                }],
+            },
+        );
+    });
+    assert!(ctx.systems.get_handle(inc_sys).is_none());
+    let inc_err = crate::services::pve_incursion_sites::process_incursion_site_completion_and_payout_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        None,
+        None,
+        inc_sys,
+        "COLD-INC-1",
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(inc_err.code, "IncursionSystemNotLoaded");
+    assert!(ctx.systems.get_handle(inc_sys).is_none());
+    crate::services::pve_special_sites::read_pve_special_reg(&ctx, |reg| {
+        let site = &reg.incursions[&20_956_400].sites[0];
+        assert_eq!(site.completed_count, 0);
+        assert_eq!(site.boss_npc_ball_id, inc_boss_bid);
+        assert!(site.boss_destroyed);
+    });
+
+    // 9. pve_hacking_board::detonate_ghost_site_with_can
+    let ghost_cont_id: i64 = 956_202;
+    ctx.db.with_mut_snapshot(|snap| {
+        put_item(
+            snap,
+            Some(ghost_cont_id),
+            23,
+            p_red,
+            i64::from(hack_sys),
+            InventoryFlag::None,
+            1,
+            true,
+        );
+    });
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system.insert(
+            hack_sys,
+            vec![PveSiteInstance {
+                site_id: "GHOST_COLD_1".into(),
+                dungeon_id: 5534,
+                solar_system_id: hack_sys,
+                position: [52_000_000.0, 42_000_000.0, -18_000_000.0],
+                hackable_can_ids: vec![ghost_cont_id],
+                ..Default::default()
+            }],
+        );
+    });
+    assert!(ctx.systems.get_handle(hack_sys).is_none());
+    let (ghost_dmg, spawned_ambush) =
+        crate::services::pve_hacking_board::detonate_ghost_site_with_can(
+            &ctx,
+            &mut gm_sess,
+            hack_sys,
+            "GHOST_COLD_1",
+            Some(ghost_cont_id),
+        )
+        .await;
+    assert!(ghost_dmg > 0.0);
+    assert!(spawned_ambush.is_empty());
+    assert!(ctx.systems.get_handle(hack_sys).is_none());
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&ghost_cont_id)));
+    with_pve_exploration_reg(&ctx, |reg| {
+        let s = &reg.sites_by_system[&hack_sys][0];
+        assert!(s.ghost_detonated);
+    });
+
+    // 10. combat_npc_encounters::handle_npc_destroyed_in_space_with_ctx & finalize_cycle_destroyed_npcs
+    let enc_id: u32 = 956_500;
+    let enc_trigger_bid: i64 = 956_501;
+    let cycle_npc_bid: i64 = 956_502;
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.encounter_waves.insert(
+            enc_id,
+            crate::services::combat_crimewatch::EncounterWaveDirector {
+                encounter_id: enc_id,
+                solar_system_id: enc_sys,
+                current_wave: 1,
+                max_waves: 3,
+                trigger_ball_id: enc_trigger_bid,
+                npc_type_id: 10_001,
+                active_wave_ball_ids: vec![enc_trigger_bid],
+                completed: false,
+                wave_npc_types: vec![vec![10_001], vec![10_002], vec![10_003]],
+                origin_position: glam::DVec3::ZERO,
+                next_wave_pending: false,
+            },
+        );
+        rt.destroyed_npc_cache.insert(
+            cycle_npc_bid,
+            crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+                cycle_npc_bid,
+                10_001,
+                enc_sys,
+                "Pirate",
+            ),
+        );
+    });
+    assert!(ctx.systems.get_handle(enc_sys).is_none());
+    crate::services::combat_crimewatch::combat_npc_encounters::handle_npc_destroyed_in_space_with_ctx(
+        &ctx,
+        enc_sys,
+        enc_trigger_bid,
+        None,
+    )
+    .await;
+    assert!(ctx.systems.get_handle(enc_sys).is_none());
+    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        let enc = &rt.encounter_waves[&enc_id];
+        assert_eq!(enc.current_wave, 1, "cold system must not advance current_wave");
+        assert!(!enc.completed);
+        assert_eq!(enc.active_wave_ball_ids, vec![enc_trigger_bid]);
+    });
+
+    crate::services::combat_crimewatch::combat_npc_encounters::finalize_cycle_destroyed_npcs(
+        &ctx, enc_sys,
+    )
+    .await;
+    assert!(ctx.systems.get_handle(enc_sys).is_none());
+    assert!(crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        !rt.destroyed_npc_cache.contains_key(&cycle_npc_bid)
+    }));
+
+    // 11. tourney_arena::TeleportToStation on cold old_sys
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&gm_cid) {
+            ch.solar_system_id = arena_cold_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = gm_ship;
+        }
+        if let Some(ship) = snap.items.get_mut(&gm_ship) {
+            ship.location_id = i64::from(arena_cold_sys);
+            ship.flag = InventoryFlag::None;
+        }
+    });
+    // Keep referee docked (`departing.in_space == false`) while DB char + ship point to
+    // cold `arena_cold_sys`, so `TeleportToStation` hits `tourney_arena.rs:347` without
+    // triggering out-of-scope `teardown_registry` -> `drone_return::abandon_drones_and_fighters_for_ship_sync`.
+    gm_sess.solar_system_id = Some(arena_cold_sys);
+    gm_sess.station_id = Some(other_st_id);
+    gm_sess.ship_id = Some(gm_ship);
+    assert!(ctx.systems.get_handle(arena_cold_sys).is_none());
+    crate::services::tourney_service::handle(
+        &ctx,
+        &mut gm_sess,
+        "tourneyMgr",
+        "TeleportToStation",
+        &[PyRep::Integer(match_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(ctx.systems.get_handle(arena_cold_sys).is_none());
+    assert!(ctx.systems.get_handle(home_sys).is_none());
+    ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&gm_ship].location_id, home_st_id);
     });
 }
