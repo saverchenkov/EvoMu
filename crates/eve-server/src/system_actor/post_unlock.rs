@@ -13,8 +13,8 @@ use eve_destiny::BallId;
 use eve_sde::{attr_ids, SdeRegistry, SolarSystemId, TypeId};
 use glam::DVec3;
 use std::{
-    collections::{HashMap, HashSet},
-    sync::{atomic::{AtomicU64, AtomicUsize, Ordering}, Arc, OnceLock, Weak},
+    collections::HashMap,
+    sync::{atomic::{AtomicU64, AtomicUsize, Ordering}, Arc, OnceLock},
 };
 
 use super::commands::SystemCommand;
@@ -23,7 +23,6 @@ use super::types::{
     PendingCycleAction, PostUnlockActorShadows, PostUnlockHookAction, SystemActorState,
     TargetLockCompletedHook,
 };
-use super::view::SystemView;
 
 #[derive(Debug, Clone)]
 pub(crate) enum PostCommitBallparkOp {
@@ -1196,10 +1195,177 @@ pub(crate) fn execute_post_unlock_ops(
     execute_post_unlock_ops_with_seq(db_opt, sde_opt, ops, deactivation_hook, lock_completed_hook, None, tokio::runtime::Handle::try_current().ok().as_ref()).0
 }
 
+/// Synchronous actor-state callback sent from the post-unlock worker onto the actor's dedicated
+/// unbounded `worker_cb_tx` channel (`#1342` Track 4D-2).
+pub(in crate::system_actor) enum PostUnlockActorCallback {
+    FinalizeDeactivations {
+        ops: PostUnlockOps,
+        raw: Option<ModuleDeactivationHook>,
+        post_pair: Option<super::PairedModuleDeactivationPostUnlockHook>,
+        reply: std::sync::mpsc::SyncSender<Vec<Box<DeferredCooldownDeactOp>>>,
+    },
+    ClearWeaponEffectsDirty {
+        reply: std::sync::mpsc::SyncSender<()>,
+    },
+    ApplyPostCommitBallparkOps {
+        local_ops: Vec<PostCommitBallparkOp>,
+        raw_hook: Option<ModuleDeactivationHook>,
+        post_pair: Option<super::PairedModuleDeactivationPostUnlockHook>,
+        reply: std::sync::mpsc::SyncSender<PostUnlockOps>,
+    },
+    ExtendPendingCycleActions {
+        extra_actions: Vec<PendingCycleAction>,
+        reply: std::sync::mpsc::SyncSender<()>,
+    },
+}
+
+/// Direct in-task executor for the 4 actor-state callbacks used when `flush_unsent_direct_items_on_actor`
+/// runs on the actor task itself without self-deadlocking on `worker_cb_tx` (`#1342` Track 4D-2).
+pub(in crate::system_actor) trait DirectActorCallbackExecutor {
+    fn solar_system_id(&self) -> SolarSystemId;
+    fn module_deactivation_hook(
+        &self,
+    ) -> &Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>;
+    fn module_deactivation_post_unlock_hook(
+        &self,
+    ) -> &Arc<RankedRwLock<Option<super::PairedModuleDeactivationPostUnlockHook>, RANK_LEAF>>;
+    fn finalize_deactivations(
+        &self,
+        ops: PostUnlockOps,
+        raw: Option<ModuleDeactivationHook>,
+        post_pair: Option<super::PairedModuleDeactivationPostUnlockHook>,
+    ) -> Option<Vec<Box<DeferredCooldownDeactOp>>>;
+    fn clear_weapon_effects_dirty(&self) -> Option<()>;
+    fn apply_post_commit_ballpark_ops(
+        &self,
+        local_ops: Vec<PostCommitBallparkOp>,
+        raw_hook: Option<ModuleDeactivationHook>,
+        post_pair: Option<super::PairedModuleDeactivationPostUnlockHook>,
+    ) -> Option<PostUnlockOps>;
+    fn extend_pending_cycle_actions(&self, extra_actions: Vec<PendingCycleAction>) -> Option<()>;
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::system_actor) enum ActorCallbackSink<'a> {
+    Worker(&'a PostCommitActorTargets),
+    InActor(&'a dyn DirectActorCallbackExecutor),
+}
+
+fn call_actor_callback<R>(
+    tx: &tokio::sync::mpsc::UnboundedSender<PostUnlockActorCallback>,
+    build: impl FnOnce(std::sync::mpsc::SyncSender<R>) -> PostUnlockActorCallback,
+) -> Option<R> {
+    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+    if tx.send(build(reply_tx)).is_err() {
+        return None;
+    }
+    match tokio::runtime::Handle::try_current() {
+        Ok(rt) if matches!(rt.runtime_flavor(), tokio::runtime::RuntimeFlavor::MultiThread) => {
+            tokio::task::block_in_place(|| reply_rx.recv().ok())
+        }
+        _ => reply_rx.recv().ok(),
+    }
+}
+
+impl<'a> ActorCallbackSink<'a> {
+    fn solar_system_id(&self) -> SolarSystemId {
+        match self {
+            Self::Worker(t) => t.solar_system_id,
+            Self::InActor(e) => e.solar_system_id(),
+        }
+    }
+
+    fn read_deact_hooks(
+        &self,
+        fallback_raw: Option<&ModuleDeactivationHook>,
+    ) -> (
+        Option<ModuleDeactivationHook>,
+        Option<super::PairedModuleDeactivationPostUnlockHook>,
+    ) {
+        let (raw_lock, post_lock) = match self {
+            Self::Worker(t) => (
+                &t.module_deactivation_hook,
+                &t.module_deactivation_post_unlock_hook,
+            ),
+            Self::InActor(e) => (
+                e.module_deactivation_hook(),
+                e.module_deactivation_post_unlock_hook(),
+            ),
+        };
+        let raw = fallback_raw
+            .cloned()
+            .or_else(|| raw_lock.read().unwrap_or_else(|e| e.into_inner()).clone());
+        let post_pair = post_lock.read().unwrap_or_else(|e| e.into_inner()).clone();
+        (raw, post_pair)
+    }
+
+    fn finalize_deactivations(
+        &self,
+        ops: PostUnlockOps,
+        raw: Option<ModuleDeactivationHook>,
+        post_pair: Option<super::PairedModuleDeactivationPostUnlockHook>,
+    ) -> Option<Vec<Box<DeferredCooldownDeactOp>>> {
+        match self {
+            Self::Worker(t) => call_actor_callback(&t.worker_cb_tx, |reply| {
+                PostUnlockActorCallback::FinalizeDeactivations {
+                    ops,
+                    raw,
+                    post_pair,
+                    reply,
+                }
+            }),
+            Self::InActor(e) => e.finalize_deactivations(ops, raw, post_pair),
+        }
+    }
+
+    fn clear_weapon_effects_dirty(&self) -> Option<()> {
+        match self {
+            Self::Worker(t) => call_actor_callback(&t.worker_cb_tx, |reply| {
+                PostUnlockActorCallback::ClearWeaponEffectsDirty { reply }
+            }),
+            Self::InActor(e) => e.clear_weapon_effects_dirty(),
+        }
+    }
+
+    fn apply_post_commit_ballpark_ops(
+        &self,
+        local_ops: Vec<PostCommitBallparkOp>,
+        raw_hook: Option<ModuleDeactivationHook>,
+        post_pair: Option<super::PairedModuleDeactivationPostUnlockHook>,
+    ) -> Option<PostUnlockOps> {
+        match self {
+            Self::Worker(t) => call_actor_callback(&t.worker_cb_tx, |reply| {
+                PostUnlockActorCallback::ApplyPostCommitBallparkOps {
+                    local_ops,
+                    raw_hook,
+                    post_pair,
+                    reply,
+                }
+            }),
+            Self::InActor(e) => e.apply_post_commit_ballpark_ops(local_ops, raw_hook, post_pair),
+        }
+    }
+
+    fn extend_pending_cycle_actions(&self, extra_actions: Vec<PendingCycleAction>) -> Option<()> {
+        if extra_actions.is_empty() {
+            return Some(());
+        }
+        match self {
+            Self::Worker(t) => call_actor_callback(&t.worker_cb_tx, |reply| {
+                PostUnlockActorCallback::ExtendPendingCycleActions {
+                    extra_actions,
+                    reply,
+                }
+            }),
+            Self::InActor(e) => e.extend_pending_cycle_actions(extra_actions),
+        }
+    }
+}
+
 /// Flushes collected [`PostUnlockOps`] for standalone / non-actor entrypoints (`#1170`).
 pub(in crate::system_actor) enum PostCommitBallparkTarget<'a> {
     Standalone(&'a mut eve_destiny::Ballpark),
-    Actor(&'a PostCommitActorTargets),
+    Actor(ActorCallbackSink<'a>),
 }
 
 pub(crate) fn execute_post_unlock_ops_for_standalone(
@@ -1455,34 +1621,37 @@ fn execute_post_unlock_ops_inner(
         }
         if !deferred_deact_hooks.is_empty() {
             let actor_pair = match post_commit_target {
-                Some(PostCommitBallparkTarget::Actor(targets)) => {
-                    let raw = deactivation_hook.cloned().or_else(|| targets.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone());
-                    let post_pair = targets.module_deactivation_post_unlock_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-                    super::ewar_cooldowns::resolve_effective_deactivation_hooks(raw.clone(), post_pair.clone()).1.is_some().then_some((targets, raw, post_pair))
+                Some(PostCommitBallparkTarget::Actor(sink)) => {
+                    let (raw, post_pair) = sink.read_deact_hooks(deactivation_hook);
+                    super::ewar_cooldowns::resolve_effective_deactivation_hooks(
+                        raw.clone(),
+                        post_pair.clone(),
+                    )
+                    .1
+                    .is_some()
+                    .then_some((sink, raw, post_pair))
                 }
                 _ => None,
             };
-            if let Some((targets, raw, post_pair)) = actor_pair {
+            if let Some((sink, raw, post_pair)) = actor_pair {
                 let mut final_ops = PostUnlockOps::default();
                 for mut hook_op in deferred_deact_hooks {
                     if hook_op.char_id.is_none() {
-                        hook_op.char_id = super::ewar_cooldowns::resolve_removed_cycle_char_id(None, hook_op.cycle.ship_id, db_opt, hook_op.fallback_owner_id, false);
+                        hook_op.char_id = super::ewar_cooldowns::resolve_removed_cycle_char_id(
+                            None,
+                            hook_op.cycle.ship_id,
+                            db_opt,
+                            hook_op.fallback_owner_id,
+                            false,
+                        );
                     }
-                    if hook_op.char_id.is_some() { final_ops.push(PostUnlockIntent::DeactivationHook(hook_op)); }
+                    if hook_op.char_id.is_some() {
+                        final_ops.push(PostUnlockIntent::DeactivationHook(hook_op));
+                    }
                 }
                 if !final_ops.is_empty() {
-                    targets.with_actor_locks(false, |bp_opt, actor_st, cur_tidi| {
-                        let mutated = targets.finalize_deactivations_under_lock(
-                            actor_st, &mut final_ops, raw, post_pair, cur_tidi,
-                        );
-                        if mutated {
-                            if let Some(bp) = bp_opt {
-                                targets.publish_view(bp, actor_st, cur_tidi);
-                            }
-                        }
-                    });
-                    for intent in final_ops.intents {
-                        if let PostUnlockIntent::CooldownDeactivation(op) = intent { deferred_cooldown_hooks.push(op); }
+                    if let Some(cooldown_hooks) = sink.finalize_deactivations(final_ops, raw, post_pair) {
+                        deferred_cooldown_hooks.extend(cooldown_hooks);
                     }
                 }
             } else if let Some(deact_hook) = deactivation_hook {
@@ -1515,39 +1684,8 @@ fn execute_post_unlock_ops_inner(
             }
         }
         if any_weapon_effects_persisted {
-            if let Some(PostCommitBallparkTarget::Actor(ref targets)) = post_commit_target {
-                let _ = targets.with_actor_locks(true, |bp_opt, actor_st, cur_tidi| {
-                    let bp = bp_opt.expect("require_bp=true checked");
-                    let flushed = actor_st
-                        .weapon_effects_coord
-                        .flushed_seq
-                        .load(Ordering::Acquire);
-                    let retry = actor_st
-                        .weapon_effects_coord
-                        .retry_needed
-                        .load(Ordering::Acquire);
-                    let pending_prune = actor_st
-                        .weapon_effects_coord
-                        .has_pending_legacy_prune
-                        .load(Ordering::Acquire);
-                    if actor_st.weapon_effects_dirty
-                        && !retry
-                        && !pending_prune
-                        && flushed >= actor_st.weapon_effects_seq
-                    {
-                        actor_st.weapon_effects_dirty = false;
-                        actor_st
-                            .weapon_effects_coord
-                            .dirty
-                            .store(false, Ordering::Release);
-                    }
-                    super::celestials::update_system_hibernation_flag(
-                        actor_st,
-                        bp,
-                        targets.event_tx.receiver_count(),
-                    );
-                    targets.publish_view(bp, actor_st, cur_tidi);
-                });
+            if let Some(PostCommitBallparkTarget::Actor(sink)) = post_commit_target {
+                let _ = sink.clear_weapon_effects_dirty();
             }
         }
     } else if !deferred_deact_hooks.is_empty()
@@ -1822,21 +1960,8 @@ pub(in crate::system_actor) fn enqueue_barrier_under_locks(handle: &super::Syste
     enqueue_work_ticket_with_seq(handle, None, None, PostUnlockOps::default(), true, 0).1
 }
 
-fn extend_pending_cycle_actions(
-    state_lock: &RankedRwLock<SystemActorState, RANK_ACTOR_STATE>,
-    extra_actions: Vec<PendingCycleAction>,
-) {
-    if !extra_actions.is_empty() {
-        state_lock
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .pending_cycle_actions
-            .extend(extra_actions);
-    }
-}
-
 pub(in crate::system_actor) fn flush_unsent_direct_items_on_actor(
-    direct_targets: &PostCommitActorTargets,
+    direct_actor: &dyn DirectActorCallbackExecutor,
     completed_post_unlock_seq: &AtomicU64,
     deact_lock: &Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     lock_lock: &Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
@@ -1846,12 +1971,13 @@ pub(in crate::system_actor) fn flush_unsent_direct_items_on_actor(
     if items.is_empty() { return; }
     let deact_g = deact_lock.read().unwrap_or_else(|e| e.into_inner()).clone();
     let lock_g = lock_lock.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let sink = ActorCallbackSink::InActor(direct_actor);
     for mut unsent in items {
         let work_seq = unsent.work_seq;
         let replies_fallback = std::mem::take(&mut unsent.replies);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             execute_unsent_work_item_direct(
-                direct_targets,
+                sink,
                 completed_post_unlock_seq,
                 deact_g.as_ref(),
                 lock_g.as_ref(),
@@ -1874,7 +2000,7 @@ pub(in crate::system_actor) fn flush_unsent_direct_items_on_actor(
                     .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
                     .unwrap_or("non-string panic payload");
                 tracing::error!(
-                    solar_system_id = direct_targets.solar_system_id,
+                    solar_system_id = direct_actor.solar_system_id(),
                     panic_count,
                     panic = %msg,
                     "SystemActor direct post_unlock flush panicked; continuing actor loop"
@@ -1886,7 +2012,7 @@ pub(in crate::system_actor) fn flush_unsent_direct_items_on_actor(
 }
 
 pub(in crate::system_actor) fn execute_unsent_work_item_direct(
-    direct_targets: &PostCommitActorTargets,
+    actor_sink: ActorCallbackSink<'_>,
     completed_post_unlock_seq: &AtomicU64,
     deact_guard: Option<&ModuleDeactivationHook>,
     lock_guard: Option<&TargetLockCompletedHook>,
@@ -1900,14 +2026,14 @@ pub(in crate::system_actor) fn execute_unsent_work_item_direct(
         unsent.ops,
         deact_guard,
         lock_guard,
-        Some((direct_targets.solar_system_id, unsent.work_seq)),
-        Some(PostCommitBallparkTarget::Actor(direct_targets)),
+        Some((actor_sink.solar_system_id(), unsent.work_seq)),
+        Some(PostCommitBallparkTarget::Actor(actor_sink)),
         rt_opt.as_ref(),
     );
     if unsent.work_seq > 0 && !tx_committed {
         completed_post_unlock_seq.store(unsent.work_seq, Ordering::Release);
     }
-    extend_pending_cycle_actions(&direct_targets.actor_state, extra_actions);
+    let _ = actor_sink.extend_pending_cycle_actions(extra_actions);
     unsent.replies
 }
 
@@ -1924,7 +2050,7 @@ pub(in crate::system_actor) fn finish_post_unlock_after_unlock(handle: &super::S
             let replies = if safe_sync {
                 let direct_targets = PostCommitActorTargets::from_handle(handle);
                 let replies = execute_unsent_work_item_direct(
-                    &direct_targets,
+                    ActorCallbackSink::Worker(&direct_targets),
                     &handle.completed_post_unlock_seq,
                     deact_guard,
                     lock_guard,
@@ -1973,65 +2099,20 @@ impl Drop for PostUnlockShutdownGuard { fn drop(&mut self) { self.send_shutdown(
 #[derive(Clone)]
 pub(in crate::system_actor) struct PostCommitActorTargets {
     pub solar_system_id: SolarSystemId,
-    /// Weak reference so actor-owned post-commit delivery never bumps `Arc::strong_count(&h.ballpark)` above 3 during idle eviction (`lifecycle_sm`).
-    pub ballpark: Weak<super::celestials::BallparkHandle>,
-    pub actor_state: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
-    pub ball_positions: Arc<super::celestials::BallPositionSyncCache>,
-    pub scrambled_balls: Arc<RankedRwLock<HashSet<BallId>, RANK_LEAF>>,
-    pub view_tx: Arc<tokio::sync::watch::Sender<Arc<SystemView>>>,
-    pub tidi_factor_bits: Arc<AtomicU64>,
+    pub worker_cb_tx: tokio::sync::mpsc::UnboundedSender<PostUnlockActorCallback>,
     pub module_deactivation_hook: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     pub module_deactivation_post_unlock_hook:
         Arc<RankedRwLock<Option<super::PairedModuleDeactivationPostUnlockHook>, RANK_LEAF>>,
-    pub cooldown_persist_gate: Arc<super::module_cooldowns::CooldownPersistGate>,
-    pub cmd_tx_weak: Option<tokio::sync::mpsc::WeakSender<super::SystemCommand>>,
-    pub event_tx: tokio::sync::broadcast::Sender<super::TickBroadcast>,
 }
 
 impl PostCommitActorTargets {
     fn from_handle(handle: &super::SystemHandle) -> Self {
         Self {
             solar_system_id: handle.solar_system_id,
-            ballpark: Arc::downgrade(&handle.ballpark),
-            actor_state: Arc::clone(&handle.actor_state),
-            ball_positions: Arc::clone(&handle.ball_positions),
-            scrambled_balls: Arc::clone(&handle.scrambled_balls),
-            view_tx: Arc::clone(&handle.view_tx),
-            tidi_factor_bits: Arc::clone(&handle.tidi_factor_bits),
+            worker_cb_tx: handle.worker_cb_tx.clone(),
             module_deactivation_hook: Arc::clone(&handle.module_deactivation_hook),
             module_deactivation_post_unlock_hook: Arc::clone(&handle.module_deactivation_post_unlock_hook),
-            cooldown_persist_gate: Arc::clone(&handle.cooldown_persist_gate),
-            cmd_tx_weak: Some(handle.cmd_tx.downgrade()),
-            event_tx: handle.event_tx.clone(),
         }
-    }
-
-    fn with_actor_locks<R>(&self, require_bp: bool, f: impl FnOnce(Option<&mut eve_destiny::Ballpark>, &mut SystemActorState, f64) -> R) -> Option<R> {
-        let bp_handle_opt = self.ballpark.upgrade();
-        if require_bp && bp_handle_opt.is_none() { return None; }
-        let cur_tidi = super::celestials::clamp_tidi_factor_bits(&self.tidi_factor_bits);
-        let mut bp_guard_opt = bp_handle_opt.as_ref().map(|h| h.write_untracked().unwrap_or_else(|e| e.into_inner()));
-        let mut actor_st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        Some(f(bp_guard_opt.as_deref_mut(), &mut actor_st, cur_tidi))
-    }
-
-    fn finalize_deactivations_under_lock(
-        &self,
-        actor_st: &mut SystemActorState,
-        ops: &mut PostUnlockOps,
-        raw: Option<ModuleDeactivationHook>,
-        post_pair: Option<super::PairedModuleDeactivationPostUnlockHook>,
-        cur_tidi: f64,
-    ) -> bool {
-        super::ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
-            self.solar_system_id, actor_st, ops, raw, post_pair,
-            &self.cooldown_persist_gate, self.cmd_tx_weak.as_ref(), cur_tidi,
-        )
-    }
-
-    fn publish_view(&self, bp: &eve_destiny::Ballpark, actor_st: &SystemActorState, cur_tidi: f64) {
-        let prev_view = { self.view_tx.borrow().clone() };
-        let _ = self.view_tx.send(Arc::new(SystemView::from_ballpark(bp, Some(actor_st), cur_tidi, Some(prev_view.as_ref()))));
     }
 }
 
@@ -2077,34 +2158,12 @@ fn apply_post_commit_bp_ops(
                 apply_post_commit_op_to_ballpark(*bp, op);
             }
         }
-        PostCommitBallparkTarget::Actor(targets) => {
-            let targets: &PostCommitActorTargets = *targets;
-            let mut cleanup_ops = PostUnlockOps::default();
-            let raw_hook = deactivation_hook.cloned().or_else(|| targets.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone());
-            let post_pair = targets.module_deactivation_post_unlock_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-            if targets.with_actor_locks(true, |bp_opt, actor_st, cur_tidi| {
-                let bp = bp_opt.expect("require_bp=true checked");
-                for op in local_ops {
-                    match op {
-                        PostCommitBallparkOp::RemoveBall { ball_id } => {
-                            let _ = super::ball_ops::remove_ball_for_post_commit(
-                                targets.solar_system_id, bp, actor_st, &targets.ball_positions, &targets.scrambled_balls,
-                                &targets.module_deactivation_hook, Some(&targets.cooldown_persist_gate), cur_tidi, &mut cleanup_ops, ball_id,
-                            );
-                        }
-                        other => apply_post_commit_op_to_ballpark(bp, other),
-                    }
-                }
-                if !cleanup_ops.is_empty() {
-                    let _ = targets.finalize_deactivations_under_lock(actor_st, &mut cleanup_ops, raw_hook, post_pair, cur_tidi);
-                }
-                super::sync_ball_positions(bp, &targets.ball_positions, &targets.scrambled_balls);
-                super::protection::sync_all_protection_registry_in_actor(bp, actor_st);
-                super::celestials::update_system_hibernation_flag(actor_st, bp, targets.event_tx.receiver_count());
-                targets.publish_view(bp, actor_st, cur_tidi);
-            }).is_none() {
+        PostCommitBallparkTarget::Actor(sink) => {
+            let sink = *sink;
+            let (raw_hook, post_pair) = sink.read_deact_hooks(deactivation_hook);
+            let Some(cleanup_ops) = sink.apply_post_commit_ballpark_ops(local_ops, raw_hook, post_pair) else {
                 return;
-            }
+            };
             if !cleanup_ops.is_empty() && can_run_post_unlock_sync_now() {
                 let fallback_rt = tokio::runtime::Handle::try_current().ok();
                 let _ = execute_post_unlock_ops_inner(
@@ -2115,7 +2174,7 @@ fn apply_post_commit_bp_ops(
                     deactivation_hook,
                     lock_completed_hook,
                     None,
-                    Some(PostCommitBallparkTarget::Actor(targets)),
+                    Some(PostCommitBallparkTarget::Actor(sink)),
                     rt_handle.or(fallback_rt.as_ref()),
                 );
             }
@@ -2212,14 +2271,14 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
                     deact_hook.as_ref(),
                     lock_hook.as_ref(),
                     Some((solar_system_id, work_seq)),
-                    Some(PostCommitBallparkTarget::Actor(&post_commit_targets)),
+                    Some(PostCommitBallparkTarget::Actor(ActorCallbackSink::Worker(&post_commit_targets))),
                     rt_handle.as_ref(),
                 )
             })).unwrap_or_else(|_| { tracing::error!(solar_system_id, "SystemActor post_unlock worker thread panicked; continuing FIFO worker"); (Vec::new(), false) });
             if work_seq > 0 && !tx_committed {
                 completed_seq_worker.store(work_seq, Ordering::Release);
             }
-            extend_pending_cycle_actions(&post_commit_targets.actor_state, extra_actions);
+            let _ = ActorCallbackSink::Worker(&post_commit_targets).extend_pending_cycle_actions(extra_actions);
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 super::flush_post_unlock_actions(&post_unlock_actions_worker);
             })).is_err() {
@@ -2260,7 +2319,7 @@ pub(crate) fn run_wait_worker_deact_hook_for_test(handle: &super::SystemHandle, 
 pub(crate) fn apply_remove_ball_post_commit_for_test(handle: &super::SystemHandle, db: &Arc<WorldRepository>, sde: &Arc<SdeRegistry>, ball_id: BallId) {
     let targets = PostCommitActorTargets::from_handle(handle);
     let raw = handle.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-    apply_post_commit_bp_ops(Some(&**db), Some(db), Some(&**sde), vec![PostCommitBallparkOp::RemoveBall { ball_id }], raw.as_ref(), None, Some(&mut PostCommitBallparkTarget::Actor(&targets)), tokio::runtime::Handle::try_current().ok().as_ref());
+    apply_post_commit_bp_ops(Some(&**db), Some(db), Some(&**sde), vec![PostCommitBallparkOp::RemoveBall { ball_id }], raw.as_ref(), None, Some(&mut PostCommitBallparkTarget::Actor(ActorCallbackSink::Worker(&targets))), tokio::runtime::Handle::try_current().ok().as_ref());
 }
 
 #[cfg(test)]

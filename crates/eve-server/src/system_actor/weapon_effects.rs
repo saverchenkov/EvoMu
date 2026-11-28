@@ -793,11 +793,26 @@ fn persist_checkpoint_op_to_sqlite_inner(
         return true;
     }
     let coord_opt = op.flush_coord.as_ref();
-    let mut seq_guard = coord_opt.map(|c| {
-        c.sqlite_persist_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    });
+    let mut seq_guard = if let Some(c) = coord_opt {
+        if nonblocking {
+            match c.sqlite_persist_lock.try_lock() {
+                Ok(g) => Some(g),
+                Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    c.retry_needed.store(true, Ordering::Release);
+                    return false;
+                }
+            }
+        } else {
+            Some(
+                c.sqlite_persist_lock
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            )
+        }
+    } else {
+        None
+    };
     if let Some(ref g) = seq_guard {
         if op.seq > 0 && op.seq <= **g {
             return true;
@@ -1181,12 +1196,20 @@ pub(in crate::system_actor) fn flush_actor_weapon_effects(
     };
     let persisted = if blocking {
         persist_and_prune_checkpoint_op(db, &op)
-    } else if op.legacy_prune.as_ref().is_none_or(|p| p.is_empty()) {
-        persist_checkpoint_op_to_sqlite_inner(db, &op, true)
+    } else if op.legacy_prune.as_ref().is_none_or(|p| p.is_empty())
+        && persist_checkpoint_op_to_sqlite_inner(db, &op, true)
+    {
+        true
     } else if let Some((tx, in_flight)) = post_unlock_tx {
+        // Clear retry_needed BEFORE enqueueing so worker failures after enqueueing stay visible,
+        // while subsequent actor batches skip blocking sqlite_persist_lock or spamming duplicates.
+        let coord_for_restore = op.flush_coord.clone();
+        if let Some(ref coord) = coord_for_restore {
+            coord.retry_needed.store(false, Ordering::Release);
+        }
         let mut ops = post_unlock::PostUnlockOps::default();
         ops.intents.push(post_unlock::PostUnlockIntent::WeaponEffectsCheckpoint(Box::new(op)));
-        let _ = post_unlock::send_post_unlock_item(
+        let sent = post_unlock::send_post_unlock_item(
             tx,
             in_flight,
             post_unlock::PostUnlockWorkItem {
@@ -1198,6 +1221,11 @@ pub(in crate::system_actor) fn flush_actor_weapon_effects(
                 work_seq: 0,
             },
         );
+        if sent.is_err() {
+            if let Some(ref coord) = coord_for_restore {
+                coord.retry_needed.store(true, Ordering::Release);
+            }
+        }
         false
     } else {
         false

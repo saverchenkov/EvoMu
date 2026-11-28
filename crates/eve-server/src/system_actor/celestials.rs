@@ -2280,6 +2280,10 @@ pub struct SystemHandle {
     pub solar_system_id: SolarSystemId,
     pub(crate) cmd_tx: mpsc::Sender<SystemCommand>,
     pub(in crate::system_actor) post_unlock_tx: tokio::sync::mpsc::UnboundedSender<super::post_unlock::PostUnlockMsg>,
+    pub(in crate::system_actor) worker_cb_tx:
+        tokio::sync::mpsc::UnboundedSender<super::post_unlock::PostUnlockActorCallback>,
+    #[allow(dead_code)] // Retains CurrentThread actor driver runtime while handle lives.
+    pub(in crate::system_actor) ct_driver: Option<Arc<super::CtActorDriver>>,
     pub(in crate::system_actor) post_unlock_worker_thread_id: Arc<std::sync::OnceLock<std::thread::ThreadId>>,
     pub(in crate::system_actor) post_unlock_in_flight: Arc<std::sync::atomic::AtomicUsize>,
     pub(in crate::system_actor) completed_post_unlock_seq: Arc<std::sync::atomic::AtomicU64>,

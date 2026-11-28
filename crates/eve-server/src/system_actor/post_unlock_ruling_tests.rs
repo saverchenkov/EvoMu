@@ -2171,3 +2171,528 @@ async fn track_1d_f01_expiring_observatory_boundary_ping_fires_once_under_held_w
             .await
     );
 }
+
+/// `#1342` Track 4D-2: All 4 `worker_cb_tx` callbacks succeed with `cmd_tx` completely full
+/// (`biased;` polling ahead of `next_actor_cmd_batch`), and fail closed once the actor stops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn track_4d2_worker_callbacks_succeed_with_full_mailbox_and_biased_priority() {
+    use super::{call_actor_callback, PostCommitBallparkOp, PostUnlockActorCallback};
+    use crate::system_actor::{PendingCycleAction, SystemCommand};
+    use std::sync::atomic::Ordering;
+
+    let (ship_id, ship_rm, mod_id) = (779_900_001_i64, 779_900_002_i64, 779_900_101_i64);
+    let (ctx, sys) = boot_ship(
+        ship_rm,
+        &[],
+        None,
+        Some(make_combat_state(100.0, 100.0, 100.0, 100.0)),
+    )
+    .await;
+    seed_ship_char(
+        &ctx.db,
+        SYS_ID,
+        CHAR_ID,
+        ship_id,
+        &[(mod_id, 11578, InventoryFlag::HiSlot0, 0.0)],
+        None,
+    );
+    ctx.systems.set_module_deactivation_post_unlock_hook((
+        Arc::new(|_, _, _| {}),
+        Arc::new(|_, _, _, _| {}),
+    ));
+    let post_pair = sys
+        .module_deactivation_post_unlock_hook
+        .read()
+        .unwrap()
+        .clone();
+
+    sys.test_with_actor_state_mut_async(|st| {
+        st.weapon_effects_dirty = true;
+        st.weapon_effects_seq = 1;
+        st.weapon_effects_dispatched_seq = 1;
+        st.weapon_effects_coord.seq.store(1, Ordering::Release);
+        st.weapon_effects_coord.flushed_seq.store(1, Ordering::Release);
+        st.weapon_effects_coord.dirty.store(false, Ordering::Release);
+        st.weapon_effects_coord.retry_needed.store(false, Ordering::Release);
+        st.weapon_effects_coord
+            .has_pending_legacy_prune
+            .store(false, Ordering::Release);
+    })
+    .await;
+    assert!(!sys.is_hibernated());
+
+    let (p1_tx, p1_rx) = mpsc::channel();
+    let (r1_tx, r1_rx) = mpsc::channel();
+    *sys.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        let _ = p1_tx.send(());
+        let _ = r1_rx.recv();
+    }));
+    let step1 = tokio::spawn({
+        let s = sys.clone();
+        async move { s.ask_step_tick_only(0.1).await }
+    });
+    p1_rx.recv_timeout(Duration::from_secs(2)).expect("step1 reached hook");
+
+    let (p2_tx, p2_rx) = mpsc::channel();
+    let (r2_tx, r2_rx) = mpsc::channel();
+    *sys.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        let _ = p2_tx.send(());
+        let _ = r2_rx.recv();
+    }));
+
+    // Fill `cmd_tx` to full capacity (`SYSTEM_MAILBOX_CAPACITY == 256`), starting with a barrier step.
+    let (step2_tx, step2_rx) = tokio::sync::oneshot::channel();
+    sys.cmd_sender()
+        .try_send(SystemCommand::StepManualTickOnly {
+            dt: 0.1,
+            reply: step2_tx,
+        })
+        .expect("enqueue step2 barrier");
+    let mut flood_rx = Vec::new();
+    loop {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        match sys.cmd_sender().try_send(SystemCommand::CurrentTick { reply: tx }) {
+            Ok(()) => flood_rx.push(rx),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => break,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => panic!("actor closed"),
+        }
+    }
+    assert_eq!(sys.cmd_sender().capacity(), 0, "cmd_tx must be completely full");
+
+    // Enqueue all 4 worker callbacks while `cmd_tx` is completely full.
+    let (cb1_tx, cb1_rx) = mpsc::sync_channel(1);
+    let mut deact_ops = PostUnlockOps::default();
+    deact_ops.push(PostUnlockIntent::DeactivationHook(super::DeferredDeactivationHookOp {
+        solar_system_id: SYS_ID,
+        char_id: Some(CHAR_ID),
+        fallback_owner_id: Some(CHAR_ID),
+        cycle: ActiveModuleCycle {
+            ship_id,
+            module_id: mod_id,
+            module_type_id: 11578,
+            reactivation_delay_s: 20.0,
+            ..Default::default()
+        },
+    }));
+    sys.worker_cb_tx
+        .send(PostUnlockActorCallback::FinalizeDeactivations {
+            ops: deact_ops,
+            raw: None,
+            post_pair,
+            reply: cb1_tx,
+        })
+        .unwrap();
+
+    let (cb2_tx, cb2_rx) = mpsc::sync_channel(1);
+    sys.worker_cb_tx
+        .send(PostUnlockActorCallback::ApplyPostCommitBallparkOps {
+            local_ops: vec![PostCommitBallparkOp::RemoveBall { ball_id: ship_rm }],
+            raw_hook: None,
+            post_pair: None,
+            reply: cb2_tx,
+        })
+        .unwrap();
+
+    let (cb3_tx, cb3_rx) = mpsc::sync_channel(1);
+    sys.worker_cb_tx
+        .send(PostUnlockActorCallback::ClearWeaponEffectsDirty { reply: cb3_tx })
+        .unwrap();
+
+    let (cb4_tx, cb4_rx) = mpsc::sync_channel(1);
+    sys.worker_cb_tx
+        .send(PostUnlockActorCallback::ExtendPendingCycleActions {
+            extra_actions: vec![PendingCycleAction::InvalidateShipFitting {
+                char_id: Some(CHAR_ID),
+                ship_id,
+            }],
+            reply: cb4_tx,
+        })
+        .unwrap();
+
+    // Release step1; `biased;` select must process all 4 callbacks BEFORE `step2` from `cmd_rx`.
+    r1_tx.send(()).unwrap();
+    p2_rx.recv_timeout(Duration::from_secs(2)).expect("step2 reached hook");
+
+    let deact_res = cb1_rx.try_recv().expect("FinalizeDeactivations must complete ahead of cmd_rx");
+    assert_eq!(deact_res.len(), 1);
+    assert!(deact_res[0].cooldown_payload.is_some());
+
+    let cleanup_ops = cb2_rx
+        .try_recv()
+        .expect("ApplyPostCommitBallparkOps must complete ahead of cmd_rx");
+    assert!(!cleanup_ops.is_empty());
+
+    cb3_rx
+        .try_recv()
+        .expect("ClearWeaponEffectsDirty must complete ahead of cmd_rx");
+    cb4_rx
+        .try_recv()
+        .expect("ExtendPendingCycleActions must complete ahead of cmd_rx");
+
+    let view = sys.view();
+    assert!(!view.balls.contains_key(&ship_rm), "post-commit RemoveBall must update SystemView");
+    assert!(
+        view.module_cooldowns
+            .reactivation_cooldowns
+            .get(&(ship_id, mod_id, 11578))
+            .is_some_and(|e| e.delay_s >= 19.0),
+        "FinalizeDeactivations must record cloak cooldown in SystemView"
+    );
+    assert!(
+        sys.is_hibernated(),
+        "ClearWeaponEffectsDirty after RemoveBall must unblock hibernation immediately"
+    );
+
+    r2_tx.send(()).unwrap();
+    step1.await.unwrap().unwrap();
+    step2_rx.await.unwrap();
+    for rx in flood_rx {
+        let _ = rx.await.unwrap();
+    }
+
+    assert!(
+        !sys.test_with_actor_state_async(|st| st.weapon_effects_dirty)
+            .await
+    );
+    assert_eq!(
+        sys.test_with_actor_state_async(|st| st.pending_cycle_actions.len())
+            .await,
+        1
+    );
+
+    assert!(ctx.systems.stop_system(SYS_ID).await);
+    assert!(
+        call_actor_callback(&sys.worker_cb_tx, |reply| {
+            PostUnlockActorCallback::ClearWeaponEffectsDirty { reply }
+        })
+        .is_none(),
+        "callbacks must fail closed immediately once actor has stopped"
+    );
+}
+
+/// `#1342` Track 4D-2: Shutdown with a queued worker item that invokes a post-commit ballpark op
+/// completes promptly by servicing `worker_cb_rx` alongside `post_unlock_worker_join` (no 5s timeout).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn track_4d2_shutdown_with_queued_post_commit_ballpark_op_completes_promptly() {
+    use crate::services::pve_abyssal_pylons::AbyssalPylonsDbOp;
+    use crate::system_actor::SystemLifecycleState;
+
+    let pod_id = 779_910_001_i64;
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            pod_id,
+            make_item(pod_id, 670, CHAR_ID, i64::from(SYS_ID), InventoryFlag::None, 1),
+        );
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.active_ship_id = pod_id;
+        }
+    });
+    let max_id_before = ctx.db.with_snapshot(|s| s.next_entity_id);
+    let sys = ctx.systems.get_or_spawn(SYS_ID);
+
+    let held = hold_db_writer(&ctx.db);
+    let mut ops = PostUnlockOps::default();
+    ops.push(PostUnlockIntent::AbyssalPylons(
+        AbyssalPylonsDbOp::PodBoundaryDestroyed {
+            solar_system_id: SYS_ID,
+            ball_id: pod_id,
+            b_pos: [500.0, 0.0, 0.0],
+            owner_hint: CHAR_ID,
+            now_unix: now,
+        },
+    ));
+    send_in_flight(&sys, &ctx, ops);
+    wait_until("worker in flight", || sys.has_in_flight_post_unlock()).await;
+
+    let stop_fut = tokio::spawn({
+        let reg = Arc::clone(&ctx.systems);
+        async move { reg.stop_system(SYS_ID).await }
+    });
+    wait_until("system entered Stopping", || {
+        ctx.systems.system_lifecycle_state(SYS_ID) == SystemLifecycleState::Stopping
+    })
+    .await;
+
+    let t0 = std::time::Instant::now();
+    release_writer(held);
+    assert!(stop_fut.await.unwrap(), "stop_system must succeed");
+    assert!(
+        t0.elapsed() < Duration::from_secs(2),
+        "shutdown with queued post-commit ballpark op must not hit 5s timeout: {:?}",
+        t0.elapsed()
+    );
+
+    let corpse_spawned_in_view = sys
+        .view()
+        .balls
+        .keys()
+        .any(|&bid| bid > max_id_before);
+    assert!(
+        corpse_spawned_in_view,
+        "post-commit corpse ball must be applied inside actor before shutdown completes"
+    );
+    assert!(
+        ctx.db.with_snapshot(|s| {
+            s.items
+                .values()
+                .any(|it| it.item_id > max_id_before && it.type_id == 25 && it.owner_id == CHAR_ID)
+        }),
+        "corpse item must persist during shutdown drain"
+    );
+}
+
+/// `#1342` Track 4D-2: Dropping a `CurrentThread` `tokio::runtime::Runtime` triggers the sentinel
+/// to stop the `CtActorDriver` actor and close `post_unlock_tx` and `cmd_tx` cleanly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn track_4d2_current_thread_runtime_drop_sentinel_closes_channels() {
+    use crate::system_actor::SystemRegistry;
+
+    let ctx = test_ctx();
+    let mt_handle = ctx.systems.get_or_spawn(SYS_ID);
+    assert!(
+        mt_handle.ct_driver.is_none(),
+        "MultiThread actors must incur zero CtActorDriver overhead"
+    );
+    assert!(ctx.systems.stop_system(SYS_ID).await);
+
+    // Case A: `CurrentThread` runtime dropped while `SystemRegistry` and `SystemHandle` stay alive.
+    let reg = Arc::new(SystemRegistry::with_sde(Arc::clone(&ctx.sde)));
+    let reg_spawn = Arc::clone(&reg);
+    let h = std::thread::spawn(move || {
+        let ct_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build CurrentThread runtime");
+        let h = {
+            let _enter = ct_rt.enter();
+            reg_spawn.get_or_spawn(SYS_ID)
+        };
+        assert!(h.ct_driver.is_some(), "CurrentThread actor must attach CtActorDriver");
+        assert!(!h.cmd_sender().is_closed());
+        assert!(!h.post_unlock_tx.is_closed());
+        // Exercise actor mailbox through `CtActorDriver` before dropping `ct_rt`.
+        h.try_set_ball_position(779_920_001, DVec3::new(10.0, 0.0, 0.0));
+        drop(ct_rt);
+        h
+    })
+    .join()
+    .expect("join CurrentThread drop thread");
+
+    assert!(
+        h.post_unlock_tx.is_closed(),
+        "sentinel must close post_unlock_tx when CurrentThread Runtime drops"
+    );
+    assert!(
+        h.cmd_sender().is_closed(),
+        "sentinel must close cmd_tx when CurrentThread Runtime drops"
+    );
+    assert!(!reg.dead_live_system_handles().is_empty());
+
+    // Case B: `SystemRegistry` and `SystemHandle` dropped before `CurrentThread` runtime polls the
+    // actor future or drops (verifies BF-02: no 6-second stall in `CtSentinelGuard::drop`).
+    let sde_b = Arc::clone(&ctx.sde);
+    let case_b_start = std::time::Instant::now();
+    std::thread::spawn(move || {
+        let ct_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build CurrentThread runtime B");
+        {
+            let _enter = ct_rt.enter();
+            let reg_b = Arc::new(SystemRegistry::with_sde(sde_b));
+            let h_b = reg_b.get_or_spawn(30_000_144);
+            assert!(h_b.ct_driver.is_some());
+        }
+        // Polling while `ct_rt` stays alive must also not hit the 6s condvar timeout.
+        ct_rt.block_on(tokio::task::yield_now());
+        drop(ct_rt);
+    })
+    .join()
+    .expect("dropping SystemRegistry+SystemHandle before CurrentThread Runtime must not panic");
+    assert!(
+        case_b_start.elapsed() < Duration::from_secs(2),
+        "dropping CurrentThread actor before first poll must not stall CtSentinelGuard for 6s (elapsed: {:?})",
+        case_b_start.elapsed()
+    );
+}
+
+/// `#1342` Track 4D-2 (`BF-01`): Dropping the last `Arc<CtActorDriver>` / `SystemHandle` from
+/// inside a `CtActorDriver` worker thread (including via `post_unlock_actions`) must not deadlock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn track_4d2_ct_actor_driver_drop_from_own_worker_and_post_unlock_actions_no_deadlock() {
+    use crate::system_actor::SystemRegistry;
+
+    let ctx = test_ctx();
+
+    // Part A: Last `Arc<CtActorDriver>` dropped directly from a task running on `CtActorDriver`'s
+    // worker threads.
+    let reg_a = Arc::new(SystemRegistry::with_sde(Arc::clone(&ctx.sde)));
+    let (h_a, ct_thread_a) = {
+        let reg_spawn_a = Arc::clone(&reg_a);
+        let (h_tx, h_rx) = std::sync::mpsc::sync_channel(1);
+        let (drop_rt_tx, drop_rt_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let join_a = std::thread::spawn(move || {
+            let ct_rt_a = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build CurrentThread runtime A");
+            let h_a = {
+                let _enter = ct_rt_a.enter();
+                reg_spawn_a.get_or_spawn(SYS_ID)
+            };
+            let _ = h_tx.send(h_a);
+            let _ = drop_rt_rx.recv();
+            drop(ct_rt_a);
+        });
+        let h_a = h_rx.recv().unwrap();
+        let driver_a = Arc::clone(h_a.ct_driver.as_ref().expect("CurrentThread attaches driver"));
+        let driver_rt_a = driver_a.rt_handle().clone();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel::<()>();
+        let (ext_dropped_tx, ext_dropped_rx) = tokio::sync::oneshot::channel::<()>();
+        driver_rt_a.spawn(async move {
+            let _ = ext_dropped_rx.await;
+            drop(driver_a);
+            let _ = dropped_tx.send(());
+        });
+        drop(h_a);
+        drop(reg_a);
+        let _ = ext_dropped_tx.send(());
+        tokio::time::timeout(Duration::from_secs(2), dropped_rx)
+            .await
+            .expect("dropping last Arc<CtActorDriver> on its own worker thread must not deadlock")
+            .expect("driver worker task must complete");
+        let _ = drop_rt_tx.send(());
+        ((), join_a)
+    };
+    let _ = h_a;
+    ct_thread_a.join().expect("join CurrentThread runtime thread A");
+
+    // Part B: Cloned `SystemHandle` moved into `post_unlock_actions`, executed by actor on
+    // `CtActorDriver` worker thread after external `SystemRegistry` + `SystemHandle` drop.
+    let part_b_start = std::time::Instant::now();
+    let reg_b = Arc::new(SystemRegistry::with_sde(Arc::clone(&ctx.sde)));
+    let (h_b, drop_rt_tx_b, join_b) = {
+        let reg_spawn_b = Arc::clone(&reg_b);
+        let (h_tx, h_rx) = std::sync::mpsc::sync_channel(1);
+        let (drop_rt_tx, drop_rt_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let join_b = std::thread::spawn(move || {
+            let ct_rt_b = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build CurrentThread runtime B");
+            let h_b = {
+                let _enter = ct_rt_b.enter();
+                reg_spawn_b.get_or_spawn(30_000_145)
+            };
+            let _ = h_tx.send(h_b);
+            let _ = drop_rt_rx.recv();
+            drop(ct_rt_b);
+        });
+        (h_rx.recv().unwrap(), drop_rt_tx, join_b)
+    };
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (action_tx, action_rx) = tokio::sync::oneshot::channel::<()>();
+    let h_b_captured = h_b.clone();
+    let driver_weak = Arc::downgrade(
+        h_b.ct_driver
+            .as_ref()
+            .expect("CurrentThread attaches driver"),
+    );
+    h_b.enqueue_post_unlock_action(Box::new(move || {
+        // Confirm execution has already entered `CtActorDriver`'s worker thread, then wait briefly
+        // so external `h_b` and `reg_b` drop first and `h_b_captured` is the last strong ref.
+        let _ = entered_tx.send(());
+        let _ = ready_rx.recv();
+        drop(h_b_captured);
+        let _ = action_tx.send(());
+    }));
+    // Dispatch non-blocking wake command so `flush_post_unlock_actions_on_actor` executes on
+    // `CtActorDriver`'s worker thread without waiting on a synchronous actor reply.
+    let (tick_tx, _tick_rx) = tokio::sync::oneshot::channel();
+    h_b.cmd_sender()
+        .try_send(crate::system_actor::SystemCommand::CurrentTick { reply: tick_tx })
+        .expect("enqueue non-blocking CurrentTick wake command");
+    tokio::time::timeout(Duration::from_secs(2), entered_rx)
+        .await
+        .expect("post_unlock_actions closure must enter on CtActorDriver worker thread")
+        .expect("entered_tx must fire");
+    drop(h_b);
+    drop(reg_b);
+    let _ = ready_tx.send(());
+    tokio::time::timeout(Duration::from_secs(2), action_rx)
+        .await
+        .expect("post_unlock_actions closure must finish without deadlock")
+        .expect("action channel must signal completion");
+    let _ = drop_rt_tx_b.send(());
+    join_b.join().expect("join CurrentThread runtime thread B");
+    wait_until(
+        "CtActorDriver weak count must reach 0 without reference cycles",
+        || driver_weak.strong_count() == 0,
+    )
+    .await;
+    assert!(
+        part_b_start.elapsed() < Duration::from_secs(2),
+        "Part B must complete promptly without hitting 5s sync timeout (elapsed: {:?})",
+        part_b_start.elapsed()
+    );
+}
+
+/// `#1342` Track 4D-2 static check: `post_unlock.rs` has zero `ballpark` / `actor_state` lock acquisitions.
+#[test]
+fn track_4d2_post_unlock_has_zero_ballpark_or_actor_state_locks() {
+    let raw = include_str!("post_unlock.rs");
+    let without_ruling_mod = raw
+        .split("#[path = \"post_unlock_ruling_tests.rs\"]")
+        .next()
+        .unwrap_or(raw);
+    let mut code_lines = String::with_capacity(without_ruling_mod.len());
+    for line in without_ruling_mod.lines() {
+        let trimmed = line.split("//").next().unwrap_or("");
+        code_lines.push_str(trimmed);
+        code_lines.push('\n');
+    }
+    assert!(
+        !code_lines.contains("with_actor_locks"),
+        "post_unlock.rs must not contain with_actor_locks"
+    );
+    for after_sig in code_lines.split("fn extend_pending_cycle_actions(").skip(1) {
+        let trimmed_sig = after_sig.trim_start();
+        assert!(
+            trimmed_sig.starts_with("&self"),
+            "post_unlock.rs must only declare (&self) callback methods for extend_pending_cycle_actions, not direct-lock helpers: {trimmed_sig}"
+        );
+    }
+    for target in ["ballpark", "actor_state"] {
+        for method in [
+            "read(",
+            "write(",
+            "try_read(",
+            "try_write(",
+            "lock(",
+            "write_untracked(",
+        ] {
+            let dot_pat = format!("{target}.{method}");
+            let spaced_pat = format!("{target} .{method}");
+            assert!(
+                !code_lines.contains(&dot_pat) && !code_lines.contains(&spaced_pat),
+                "post_unlock.rs must not acquire {dot_pat}"
+            );
+        }
+    }
+    let targets_struct = code_lines
+        .split("struct PostCommitActorTargets")
+        .nth(1)
+        .and_then(|s| s.split('}').next())
+        .expect("PostCommitActorTargets struct present");
+    assert!(
+        !targets_struct.contains("ballpark") && !targets_struct.contains("actor_state"),
+        "PostCommitActorTargets must not hold ballpark or actor_state fields"
+    );
+    assert!(
+        targets_struct.contains("worker_cb_tx"),
+        "PostCommitActorTargets must route actor callbacks through worker_cb_tx"
+    );
+}
