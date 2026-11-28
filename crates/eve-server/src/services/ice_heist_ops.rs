@@ -303,6 +303,9 @@ pub async fn escort_ice_heist_tanker(
 /// Drives Pirate Insurgency Ice Refinery Heist spawns, tanker escort movement/scoring,
 /// and Upwell Thunderchild guard weapon engagement on the 1 Hz system tick.
 pub async fn step_ice_heist_system(ctx: &ServerContext, sys_id: u32) {
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
     let active_instance_opt = read_insurgency_runtime(ctx, |rt| {
         rt.ice_heist_instances
             .iter()
@@ -320,9 +323,6 @@ pub async fn step_ice_heist_system(ctx: &ServerContext, sys_id: u32) {
         },
     };
 
-    let Some(sys) = ctx.systems.get_handle(sys_id) else {
-        return;
-    };
     let all_balls = sys.list_balls().await.unwrap_or_default();
     let tanker_id = 1_896_000_000 + instance_id * 10 + 1;
     let guard_id = 1_896_000_000 + instance_id * 10 + 2;

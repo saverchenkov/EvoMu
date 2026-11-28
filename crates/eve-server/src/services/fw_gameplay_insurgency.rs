@@ -932,14 +932,13 @@ async fn sync_insurgency_system_npcs(
     let enforcer_offset = DVec3::new(-12_000.0, 0.0, 4_000.0);
     let mut spawn_specs: Vec<(u32, &'static str, u32, DVec3)> = Vec::new();
 
-    if !stale_balls.is_empty() || !idle_roamers.is_empty() || need_pirate || need_enforcer {
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        for &bid in &stale_balls {
-            let _ = sys_handle.remove_ball(bid).await;
-        }
-        if !idle_roamers.is_empty() || need_pirate || need_enforcer {
-            let waypoints = system_roamer_waypoints(ctx, sys_id);
+    if !stale_balls.is_empty() || !idle_roamers.is_empty() {
+        if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+            for &bid in &stale_balls {
+                let _ = sys_handle.remove_ball(bid).await;
+            }
             if !idle_roamers.is_empty() {
+                let waypoints = system_roamer_waypoints(ctx, sys_id);
                 let view = sys_handle.view();
                 let mut roamer_cmds = Vec::with_capacity(idle_roamers.len());
                 for (bid, is_pir, cur_anchor) in idle_roamers {
@@ -978,12 +977,15 @@ async fn sync_insurgency_system_npcs(
                     }
                 }
             }
-            if let Some(tid) = desired_pirate.filter(|_| !has_pirate) {
-                spawn_specs.push((tid, "InsurgencyPirateRoamer", pirate_fac as u32, waypoints[0] + pirate_offset));
-            }
-            if let Some(tid) = desired_enforcer.filter(|_| !has_enforcer) {
-                spawn_specs.push((tid, "InsurgencyEnforcer", empire_fac as u32, waypoints[0] + enforcer_offset));
-            }
+        }
+    }
+    if need_pirate || need_enforcer {
+        let waypoints = system_roamer_waypoints(ctx, sys_id);
+        if let Some(tid) = desired_pirate.filter(|_| !has_pirate) {
+            spawn_specs.push((tid, "InsurgencyPirateRoamer", pirate_fac as u32, waypoints[0] + pirate_offset));
+        }
+        if let Some(tid) = desired_enforcer.filter(|_| !has_enforcer) {
+            spawn_specs.push((tid, "InsurgencyEnforcer", empire_fac as u32, waypoints[0] + enforcer_offset));
         }
     }
     if should_deploy_ci {

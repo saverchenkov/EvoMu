@@ -143,12 +143,12 @@ async fn ice_heist_step_guard_combat_and_tanker_steering() {
     init_insurgency_campaign(&ctx, camp_id, FACTION_GURISTAS, 500_001, sys_id, vec![sys_id]);
     add_system_corruption(&ctx, camp_id, sys_id, 450);
 
-    // Let step_ice_heist_system auto-spawn the instance when none is active
+    // Live system tick spawns active Ice Heist balls when none are spawned yet
+    let sys = ctx.systems.get_or_spawn(sys_id);
     step_ice_heist_system(&ctx, sys_id).await;
     let inst_id = read_insurgency_runtime(&ctx, |rt| rt.ice_heist_instances[0].instance_id);
     let tanker_id = 1_896_000_000 + inst_id * 10 + 1;
     let guard_pos = ICE_HEIST_REFINERY_POS + DVec3::new(0.0, 0.0, 40_000.0);
-    let sys = ctx.systems.get_or_spawn(sys_id);
 
     // 1. Guard engagement: fragile pirate ship (1 HP -> destroyed), sturdy pirate ship (damaged),
     //    capsule (670 -> ignored), empire ship (ignored)
@@ -260,9 +260,10 @@ async fn step_ice_heist_system_stays_cold_below_corruption_stage_3_and_when_syst
     let cold_sys = 30_045_330_u32;
     assert!(ctx.systems.get_handle(cold_sys).is_none());
 
+    // 1. Corruption stage < 3: step_ice_heist_system stays cold and spawns no instance.
     init_insurgency_campaign(&ctx, 542, 500_010, 500_003, cold_sys, vec![cold_sys]);
-    let (_pts, stage) = add_system_corruption(&ctx, 542, cold_sys, 1);
-    assert!(stage < 3);
+    let (_pts, low_stage) = add_system_corruption(&ctx, 542, cold_sys, 1);
+    assert!(low_stage < 3);
 
     step_ice_heist_system(&ctx, cold_sys).await;
     assert!(ctx.systems.get_handle(cold_sys).is_none());
@@ -270,17 +271,17 @@ async fn step_ice_heist_system_stays_cold_below_corruption_stage_3_and_when_syst
         assert!(rt.ice_heist_instances.is_empty());
     });
 
-    // Escorting a tanker on an active instance when the system is cold updates DB state without spawning an actor.
-    with_insurgency_runtime(&ctx, |rt| {
-        rt.ice_heist_instances.push(eve_db::PersistedIceHeistRecord {
-            instance_id: 99_542,
-            solar_system_id: cold_sys,
-            pirate_tankers_saved: 0,
-            empire_tankers_saved: 0,
-            completed: false,
-        });
-    });
-    let escort_rep = escort_ice_heist_tanker(&ctx, 90_000_001, 99_542, true)
+    // 2. Corruption stage >= 3 (with active persisted instance) on cold system:
+    //    entry get_handle guard returns before ensure_ice_heist_balls_spawned / spawn_ice_heist_checked.
+    let (_pts_hi, hi_stage) = add_system_corruption(&ctx, 542, cold_sys, 450);
+    assert!(hi_stage >= 3);
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    let inst_id = read_insurgency_runtime(&ctx, |rt| rt.ice_heist_instances[0].instance_id);
+    step_ice_heist_system(&ctx, cold_sys).await;
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    // 3. Escorting a tanker on an active instance when cold updates DB state without spawning an actor.
+    let escort_rep = escort_ice_heist_tanker(&ctx, 90_000_001, inst_id, true)
         .await
         .expect("escort_ice_heist_tanker must succeed when cold");
     assert_eq!(

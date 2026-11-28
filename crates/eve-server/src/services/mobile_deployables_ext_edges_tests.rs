@@ -836,10 +836,11 @@ async fn siphon_steals_raw_processed_and_polymer_with_waste_and_capacity() {
         });
     });
 
-    // Advance 60s + 2 cycles (7200s)
+    // Advance 60s + 2 cycles (7200s) -> DB-only Mobile Siphon runs even when sys_id is cold!
     clock.advance_secs(60 + SIPHON_CYCLE_SECS * 2);
-    let _ = ctx.systems.get_or_spawn(sys_id);
+    assert!(ctx.systems.get_handle(sys_id).is_none());
     step_system_deployables_sync(&ctx, sys_id);
+    assert!(ctx.systems.get_handle(sys_id).is_none());
 
     ctx.db.with_snapshot(|snap| {
         assert!(snap.items.contains_key(&locked_stack_id));
@@ -1001,6 +1002,7 @@ async fn mmju_and_deployable_sync_do_not_spawn_cold_system() {
     step_system_deployables_sync(&ctx, sys_id);
     assert!(ctx.systems.get_handle(sys_id).is_none());
     let st = read_deployable_state(&ctx);
+    assert!(!st.mmju_spools.contains_key(&ship_id));
     assert!(st.pending_decloak_notifications.is_empty());
     let notifs = ctx.drain_notifications_for_char(char_id);
     assert!(notifs

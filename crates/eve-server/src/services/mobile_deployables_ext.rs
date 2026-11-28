@@ -1499,6 +1499,15 @@ pub fn step_system_deployables_sync(ctx: &ServerContext, solar_system_id: u32) {
                 "step_system_deployables_sync actor command failed"
             );
         }
+    } else {
+        ctx.db.with_mut_snapshot(|snap| {
+            write_deployable_state_snap(snap, |st| {
+                st.mmju_spools.retain(|_, e| {
+                    !(e.solar_system_id == solar_system_id && now_unix >= e.complete_at_unix)
+                });
+            });
+            apply_step_siphons_in_snap(snap, &ctx.sde, solar_system_id, None, now_unix);
+        });
     }
     flush_deployable_side_effects(ctx);
 }
