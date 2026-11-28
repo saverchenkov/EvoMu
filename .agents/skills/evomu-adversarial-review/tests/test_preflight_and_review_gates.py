@@ -3160,6 +3160,79 @@ fn t() {
         self.assertEqual(rc_to, 124)
         self.assertIn("TIMEOUT", out_to)
 
+    def test_933_client_compat_destiny_rewrites_zero_state_and_present_functions(self):
+        import tighten_ratchets  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmp:
+            compat_rel = "crates/eve-server/src/router/client_compat.rs"
+            compat_path = os.path.join(tmp, compat_rel)
+
+            # 1. Both `normalize_destiny_update_arg` and `normalize_destiny_payload_arg` absent -> 0 rewrites, CLEAN & TIGHT
+            zero_rs = """\
+pub fn normalize_macho_rpc_reply_at(service: &str, method: &str) {
+    if service == "charMgr" && method == "GetPublicInfo" {
+        let _ = 1;
+    }
+}
+
+pub fn should_suppress_macho_notification(event: &str) -> bool {
+    if event == "DoDestinyUpdate" {
+        return true;
+    }
+    false
+}
+
+pub fn normalize_macho_notification_with_sde(event: &str) {
+    match event {
+        "DoDestinyUpdates" => {}
+        _ => {}
+    }
+}
+"""
+            _write(compat_path, zero_rs)
+            rep_zero = ratchet_checks._scan_client_compat_rs(compat_path)
+            self.assertEqual(rep_zero["destiny_rewrites"], 0)
+            self.assertFalse(any(r.startswith("destiny:") for r in rep_zero["known_rules"]))
+            self.assertIn("suppress:DoDestinyUpdate", rep_zero["known_rules"])
+            self.assertIn("notify:DoDestinyUpdates", rep_zero["known_rules"])
+
+            v2_json = {
+                "version": 2,
+                "counters": {
+                    "rpc_rules": {compat_rel: rep_zero["rpc_rules"]},
+                    "suppress_rules": {compat_rel: rep_zero["suppress_rules"]},
+                    "notify_arms": {compat_rel: rep_zero["notify_arms"]},
+                    "destiny_rewrites": {},
+                    "production_lines": {compat_rel: rep_zero["production_lines"]},
+                    "sequencer_set_state_rewrites": {},
+                    "transport_conditionals": {},
+                    "direct_layer_test_calls": {},
+                    "service_caller_trace_comparisons": {},
+                    "service_caller_trace_params": {},
+                },
+                "known_rules": sorted(rep_zero["known_rules"]),
+                "allowed_service_caller_trace_files": [],
+                "allowed_it_dispatch_rpc_files": [],
+            }
+            _write(os.path.join(tmp, "crates/eve-testkit/ratchets/client_compat_ratchet.json"), json.dumps(v2_json, indent=2))
+            self.assertEqual(ratchet_checks.check_all_ratchets(tmp, cache_path=os.path.join(tmp, "c.json")), [])
+            self.assertEqual(tighten_ratchets.tighten_ratchets(tmp, write=False, targets=("client_compat",)), ([], 0, []))
+
+            # 2. Trivial `normalize_destiny_payload_arg` without `.filter(...)` or `PyRep::Tuple(...) => {` -> 0 rewrites (no error)
+            trivial_rs = zero_rs + "\npub fn normalize_destiny_payload_arg(name: &str) -> &str { name }\n"
+            _write(compat_path, trivial_rs)
+            rep_trivial = ratchet_checks._scan_client_compat_rs(compat_path)
+            self.assertEqual(rep_trivial["destiny_rewrites"], 0)
+            self.assertFalse(any(r.startswith("destiny:") for r in rep_trivial["known_rules"]))
+
+            # 3. Present functions still count non-zero rewrites & known_rules accurately
+            _write(compat_path, _minimal_client_compat_rs())
+            rep_present = ratchet_checks._scan_client_compat_rs(compat_path)
+            self.assertEqual(rep_present["destiny_rewrites"], 3)
+            self.assertIn("destiny:update:AddBalls2", rep_present["known_rules"])
+            self.assertIn("destiny:payload:DropCommand", rep_present["known_rules"])
+            self.assertIn("destiny:payload:SetState", rep_present["known_rules"])
+
 
 if __name__ == "__main__":
     unittest.main()

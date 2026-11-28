@@ -1332,140 +1332,173 @@ def _scan_client_compat_rs(compat_path):
         i += 1
 
     rewrites = 0
-    uo, uc = _find_fn_body_span(clean_b, "normalize_destiny_update_arg")
-    pd = brd = 0
-    i = uo + 1
-    while i < uc:
-        if pd == 0 and brd == 0 and _is_word_at(clean_b, i, b"if"):
-            he = _find_if_header_end(clean_b, i, uc)
-            ns = _extract_var_matches(clean_b[i:he], raw_b[i:he], "name")
-            if ns:
-                rewrites += 1
-                for n in ns:
-                    known.add("destiny:update:%s" % n)
-        c = clean_b[i]
-        if c == 40:
-            pd += 1
-        elif c == 41:
-            pd = max(0, pd - 1)
-        elif c == 91:
-            brd += 1
-        elif c == 93:
-            brd = max(0, brd - 1)
-        i += 1
+    # 1. `normalize_destiny_update_arg`: top-level `if` checks on `name` (0 when deleted).
+    try:
+        uo, uc = _find_fn_body_span(clean_b, "normalize_destiny_update_arg")
+    except ValueError:
+        uo = uc = None
+    if uo is not None:
+        pd = brd = 0
+        i = uo + 1
+        while i < uc:
+            if pd == 0 and brd == 0 and _is_word_at(clean_b, i, b"if"):
+                he = _find_if_header_end(clean_b, i, uc)
+                ns = _extract_var_matches(clean_b[i:he], raw_b[i:he], "name")
+                if ns:
+                    rewrites += 1
+                    for n in ns:
+                        known.add("destiny:update:%s" % n)
+            c = clean_b[i]
+            if c == 40:
+                pd += 1
+            elif c == 41:
+                pd = max(0, pd - 1)
+            elif c == 91:
+                brd += 1
+            elif c == 93:
+                brd = max(0, brd - 1)
+            i += 1
 
-    po, pc = _find_fn_body_span(clean_b, "normalize_destiny_payload_arg")
-    fm = re.search(rb"\.filter\s*\(", clean_b[po + 1:pc])
-    if not fm:
-        raise ValueError("missing `.filter(...)` in `normalize_destiny_payload_arg`")
-    cur = po + 1 + fm.end()
-    cp = 1
-    cs = ce = None
-    while cur < pc and cp > 0:
-        if cp == 1 and clean_b[cur] == 123:
-            cs = cur + 1
-            cb2 = 1
-            ce = cs
-            while ce < pc and cb2 > 0:
-                if clean_b[ce] == 123:
-                    cb2 += 1
-                elif clean_b[ce] == 125:
-                    cb2 -= 1
-                    if cb2 == 0:
-                        break
-                ce += 1
-            break
-        if clean_b[cur] == 40:
-            cp += 1
-        elif clean_b[cur] == 41:
-            cp -= 1
-        cur += 1
-    if cs is None or ce is None:
-        raise ValueError("missing filter closure body in `normalize_destiny_payload_arg`")
-
-    last_semi = None
-    lb = lp = lbr = 0
-    for k in range(cs, ce):
-        c = clean_b[k]
-        if c == 123:
-            lb += 1
-        elif c == 125:
-            lb = max(0, lb - 1)
-        elif c == 40:
-            lp += 1
-        elif c == 41:
-            lp = max(0, lp - 1)
-        elif c == 91:
-            lbr += 1
-        elif c == 93:
-            lbr = max(0, lbr - 1)
-        elif c == 59 and lb == 0 and lp == 0 and lbr == 0:
-            last_semi = k
-    es = cs if last_semi is None else last_semi + 1
-    conj_s = es
-    cp = cb2 = cbr = 0
-    conjs = []
-    k = es
-    while k < ce:
-        if cb2 == 0 and cp == 0 and cbr == 0 and k + 1 < ce and clean_b[k:k + 2] == b"&&":
-            conjs.append((conj_s, k))
-            conj_s = k + 2
-            k += 2
-            continue
-        c = clean_b[k]
-        if c == 123:
-            cb2 += 1
-        elif c == 125:
-            cb2 = max(0, cb2 - 1)
-        elif c == 40:
-            cp += 1
-        elif c == 41:
-            cp = max(0, cp - 1)
-        elif c == 91:
-            cbr += 1
-        elif c == 93:
-            cbr = max(0, cbr - 1)
-        k += 1
-    conjs.append((conj_s, ce))
-    for a_i, b_i in conjs:
-        if re.search(rb"\bfname\b", clean_b[a_i:b_i]):
-            rewrites += 1
-            for lit in _extract_str_lits(raw_b[a_i:b_i]):
-                known.add("destiny:payload:%s" % lit)
-
-    tm = re.search(rb"PyRep::Tuple\s*\([^)]*\)\s*=>\s*\{", clean_b[po:pc])
-    if not tm:
-        raise ValueError("missing `PyRep::Tuple(...) => {` arm in `normalize_destiny_payload_arg`")
-    ao = po + tm.end() - 1
-    ab = 1
-    ac = ao + 1
-    while ac < pc and ab > 0:
-        if clean_b[ac] == 123:
-            ab += 1
-        elif clean_b[ac] == 125:
-            ab -= 1
-            if ab == 0:
+    # 2. `normalize_destiny_payload_arg` (0 when deleted or trivial):
+    #    (a) `fname` filter clauses in `PyRep::List(items)`
+    #    (b) condition headers in `PyRep::Tuple(...) => {` (`name` branches + string literals)
+    try:
+        po, pc = _find_fn_body_span(clean_b, "normalize_destiny_payload_arg")
+    except ValueError:
+        po = pc = None
+    if po is not None:
+        cs = ce = None
+        for fm in re.finditer(rb"\.filter(?!\w)\s*\(", clean_b[po + 1:pc]):
+            cur = po + 1 + fm.end()
+            cp = 1
+            while cur < pc and cp > 0:
+                if cp == 1 and clean_b[cur] == 123:
+                    cand_s = cur + 1
+                    cb2 = 1
+                    cand_e = cand_s
+                    while cand_e < pc and cb2 > 0:
+                        if clean_b[cand_e] == 123:
+                            cb2 += 1
+                        elif clean_b[cand_e] == 125:
+                            cb2 -= 1
+                            if cb2 == 0:
+                                break
+                        cand_e += 1
+                    cs, ce = cand_s, cand_e
+                    break
+                if clean_b[cur] == 40:
+                    cp += 1
+                elif clean_b[cur] == 41:
+                    cp -= 1
+                cur += 1
+            if cs is not None:
                 break
-        ac += 1
-    tp = tbr = 0
-    ti = ao + 1
-    while ti < ac:
-        if tp == 0 and tbr == 0 and _is_word_at(clean_b, ti, b"if"):
-            he = _find_if_header_end(clean_b, ti, ac)
-            if _extract_var_matches(clean_b[ti:he], raw_b[ti:he], "name"):
-                rewrites += 1
-            for lit in _extract_str_lits(raw_b[ti:he]):
-                known.add("destiny:payload:%s" % lit)
-        c = clean_b[ti]
-        if c == 40:
-            tp += 1
-        elif c == 41:
-            tp = max(0, tp - 1)
-        elif c == 91:
-            tbr += 1
-        elif c == 93:
-            tbr = max(0, tbr - 1)
-        ti += 1
+
+        if cs is not None and ce is not None:
+            last_semi = None
+            lb = lp = lbr = 0
+            for k in range(cs, ce):
+                c = clean_b[k]
+                if c == 123:
+                    lb += 1
+                elif c == 125:
+                    lb = max(0, lb - 1)
+                elif c == 40:
+                    lp += 1
+                elif c == 41:
+                    lp = max(0, lp - 1)
+                elif c == 91:
+                    lbr += 1
+                elif c == 93:
+                    lbr = max(0, lbr - 1)
+                elif c == 59 and lb == 0 and lp == 0 and lbr == 0:
+                    last_semi = k
+            es = cs if last_semi is None else last_semi + 1
+            conj_s = es
+            cp = cb2 = cbr = 0
+            conjs = []
+            k = es
+            while k < ce:
+                if cb2 == 0 and cp == 0 and cbr == 0 and k + 1 < ce and clean_b[k:k + 2] == b"&&":
+                    conjs.append((conj_s, k))
+                    conj_s = k + 2
+                    k += 2
+                    continue
+                c = clean_b[k]
+                if c == 123:
+                    cb2 += 1
+                elif c == 125:
+                    cb2 = max(0, cb2 - 1)
+                elif c == 40:
+                    cp += 1
+                elif c == 41:
+                    cp = max(0, cp - 1)
+                elif c == 91:
+                    cbr += 1
+                elif c == 93:
+                    cbr = max(0, cbr - 1)
+                k += 1
+            conjs.append((conj_s, ce))
+            for a_i, b_i in conjs:
+                if re.search(rb"\bfname\b", clean_b[a_i:b_i]):
+                    rewrites += 1
+                    for lit in _extract_str_lits(raw_b[a_i:b_i]):
+                        known.add("destiny:payload:%s" % lit)
+
+        ao = None
+        tuple_search = po
+        while True:
+            tpos = clean_b.find(b"PyRep::Tuple", tuple_search, pc)
+            if tpos < 0:
+                break
+            after_pat = _skip_ws_comments_b(clean_b, tpos + len(b"PyRep::Tuple"))
+            if after_pat < pc and clean_b[after_pat] == 40:
+                pat_p = 1
+                after_pat += 1
+                while after_pat < pc and pat_p > 0:
+                    if clean_b[after_pat] == 40:
+                        pat_p += 1
+                    elif clean_b[after_pat] == 41:
+                        pat_p -= 1
+                    after_pat += 1
+                arrow_pos = _skip_ws_comments_b(clean_b, after_pat)
+                if arrow_pos + 1 < pc and clean_b[arrow_pos:arrow_pos + 2] == b"=>":
+                    open_brace = _skip_ws_comments_b(clean_b, arrow_pos + 2)
+                    if open_brace < pc and clean_b[open_brace] == 123:
+                        ao = open_brace
+                        break
+            tuple_search = tpos + len(b"PyRep::Tuple")
+
+        if ao is not None:
+            ab = 1
+            ac = ao + 1
+            while ac < pc and ab > 0:
+                if clean_b[ac] == 123:
+                    ab += 1
+                elif clean_b[ac] == 125:
+                    ab -= 1
+                    if ab == 0:
+                        break
+                ac += 1
+            tp = tbr = 0
+            ti = ao + 1
+            while ti < ac:
+                if tp == 0 and tbr == 0 and _is_word_at(clean_b, ti, b"if"):
+                    he = _find_if_header_end(clean_b, ti, ac)
+                    if _extract_var_matches(clean_b[ti:he], raw_b[ti:he], "name"):
+                        rewrites += 1
+                    for lit in _extract_str_lits(raw_b[ti:he]):
+                        known.add("destiny:payload:%s" % lit)
+                c = clean_b[ti]
+                if c == 40:
+                    tp += 1
+                elif c == 41:
+                    tp = max(0, tp - 1)
+                elif c == 91:
+                    tbr += 1
+                elif c == 93:
+                    tbr = max(0, tbr - 1)
+                ti += 1
 
     return {
         "rpc_rules": len(rpc_hdrs),
