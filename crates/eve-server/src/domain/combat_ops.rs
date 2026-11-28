@@ -137,6 +137,12 @@ pub async fn spawn_entity_in_ballpark(
     handle: &SystemHandle,
     mut req: SpawnEntityInBallparkRequest,
 ) -> Result<i64, DomainError> {
+    if req.entity_id.is_some_and(|id| id <= 0) {
+        return Err(DomainError::invalid_input(
+            "InvalidEntityId",
+            "Spawned entity ID must be positive",
+        ));
+    }
     let needs_db_write = req.db_item.is_some()
         || matches!(
             &req.payload,
@@ -146,7 +152,7 @@ pub async fn spawn_entity_in_ballpark(
             }
         );
     let entity_id = if needs_db_write || req.entity_id.is_none() {
-        ctx.db.with_mut_snapshot(|snap| {
+        ctx.db.try_with_mut_snapshot(|snap| {
             let id = if let Some(item) = req.db_item.take() {
                 snap.mint_inventory_item_with_id_in_snap(
                     req.entity_id,
@@ -167,6 +173,12 @@ pub async fn spawn_entity_in_ballpark(
             } else {
                 req.entity_id.unwrap_or_else(|| snap.alloc_entity_id())
             };
+            if id <= 0 {
+                return Err(DomainError::invalid_input(
+                    "InvalidEntityId",
+                    "Spawned entity ID must be positive",
+                ));
+            }
             if let SpawnBallPayload::Asteroid {
                 ref mut record, ..
             } = req.payload
@@ -238,12 +250,13 @@ pub async fn despawn_entities_in_ballpark(
     remove_warp_bubble: bool,
     clean_npc_runtime_system: Option<u32>,
 ) -> Vec<DespawnEntityInBallparkOutcome> {
-    if entity_ids.is_empty() {
+    let valid_ids: Vec<i64> = entity_ids.iter().copied().filter(|&id| id > 0).collect();
+    if valid_ids.is_empty() {
         return Vec::new();
     }
 
     let db_results: Vec<(bool, usize)> = if remove_from_db {
-        let id_set: HashSet<i64> = entity_ids.iter().copied().collect();
+        let id_set: HashSet<i64> = valid_ids.iter().copied().collect();
         ctx.db.with_mut_snapshot(|snap| {
             let mut children_by_parent: HashMap<i64, Vec<i64>> = HashMap::new();
             for item in snap.items.values() {
@@ -254,7 +267,7 @@ pub async fn despawn_entities_in_ballpark(
                         .push(item.item_id);
                 }
             }
-            entity_ids
+            valid_ids
                 .iter()
                 .map(|&id| {
                     let item_removed = snap.remove_system_cleanup_item(id).is_some();
@@ -274,13 +287,13 @@ pub async fn despawn_entities_in_ballpark(
                 .collect()
         })
     } else {
-        vec![(false, 0); entity_ids.len()]
+        vec![(false, 0); valid_ids.len()]
     };
 
     if let Some(sys_id) = clean_npc_runtime_system {
         if let Ok(mut map) = ctx.npc_spawns.write() {
             if let Some(mgr) = map.get_mut(&sys_id) {
-                for &id in entity_ids {
+                for &id in &valid_ids {
                     mgr.entities.remove(&id);
                 }
             }
@@ -288,7 +301,7 @@ pub async fn despawn_entities_in_ballpark(
     }
     if clean_npc_runtime_system.is_some() || remove_from_db {
         crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            for &id in entity_ids {
+            for &id in &valid_ids {
                 if clean_npc_runtime_system.is_some() {
                     rt.npc_entities.remove(&id);
                     rt.destroyed_npc_cache.remove(&id);
@@ -300,9 +313,9 @@ pub async fn despawn_entities_in_ballpark(
         });
     }
 
-    let mut outcomes = Vec::with_capacity(entity_ids.len());
+    let mut outcomes = Vec::with_capacity(valid_ids.len());
     for (&entity_id, (removed_from_db, removed_children)) in
-        entity_ids.iter().zip(db_results.into_iter())
+        valid_ids.iter().zip(db_results.into_iter())
     {
         let removed_ball = if let Some(h) = handle {
             if remove_warp_bubble {
@@ -1631,5 +1644,131 @@ mod tests {
         .await;
         assert!(despawned_ship.removed_from_db);
         assert!(despawned_ship.removed_ball.is_some());
+    }
+
+    #[tokio::test]
+    async fn spawn_entity_in_ballpark_rejects_non_positive_asteroid_id_without_committing_db() {
+        let ctx = ServerContext::new();
+        let sys_id = 30_000_142_u32;
+        let handle = ctx
+            .systems
+            .wake_for_gm_command_async(sys_id, "domain_combat_ops_non_pos_test")
+            .await
+            .expect("wake system");
+
+        let before_count = ctx.db.with_snapshot(|snap| snap.asteroids.len());
+        for bad_id in [0_i64, -5_i64] {
+            let err = spawn_entity_in_ballpark(
+                &ctx,
+                &handle,
+                SpawnEntityInBallparkRequest {
+                    entity_id: Some(bad_id),
+                    db_item: None,
+                    ball: Ball {
+                        id: 0,
+                        type_id: 1230,
+                        position: DVec3::new(100.0, 200.0, 300.0),
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 0.0,
+                        mass: 1_000_000.0,
+                        radius: 250.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Rigid,
+                    },
+                    payload: SpawnBallPayload::Asteroid {
+                        asteroid: AsteroidState {
+                            asteroid_id: 0,
+                            belt_id: 0,
+                            type_id: 1230,
+                            initial_units: 50_000,
+                            remaining_units: 50_000,
+                            unit_volume: 0.1,
+                            depleted: false,
+                            respawn_at_tick: None,
+                        },
+                        record: Some(AsteroidRecord {
+                            asteroid_id: 0,
+                            solar_system_id: sys_id,
+                            belt_id: 0,
+                            type_id: 1230,
+                            quantity: 50_000,
+                            initial_quantity: 50_000,
+                            position: (100.0, 200.0, 300.0),
+                            radius: 250.0,
+                        }),
+                    },
+                    mark_non_interactive: false,
+                },
+            )
+            .await
+            .expect_err("non-positive entity_id must fail");
+            assert_eq!(err.code, "InvalidEntityId");
+            ctx.db.with_snapshot(|snap| {
+                assert!(!snap.asteroids.contains_key(&bad_id));
+                assert_eq!(snap.asteroids.len(), before_count);
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn despawn_entities_in_ballpark_ignores_non_positive_ids_and_preserves_location_zero_items()
+    {
+        let ctx = ServerContext::new();
+        let sys_id = 30_000_142_u32;
+        let cid = 90_000_001_i64;
+        let handle = ctx
+            .systems
+            .wake_for_gm_command_async(sys_id, "domain_combat_ops_despawn_zero_test")
+            .await
+            .expect("wake system");
+
+        let zero_loc_item_id = ctx.db.with_mut_snapshot(|snap| {
+            let minted = snap
+                .mint_inventory_item_with_id_in_snap(
+                    None,
+                    MintItemSpec {
+                        type_id: 34,
+                        owner_id: cid,
+                        location_id: i64::from(sys_id),
+                        flag: eve_db::InventoryFlag::None,
+                        quantity: 10,
+                        singleton: false,
+                        is_blueprint_copy: false,
+                        blueprint_runs_remaining: None,
+                        merge_existing_stack: false,
+                    },
+                )
+                .expect("mint item for zero-location test");
+            if let Some(rec) = snap.get_any_item_mut(minted.item_id) {
+                rec.location_id = 0;
+            }
+            minted.item_id
+        });
+        let balls_before = handle
+            .list_balls()
+            .await
+            .expect("list balls before")
+            .len();
+
+        let outcomes = despawn_entities_in_ballpark(
+            &ctx,
+            Some(&handle),
+            &[0, -42],
+            true,
+            true,
+            Some(sys_id),
+        )
+        .await;
+        assert!(outcomes.is_empty());
+        assert!(ctx
+            .db
+            .with_snapshot(|snap| snap.items.contains_key(&zero_loc_item_id)));
+        let balls_after = handle
+            .list_balls()
+            .await
+            .expect("list balls after")
+            .len();
+        assert_eq!(balls_after, balls_before);
     }
 }

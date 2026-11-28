@@ -679,9 +679,14 @@ async fn rollback_spawned_entities(
     failed_id: i64,
     prior_ids: &[i64],
 ) {
-    let mut all_ids = Vec::with_capacity(1 + prior_ids.len());
-    all_ids.push(failed_id);
-    all_ids.extend_from_slice(prior_ids);
+    let mut all_ids = Vec::with_capacity(usize::from(failed_id > 0) + prior_ids.len());
+    if failed_id > 0 {
+        all_ids.push(failed_id);
+    }
+    all_ids.extend(prior_ids.iter().copied().filter(|&id| id > 0));
+    if all_ids.is_empty() {
+        return;
+    }
     let _ = crate::domain::combat_ops::despawn_entities_in_ballpark(
         ctx,
         Some(handle),
@@ -739,14 +744,16 @@ pub(crate) fn dispatch_spawn_slash<'a>(
                 client_error: None,
             });
         };
-        let (db_sys_id, db_ship_id) = ctx
-            .db
-            .with_snapshot(|snap| {
-                snap.characters
-                    .get(&target_cid)
-                    .map(|c| (c.solar_system_id, c.active_ship_id))
-            })
-            .unwrap_or((0, 0));
+        let resolved_loc = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .get(&target_cid)
+                .map(|c| (c.solar_system_id, c.active_ship_id))
+        });
+        let (db_sys_id, db_ship_id) = if target_cid != cid {
+            resolved_loc.ok_or_else(|| crate::router::slash_registry::char_not_found_error(target_cid))?
+        } else {
+            resolved_loc.unwrap_or((0, 0))
+        };
         let sys_id = if target_cid != cid {
             db_sys_id
         } else {
@@ -1958,15 +1965,21 @@ pub(crate) fn dispatch_spawnwreck_slash<'a>(
         let target_cid = resolved.target_char_id;
         let mut target_session = session.clone();
         if target_cid != cid {
-            ctx.db.with_snapshot(|snap| {
+            let found = ctx.db.with_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get(&target_cid) {
                     target_session.character_id = Some(target_cid);
                     target_session.solar_system_id = Some(ch.solar_system_id);
                     target_session.station_id = ch.station_id;
                     target_session.structure_id = ch.structure_id;
                     target_session.ship_id = Some(ch.active_ship_id);
+                    true
+                } else {
+                    false
                 }
             });
+            if !found {
+                return Err(crate::router::slash_registry::char_not_found_error(target_cid));
+            }
         }
         crate::services::gm_soak_commands::handle_spawnwreck_parsed(
             ctx,

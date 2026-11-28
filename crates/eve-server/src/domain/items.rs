@@ -299,12 +299,6 @@ pub fn set_item_dynamic_attributes_in_snap(
             ));
         }
     }
-    if !snap.items.contains_key(&item_id) {
-        return Err(DomainError::not_found(
-            "ItemNotFound",
-            format!("Item {item_id} not found"),
-        ));
-    }
     let Some(item) = snap.get_any_item_mut(item_id) else {
         return Err(DomainError::not_found(
             "ItemNotFound",

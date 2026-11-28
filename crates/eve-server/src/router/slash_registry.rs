@@ -476,6 +476,13 @@ pub(crate) fn invalid_arguments_error(msg: impl Into<String>) -> BridgeRpcError 
     )
 }
 
+pub(crate) fn char_not_found_error(char_id: i64) -> BridgeRpcError {
+    crate::services::domain_err_to_rpc(crate::domain::DomainError::not_found(
+        "CharacterNotFound",
+        format!("Character {char_id} not found"),
+    ))
+}
+
 const GIVEISK_USAGE: &str = "Usage: /giveisk [me|<character_id>] <positive_integer_amount>";
 const GIVEITEM_USAGE: &str =
     "Usage: /giveitem [me|<characterID>] <type_id> [quantity] or /createitem [me|<characterID>] <type_id> [quantity]";
@@ -1116,11 +1123,16 @@ impl SpawnSlashArgs {
                 target_char_id,
                 type_id,
                 quantity,
-            } => Ok(ResolvedSpawnSlashArgs {
-                target_char_id,
-                type_id,
-                quantity,
-            }),
+            } => {
+                if target_char_id != caller_cid && !is_known_char(target_char_id) {
+                    return Err(char_not_found_error(target_char_id));
+                }
+                Ok(ResolvedSpawnSlashArgs {
+                    target_char_id,
+                    type_id,
+                    quantity,
+                })
+            }
             Self::NumericPair { first, second } => {
                 if first > 0 && (first == caller_cid || is_known_char(first)) {
                     let type_id = u32::try_from(second)
@@ -1379,11 +1391,16 @@ impl SpawnWreckSlashArgs {
                 target_char_id,
                 source_type_id,
                 count,
-            } => Ok(ResolvedSpawnWreckSlashArgs {
-                target_char_id,
-                source_type_id,
-                count,
-            }),
+            } => {
+                if target_char_id != caller_cid && !is_known_char(target_char_id) {
+                    return Err(char_not_found_error(target_char_id));
+                }
+                Ok(ResolvedSpawnWreckSlashArgs {
+                    target_char_id,
+                    source_type_id,
+                    count,
+                })
+            }
             Self::NumericPair { first, second } => {
                 if first > 0 && (first == caller_cid || is_known_char(first)) {
                     let source_type_id = u32::try_from(second)

@@ -2241,6 +2241,23 @@ fn typed_parsers_validate_spawn_unspawn_setattr_soak_deadwarp_wreck_sysjunk_back
             "InvalidSlashArgument"
         );
     }
+    assert_eq!(
+        parse_spawn_slash_args("99999999 587 2")
+            .and_then(|p| p.resolve(90_000_001, |_| false))
+            .expect_err("unknown 3-arg /spawn target")
+            .code,
+        "CharacterNotFound"
+    );
+    assert_eq!(
+        parse_spawn_slash_args("90000001 587 2")
+            .and_then(|p| p.resolve(90_000_001, |_| false))
+            .expect("caller self ID 3-arg /spawn"),
+        ResolvedSpawnSlashArgs {
+            target_char_id: 90_000_001,
+            type_id: 587,
+            quantity: 2,
+        }
+    );
 
     // 2. /spawnnpc
     assert_eq!(
@@ -2337,6 +2354,23 @@ fn typed_parsers_validate_spawn_unspawn_setattr_soak_deadwarp_wreck_sysjunk_back
             "InvalidArguments"
         );
     }
+    assert_eq!(
+        parse_spawnwreck_slash_args("99999999 587 2")
+            .and_then(|p| p.resolve(90_000_001, |_| false))
+            .expect_err("unknown 3-arg /spawnwreck target")
+            .code,
+        "CharacterNotFound"
+    );
+    assert_eq!(
+        parse_spawnwreck_slash_args("90000001 587 2")
+            .and_then(|p| p.resolve(90_000_001, |_| false))
+            .expect("caller self ID 3-arg /spawnwreck"),
+        ResolvedSpawnWreckSlashArgs {
+            target_char_id: 90_000_001,
+            source_type_id: 587,
+            count: 2,
+        }
+    );
 
     // 6. /soak (`InvalidArguments`)
     assert_eq!(
@@ -2388,4 +2422,26 @@ fn typed_parsers_validate_spawn_unspawn_setattr_soak_deadwarp_wreck_sysjunk_back
             "InvalidArguments"
         );
     }
+}
+
+#[tokio::test]
+async fn spawn_and_spawnwreck_three_arg_unknown_char_returns_character_not_found() {
+    let ctx = test_ctx();
+    let demo_uid = ctx
+        .db
+        .with_snapshot(|s| s.accounts.values().next().map(|a| a.user_id))
+        .expect("seeded account");
+    let cid = 90_000_001_i64;
+    let mut sess = auth_session(demo_uid, cid, 98_000_001, 30_000_142);
+    sess.role = service_roles::ROLE_GM_MASK | service_roles::ROLE_SPAWN;
+
+    let spawn_err = exec_slash_async(&ctx, &mut sess, "slash", "/spawn 99999999 587 2")
+        .await
+        .expect_err("unknown 3-arg /spawn target must reject");
+    assert_eq!(spawn_err.code, "CharacterNotFound"); // rpc-lint: allow MachoNet error code assertion
+
+    let wreck_err = exec_slash_async(&ctx, &mut sess, "slash", "/spawnwreck 99999999 587 2")
+        .await
+        .expect_err("unknown 3-arg /spawnwreck target must reject");
+    assert_eq!(wreck_err.code, "CharacterNotFound"); // rpc-lint: allow MachoNet error code assertion
 }
