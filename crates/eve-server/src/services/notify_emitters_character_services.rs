@@ -1753,30 +1753,25 @@ pub(crate) async fn fast_forward_and_sync_space_clock(
         .as_ref()
         .is_none_or(|pre| (post_cs.shield_hp - pre.shield_hp).abs() > 1e-6);
 
-    if cap_changed || shield_changed {
-        ctx.db.with_mut_snapshot(|snap| {
-            if crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
-                snap,
-                ship_id,
-                Some(sys_id),
-                None,
-            ) {
-                return;
-            }
-            if let Some(item) = snap.items.get_mut(&ship_id) {
-                if cap_changed && post_cs.max_capacitor > 0.0 {
-                    let clamped_cap = post_cs.capacitor.clamp(0.0, post_cs.max_capacitor);
-                    item.dynamic_attributes.insert(18u16, clamped_cap);
-                    item.version += 1;
-                }
-                if shield_changed && post_cs.max_shield_hp > 0.0 {
-                    let clamped_shield = post_cs.shield_hp.clamp(0.0, post_cs.max_shield_hp);
-                    item.dynamic_attributes
-                        .insert(eve_sde::attr_ids::SHIELD_CHARGE, clamped_shield);
-                    item.version += 1;
-                }
-            }
-        });
+    let mut attr_updates: Vec<(u16, f64)> = Vec::with_capacity(2);
+    if cap_changed && post_cs.max_capacitor > 0.0 {
+        attr_updates.push((18_u16, post_cs.capacitor.clamp(0.0, post_cs.max_capacitor)));
+    }
+    if shield_changed && post_cs.max_shield_hp > 0.0 {
+        attr_updates.push((
+            eve_sde::attr_ids::SHIELD_CHARGE,
+            post_cs.shield_hp.clamp(0.0, post_cs.max_shield_hp),
+        ));
+    }
+    if !attr_updates.is_empty() {
+        let _ = crate::domain::items::set_item_dynamic_attributes_tx(
+            ctx,
+            "fast_forward_sync_space_clock",
+            ship_id,
+            &attr_updates,
+            false,
+            Some(sys_id),
+        );
     }
 
     let notify_cid = if target_cid > 0 {

@@ -19,6 +19,7 @@ pub mod quantity_cast_ratchet;
 pub mod quasar_tap;
 pub mod scenario;
 pub mod shadow_client;
+pub mod slash_domain_guard;
 pub mod system_lifecycle_ratchet;
 pub mod test_fixture_ratchet;
 pub mod test_sde;

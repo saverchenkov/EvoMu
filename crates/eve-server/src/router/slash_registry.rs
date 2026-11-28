@@ -466,6 +466,23 @@ pub(crate) fn invalid_slash_arg_error(msg: impl Into<String>) -> BridgeRpcError 
     )
 }
 
+pub(crate) fn invalid_arguments_error(msg: impl Into<String>) -> BridgeRpcError {
+    let msg = msg.into();
+    let reason = format!("InvalidArguments: {msg}");
+    BridgeRpcError::with_client_error(
+        "InvalidArguments",
+        msg,
+        ClientError::user_with_args(UserErrorKey::SlashError, [("reason", UserErrorArg::Str(reason))]),
+    )
+}
+
+pub(crate) fn char_not_found_error(char_id: i64) -> BridgeRpcError {
+    crate::services::domain_err_to_rpc(crate::domain::DomainError::not_found(
+        "CharacterNotFound",
+        format!("Character {char_id} not found"),
+    ))
+}
+
 const GIVEISK_USAGE: &str = "Usage: /giveisk [me|<character_id>] <positive_integer_amount>";
 const GIVEITEM_USAGE: &str =
     "Usage: /giveitem [me|<characterID>] <type_id> [quantity] or /createitem [me|<characterID>] <type_id> [quantity]";
@@ -1047,6 +1064,545 @@ pub(crate) fn parse_load_slash_args(rest: &str) -> Result<LoadSlashArgs, BridgeR
             })
         }
         _ => Err(invalid_slash_arg_error(LOAD_USAGE)),
+    }
+}
+
+const SPAWN_USAGE: &str = "Usage: /spawn [char_id] <type_id> [quantity]";
+const SPAWNNPC_USAGE: &str = "Usage: /spawnnpc [me|<characterID>] <type_id>";
+const UNSPAWN_USAGE: &str = "Usage: /unspawn <entity_id>";
+const SETATTR_USAGE: &str = "Usage: /setattr <item_id|me> <attribute_id> <value>";
+const SPAWNWRECK_USAGE: &str = "Usage: /spawnwreck <typeID> [count]";
+const SOAK_USAGE: &str = "Usage: /soak logi <count|status|stop>";
+const DEADWARP_USAGE: &str = "Usage: /deadwarp [status|stop]";
+const SYSJUNKCLEAR_USAGE: &str = "Usage: /sysjunkclear";
+const BACKINTIME_USAGE: &str = "Usage: /backintime";
+const MAX_SPAWN_QUANTITY: i32 = 100;
+const MAX_SOAK_LOGI_ARGS_COUNT: usize = 50;
+const MAX_SPAWNWRECK_ARGS_COUNT: usize = 50;
+
+/// Syntax-level arguments parsed for `/spawn [me|<char_id>] <type_id> [quantity]` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpawnSlashArgs {
+    Caller {
+        type_id: u32,
+        quantity: i32,
+    },
+    CharId {
+        target_char_id: i64,
+        type_id: u32,
+        quantity: i32,
+    },
+    NumericPair {
+        first: i64,
+        second: i64,
+    },
+}
+
+/// Resolved arguments for `/spawn` after checking whether an integer prefix matches a character (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ResolvedSpawnSlashArgs {
+    pub target_char_id: i64,
+    pub type_id: u32,
+    pub quantity: i32,
+}
+
+impl SpawnSlashArgs {
+    /// Resolves ambiguous two-integer invocations against known characters without mutating state.
+    pub(crate) fn resolve(
+        self,
+        caller_cid: i64,
+        is_known_char: impl FnOnce(i64) -> bool,
+    ) -> Result<ResolvedSpawnSlashArgs, BridgeRpcError> {
+        match self {
+            Self::Caller { type_id, quantity } => Ok(ResolvedSpawnSlashArgs {
+                target_char_id: caller_cid,
+                type_id,
+                quantity,
+            }),
+            Self::CharId {
+                target_char_id,
+                type_id,
+                quantity,
+            } => {
+                if target_char_id != caller_cid && !is_known_char(target_char_id) {
+                    return Err(char_not_found_error(target_char_id));
+                }
+                Ok(ResolvedSpawnSlashArgs {
+                    target_char_id,
+                    type_id,
+                    quantity,
+                })
+            }
+            Self::NumericPair { first, second } => {
+                if first > 0 && (first == caller_cid || is_known_char(first)) {
+                    let type_id = u32::try_from(second)
+                        .map_err(|_| invalid_slash_arg_error(SPAWN_USAGE))?;
+                    return Ok(ResolvedSpawnSlashArgs {
+                        target_char_id: first,
+                        type_id,
+                        quantity: 1,
+                    });
+                }
+                let type_id =
+                    u32::try_from(first).map_err(|_| invalid_slash_arg_error(SPAWN_USAGE))?;
+                let qty = i32::try_from(second).map_err(|_| {
+                    invalid_slash_arg_error("Quantity for /spawn must be between 1 and 100")
+                })?;
+                if !(1..=MAX_SPAWN_QUANTITY).contains(&qty) {
+                    return Err(invalid_slash_arg_error(
+                        "Quantity for /spawn must be between 1 and 100",
+                    ));
+                }
+                Ok(ResolvedSpawnSlashArgs {
+                    target_char_id: caller_cid,
+                    type_id,
+                    quantity: qty,
+                })
+            }
+        }
+    }
+}
+
+/// Parses `/spawn` arguments syntactically (`#1193`).
+pub(crate) fn parse_spawn_slash_args(rest: &str) -> Result<SpawnSlashArgs, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let parse_qty = |tok: &str| {
+        tok.parse::<i32>()
+            .ok()
+            .filter(|q| (1..=MAX_SPAWN_QUANTITY).contains(q))
+            .ok_or_else(|| {
+                invalid_slash_arg_error("Quantity for /spawn must be between 1 and 100")
+            })
+    };
+
+    match token_strs.as_slice() {
+        [alias] if is_self_ship_alias(alias) => Err(invalid_slash_arg_error(SPAWN_USAGE)),
+        [tid_tok] => {
+            let type_id = tid_tok
+                .parse::<u32>()
+                .map_err(|_| invalid_slash_arg_error(SPAWN_USAGE))?;
+            Ok(SpawnSlashArgs::Caller {
+                type_id,
+                quantity: 1,
+            })
+        }
+        [alias, tid_tok] if is_self_ship_alias(alias) => {
+            let type_id = tid_tok
+                .parse::<u32>()
+                .map_err(|_| invalid_slash_arg_error(SPAWN_USAGE))?;
+            Ok(SpawnSlashArgs::Caller {
+                type_id,
+                quantity: 1,
+            })
+        }
+        [alias, tid_tok, qty_tok] if is_self_ship_alias(alias) => {
+            let type_id = tid_tok
+                .parse::<u32>()
+                .map_err(|_| invalid_slash_arg_error(SPAWN_USAGE))?;
+            let quantity = parse_qty(qty_tok)?;
+            Ok(SpawnSlashArgs::Caller { type_id, quantity })
+        }
+        [first_tok, second_tok] => {
+            let first = first_tok
+                .parse::<i64>()
+                .ok()
+                .filter(|&v| v >= 0)
+                .ok_or_else(|| invalid_slash_arg_error(SPAWN_USAGE))?;
+            let second = second_tok
+                .parse::<i64>()
+                .ok()
+                .ok_or_else(|| {
+                    invalid_slash_arg_error("Quantity for /spawn must be between 1 and 100")
+                })?;
+            Ok(SpawnSlashArgs::NumericPair { first, second })
+        }
+        [who_tok, tid_tok, qty_tok] => {
+            let target_char_id = who_tok
+                .parse::<i64>()
+                .ok()
+                .filter(|&id| id > 0)
+                .ok_or_else(|| invalid_slash_arg_error(SPAWN_USAGE))?;
+            let type_id = tid_tok
+                .parse::<u32>()
+                .map_err(|_| invalid_slash_arg_error(SPAWN_USAGE))?;
+            let quantity = parse_qty(qty_tok)?;
+            Ok(SpawnSlashArgs::CharId {
+                target_char_id,
+                type_id,
+                quantity,
+            })
+        }
+        _ => Err(invalid_slash_arg_error(SPAWN_USAGE)),
+    }
+}
+
+/// Target syntax parsed for `/spawnnpc [me|<characterID>] <type_id>` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpawnNpcTarget {
+    Caller,
+    ExplicitCharId(i64),
+}
+
+/// Typed arguments parsed for `/spawnnpc` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SpawnNpcSlashArgs {
+    pub target: SpawnNpcTarget,
+    pub type_id: u32,
+}
+
+/// Parses `/spawnnpc` arguments syntactically (`#1193`).
+pub(crate) fn parse_spawn_npc_slash_args(rest: &str) -> Result<SpawnNpcSlashArgs, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let (target, type_str) = match token_strs.as_slice() {
+        [type_str] => (SpawnNpcTarget::Caller, *type_str),
+        [who, type_str] => {
+            if who.eq_ignore_ascii_case("me") || who.eq_ignore_ascii_case("self") {
+                (SpawnNpcTarget::Caller, *type_str)
+            } else {
+                let target_cid = who
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|&id| id > 0)
+                    .ok_or_else(|| invalid_slash_arg_error(SPAWNNPC_USAGE))?;
+                (SpawnNpcTarget::ExplicitCharId(target_cid), *type_str)
+            }
+        }
+        _ => return Err(invalid_slash_arg_error(SPAWNNPC_USAGE)),
+    };
+    let type_id = type_str
+        .parse::<u32>()
+        .map_err(|_| invalid_slash_arg_error(SPAWNNPC_USAGE))?;
+    Ok(SpawnNpcSlashArgs { target, type_id })
+}
+
+/// Typed arguments parsed for `/unspawn` and `/despawn` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UnspawnSlashArgs {
+    pub target_id: i64,
+}
+
+/// Parses `/unspawn` / `/despawn` arguments, requiring a single positive entity ID (`#1193`).
+pub(crate) fn parse_unspawn_slash_args(rest: &str) -> Result<UnspawnSlashArgs, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    match token_strs.as_slice() {
+        [tok] => tok
+            .parse::<i64>()
+            .ok()
+            .filter(|&id| id > 0)
+            .map(|target_id| UnspawnSlashArgs { target_id })
+            .ok_or_else(|| invalid_slash_arg_error(UNSPAWN_USAGE)),
+        _ => Err(invalid_slash_arg_error(UNSPAWN_USAGE)),
+    }
+}
+
+/// Target syntax parsed for `/setattr <item_id|me> <attribute_id> <value>` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SetAttrTarget {
+    SelfShip,
+    ItemOrCharId(i64),
+}
+
+/// Typed arguments parsed for `/setattr` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SetAttrSlashArgs {
+    pub target: SetAttrTarget,
+    pub attr_id: u16,
+    pub value: f64,
+}
+
+/// Parses `/setattr` arguments, validating target syntax, `u16` attribute ID, and finite `f64` value (`#1193`).
+pub(crate) fn parse_setattr_slash_args(rest: &str) -> Result<SetAttrSlashArgs, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let [item_tok, attr_tok, val_tok] = token_strs.as_slice() else {
+        return Err(invalid_slash_arg_error(SETATTR_USAGE));
+    };
+    let attr_id = attr_tok
+        .parse::<u16>()
+        .map_err(|_| invalid_slash_arg_error(SETATTR_USAGE))?;
+    let value = val_tok
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite())
+        .ok_or_else(|| {
+            invalid_slash_arg_error("Attribute value for /setattr must be a finite number")
+        })?;
+    let target = if is_self_ship_alias(item_tok) {
+        SetAttrTarget::SelfShip
+    } else {
+        let id = item_tok.parse::<i64>().map_err(|_| {
+            invalid_slash_arg_error(format!("Invalid item_id '{item_tok}' for /setattr"))
+        })?;
+        SetAttrTarget::ItemOrCharId(id)
+    };
+    Ok(SetAttrSlashArgs {
+        target,
+        attr_id,
+        value,
+    })
+}
+
+/// Syntax-level arguments parsed for `/spawnwreck [me|<char_id>] <typeID> [count]` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpawnWreckSlashArgs {
+    Caller {
+        source_type_id: u32,
+        count: usize,
+    },
+    CharId {
+        target_char_id: i64,
+        source_type_id: u32,
+        count: usize,
+    },
+    NumericPair {
+        first: i64,
+        second: i64,
+    },
+}
+
+/// Resolved arguments for `/spawnwreck` after checking whether an integer prefix matches a character (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ResolvedSpawnWreckSlashArgs {
+    pub target_char_id: i64,
+    pub source_type_id: u32,
+    pub count: usize,
+}
+
+impl SpawnWreckSlashArgs {
+    /// Resolves ambiguous two-integer invocations against known characters without mutating state.
+    pub(crate) fn resolve(
+        self,
+        caller_cid: i64,
+        is_known_char: impl FnOnce(i64) -> bool,
+    ) -> Result<ResolvedSpawnWreckSlashArgs, BridgeRpcError> {
+        match self {
+            Self::Caller {
+                source_type_id,
+                count,
+            } => Ok(ResolvedSpawnWreckSlashArgs {
+                target_char_id: caller_cid,
+                source_type_id,
+                count,
+            }),
+            Self::CharId {
+                target_char_id,
+                source_type_id,
+                count,
+            } => {
+                if target_char_id != caller_cid && !is_known_char(target_char_id) {
+                    return Err(char_not_found_error(target_char_id));
+                }
+                Ok(ResolvedSpawnWreckSlashArgs {
+                    target_char_id,
+                    source_type_id,
+                    count,
+                })
+            }
+            Self::NumericPair { first, second } => {
+                if first > 0 && (first == caller_cid || is_known_char(first)) {
+                    let source_type_id = u32::try_from(second)
+                        .ok()
+                        .filter(|&id| id > 0)
+                        .ok_or_else(|| invalid_arguments_error(SPAWNWRECK_USAGE))?;
+                    return Ok(ResolvedSpawnWreckSlashArgs {
+                        target_char_id: first,
+                        source_type_id,
+                        count: 1,
+                    });
+                }
+                let source_type_id = u32::try_from(first)
+                    .ok()
+                    .filter(|&id| id > 0)
+                    .ok_or_else(|| invalid_arguments_error(SPAWNWRECK_USAGE))?;
+                let count = usize::try_from(second)
+                    .ok()
+                    .filter(|n| (1..=MAX_SPAWNWRECK_ARGS_COUNT).contains(n))
+                    .ok_or_else(|| {
+                        invalid_arguments_error(format!(
+                            "Count for /spawnwreck must be between 1 and {MAX_SPAWNWRECK_ARGS_COUNT}"
+                        ))
+                    })?;
+                Ok(ResolvedSpawnWreckSlashArgs {
+                    target_char_id: caller_cid,
+                    source_type_id,
+                    count,
+                })
+            }
+        }
+    }
+}
+
+/// Parses `/spawnwreck` arguments syntactically (`#1193`).
+pub(crate) fn parse_spawnwreck_slash_args(
+    rest: &str,
+) -> Result<SpawnWreckSlashArgs, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let parse_pos_u32 = |tok: &str| tok.parse::<u32>().ok().filter(|&id| id > 0);
+    let parse_count = |tok: &str| {
+        tok.parse::<usize>()
+            .ok()
+            .filter(|n| (1..=MAX_SPAWNWRECK_ARGS_COUNT).contains(n))
+            .ok_or_else(|| {
+                invalid_arguments_error(format!(
+                    "Count for /spawnwreck must be between 1 and {MAX_SPAWNWRECK_ARGS_COUNT}"
+                ))
+            })
+    };
+
+    match token_strs.as_slice() {
+        [tid_tok] => {
+            let source_type_id =
+                parse_pos_u32(tid_tok).ok_or_else(|| invalid_arguments_error(SPAWNWRECK_USAGE))?;
+            Ok(SpawnWreckSlashArgs::Caller {
+                source_type_id,
+                count: 1,
+            })
+        }
+        [alias, tid_tok] if is_self_ship_alias(alias) => {
+            let source_type_id =
+                parse_pos_u32(tid_tok).ok_or_else(|| invalid_arguments_error(SPAWNWRECK_USAGE))?;
+            Ok(SpawnWreckSlashArgs::Caller {
+                source_type_id,
+                count: 1,
+            })
+        }
+        [alias, tid_tok, count_tok] if is_self_ship_alias(alias) => {
+            let source_type_id =
+                parse_pos_u32(tid_tok).ok_or_else(|| invalid_arguments_error(SPAWNWRECK_USAGE))?;
+            let count = parse_count(count_tok)?;
+            Ok(SpawnWreckSlashArgs::Caller {
+                source_type_id,
+                count,
+            })
+        }
+        [first_tok, second_tok] => {
+            let first = first_tok
+                .parse::<i64>()
+                .ok()
+                .filter(|&id| id > 0)
+                .ok_or_else(|| invalid_arguments_error(SPAWNWRECK_USAGE))?;
+            let second = second_tok.parse::<i64>().map_err(|_| {
+                invalid_arguments_error(format!(
+                    "Count for /spawnwreck must be between 1 and {MAX_SPAWNWRECK_ARGS_COUNT}"
+                ))
+            })?;
+            Ok(SpawnWreckSlashArgs::NumericPair { first, second })
+        }
+        [who_tok, tid_tok, count_tok] => {
+            let target_char_id = who_tok
+                .parse::<i64>()
+                .ok()
+                .filter(|&id| id > 0)
+                .ok_or_else(|| invalid_arguments_error(SPAWNWRECK_USAGE))?;
+            let source_type_id =
+                parse_pos_u32(tid_tok).ok_or_else(|| invalid_arguments_error(SPAWNWRECK_USAGE))?;
+            let count = parse_count(count_tok)?;
+            Ok(SpawnWreckSlashArgs::CharId {
+                target_char_id,
+                source_type_id,
+                count,
+            })
+        }
+        _ => Err(invalid_arguments_error(SPAWNWRECK_USAGE)),
+    }
+}
+
+/// Sub-action parsed for `/soak logi <count|status|stop>` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SoakLogiAction {
+    Status,
+    Stop,
+    Start { count: usize },
+}
+
+/// Typed arguments parsed for `/soak` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SoakSlashArgs {
+    Logi(SoakLogiAction),
+}
+
+/// Parses `/soak` arguments syntactically (`#1193`).
+pub(crate) fn parse_soak_slash_args(rest: &str) -> Result<SoakSlashArgs, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let arg = match token_strs.as_slice() {
+        ["logi", arg] => *arg,
+        ["status"] => "status",
+        ["stop"] => "stop",
+        _ => return Err(invalid_arguments_error(SOAK_USAGE)),
+    };
+    if arg.eq_ignore_ascii_case("status") {
+        return Ok(SoakSlashArgs::Logi(SoakLogiAction::Status));
+    }
+    if arg.eq_ignore_ascii_case("stop") {
+        return Ok(SoakSlashArgs::Logi(SoakLogiAction::Stop));
+    }
+    let Ok(count) = arg.parse::<usize>() else {
+        return Err(invalid_arguments_error(SOAK_USAGE));
+    };
+    if !(1..=MAX_SOAK_LOGI_ARGS_COUNT).contains(&count) {
+        return Err(invalid_arguments_error(format!(
+            "Logi soak cruiser count must be between 1 and {MAX_SOAK_LOGI_ARGS_COUNT}"
+        )));
+    }
+    Ok(SoakSlashArgs::Logi(SoakLogiAction::Start { count }))
+}
+
+/// Typed arguments parsed for `/deadwarp [start|status|stop]` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeadwarpSlashArgs {
+    Start,
+    Status,
+    Stop,
+}
+
+/// Parses `/deadwarp` arguments syntactically (`#1193`).
+pub(crate) fn parse_deadwarp_slash_args(rest: &str) -> Result<DeadwarpSlashArgs, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    match token_strs.as_slice() {
+        [] => Ok(DeadwarpSlashArgs::Start),
+        [sub] if sub.eq_ignore_ascii_case("start") => Ok(DeadwarpSlashArgs::Start),
+        [sub] if sub.eq_ignore_ascii_case("status") => Ok(DeadwarpSlashArgs::Status),
+        [sub] if sub.eq_ignore_ascii_case("stop") => Ok(DeadwarpSlashArgs::Stop),
+        _ => Err(invalid_arguments_error(DEADWARP_USAGE)),
+    }
+}
+
+/// Typed zero-argument marker parsed for `/sysjunkclear` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SysJunkClearSlashArgs;
+
+/// Parses `/sysjunkclear` arguments, rejecting any extraneous tokens (`#1193`).
+pub(crate) fn parse_sysjunkclear_slash_args(
+    rest: &str,
+) -> Result<SysJunkClearSlashArgs, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    if tokens.is_empty() {
+        Ok(SysJunkClearSlashArgs)
+    } else {
+        Err(invalid_arguments_error(SYSJUNKCLEAR_USAGE))
+    }
+}
+
+/// Typed marker parsed for `/backintime [me]` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BackInTimeSlashArgs;
+
+/// Parses `/backintime` arguments, accepting empty arguments or `"me"` (`#1193`).
+pub(crate) fn parse_backintime_slash_args(
+    rest: &str,
+) -> Result<BackInTimeSlashArgs, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    match token_strs.as_slice() {
+        [] => Ok(BackInTimeSlashArgs),
+        [tok] if tok.eq_ignore_ascii_case("me") => Ok(BackInTimeSlashArgs),
+        _ => Err(invalid_arguments_error(BACKINTIME_USAGE)),
     }
 }
 

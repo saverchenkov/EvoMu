@@ -2109,3 +2109,339 @@ fn track2_fitting_domain_parity_source_guard() {
         );
     }
 }
+
+#[test]
+fn slash_registry_matches_advertised_commands_and_roles() {
+    let advertised = all_remote_slash_commands();
+    let registry_advertised: Vec<&'static str> = SLASH_COMMAND_REGISTRY
+        .iter()
+        .filter(|entry| entry.advertised)
+        .map(|entry| entry.name)
+        .collect();
+    assert_eq!(
+        registry_advertised, advertised,
+        "advertised remote slash command list must stay in 1-to-1 bijection with SLASH_COMMAND_REGISTRY"
+    );
+
+    let mut seen_names = HashSet::new();
+    for entry in SLASH_COMMAND_REGISTRY {
+        assert!(
+            seen_names.insert(entry.name),
+            "duplicate command name '{}' in SLASH_COMMAND_REGISTRY",
+            entry.name
+        );
+        assert!(
+            !entry.usage.is_empty() && !entry.description.is_empty(),
+            "slash command '{}' must declare non-empty usage and description",
+            entry.name
+        );
+        let cmd_with_arg = format!("/{} 1", entry.name);
+        assert_eq!(
+            required_slash_role(&cmd_with_arg),
+            auth_required_slash_role(&cmd_with_arg),
+            "role policy parity mismatch for '{}'",
+            entry.name
+        );
+        if entry.case_insensitive {
+            let upper_cmd = format!("/{} 1", entry.name.to_ascii_uppercase());
+            assert_eq!(
+                required_slash_role(&upper_cmd),
+                entry.min_role,
+                "case-insensitive entry '{}' must keep min_role when uppercased",
+                entry.name
+            );
+        }
+    }
+
+    for role_mask in [
+        0_u64,
+        service_roles::ROLE_PLAYER_DEFAULT,
+        service_roles::ROLE_QA,
+        service_roles::ROLE_SPAWN,
+        ROLE_STRUCTURE_GM,
+        service_roles::ROLE_GMS,
+        service_roles::ROLE_GMH,
+        service_roles::ROLE_ADMIN,
+        service_roles::ROLE_GM_MASK | service_roles::ROLE_SPAWN | service_roles::ROLE_QA,
+    ] {
+        let mut expected_for_role: Vec<&'static str> = SLASH_COMMAND_REGISTRY
+            .iter()
+            .filter(|entry| entry.advertised && (role_mask & entry.min_role) != 0)
+            .map(|entry| entry.name)
+            .collect();
+        expected_for_role.sort_unstable();
+        let mut actual_for_role = remote_slash_commands_for_role(role_mask);
+        actual_for_role.sort_unstable();
+        assert_eq!(
+            actual_for_role, expected_for_role,
+            "remote_slash_commands_for_role mismatch for mask 0x{role_mask:x}"
+        );
+        assert_eq!(
+            remote_slash_commands_for_role(role_mask),
+            auth_remote_slash_commands_for_role(role_mask),
+            "auth_cache remote command list mismatch for mask 0x{role_mask:x}"
+        );
+    }
+
+    let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let guard_report = eve_testkit::slash_domain_guard::verify_slash_domain_closure(&src_root)
+        .expect("slash-domain closure guard must report 0 violations and 0 outside slash strip_prefix");
+    assert!(
+        guard_report.scanned_slash_files >= 6,
+        "expected all monitored slash files scanned, got {}",
+        guard_report.scanned_slash_files
+    );
+}
+
+#[test]
+fn typed_parsers_validate_spawn_unspawn_setattr_soak_deadwarp_wreck_sysjunk_backintime() {
+    // 1. /spawn
+    assert_eq!(
+        parse_spawn_slash_args("606").expect("/spawn 606"),
+        SpawnSlashArgs::Caller {
+            type_id: 606,
+            quantity: 1
+        }
+    );
+    assert_eq!(
+        parse_spawn_slash_args("me 587 3").expect("/spawn me 587 3"),
+        SpawnSlashArgs::Caller {
+            type_id: 587,
+            quantity: 3
+        }
+    );
+    let pair_char = parse_spawn_slash_args("90000002 587").expect("/spawn char pair");
+    assert_eq!(
+        pair_char
+            .resolve(90_000_001, |id| id == 90_000_002)
+            .expect("char target resolved"),
+        ResolvedSpawnSlashArgs {
+            target_char_id: 90_000_002,
+            type_id: 587,
+            quantity: 1
+        }
+    );
+    let pair_qty = parse_spawn_slash_args("1230 4").expect("/spawn asteroid qty pair");
+    assert_eq!(
+        pair_qty
+            .resolve(90_000_001, |_| false)
+            .expect("qty pair resolved"),
+        ResolvedSpawnSlashArgs {
+            target_char_id: 90_000_001,
+            type_id: 1230,
+            quantity: 4
+        }
+    );
+    for bad in ["", "me", "587 0", "587 101", "587 abc", "bad 587 1"] {
+        assert_eq!(
+            parse_spawn_slash_args(bad)
+                .and_then(|p| p.resolve(90_000_001, |_| false))
+                .expect_err(bad)
+                .code,
+            "InvalidSlashArgument"
+        );
+    }
+    assert_eq!(
+        parse_spawn_slash_args("99999999 587 2")
+            .and_then(|p| p.resolve(90_000_001, |_| false))
+            .expect_err("unknown 3-arg /spawn target")
+            .code,
+        "CharacterNotFound"
+    );
+    assert_eq!(
+        parse_spawn_slash_args("90000001 587 2")
+            .and_then(|p| p.resolve(90_000_001, |_| false))
+            .expect("caller self ID 3-arg /spawn"),
+        ResolvedSpawnSlashArgs {
+            target_char_id: 90_000_001,
+            type_id: 587,
+            quantity: 2,
+        }
+    );
+
+    // 2. /spawnnpc
+    assert_eq!(
+        parse_spawn_npc_slash_args("587").expect("/spawnnpc 587"),
+        SpawnNpcSlashArgs {
+            target: SpawnNpcTarget::Caller,
+            type_id: 587
+        }
+    );
+    assert_eq!(
+        parse_spawn_npc_slash_args("self 10002").expect("/spawnnpc self"),
+        SpawnNpcSlashArgs {
+            target: SpawnNpcTarget::Caller,
+            type_id: 10_002
+        }
+    );
+    assert_eq!(
+        parse_spawn_npc_slash_args("90000002 587").expect("/spawnnpc target"),
+        SpawnNpcSlashArgs {
+            target: SpawnNpcTarget::ExplicitCharId(90_000_002),
+            type_id: 587
+        }
+    );
+    for bad in ["", "0 587", "bad 587", "me bad", "me 587 extra"] {
+        assert_eq!(
+            parse_spawn_npc_slash_args(bad).expect_err(bad).code,
+            "InvalidSlashArgument"
+        );
+    }
+
+    // 3. /unspawn
+    assert_eq!(
+        parse_unspawn_slash_args("10000042").expect("/unspawn"),
+        UnspawnSlashArgs {
+            target_id: 10_000_042
+        }
+    );
+    for bad in ["", "0", "-5", "abc", "1 2"] {
+        assert_eq!(
+            parse_unspawn_slash_args(bad).expect_err(bad).code,
+            "InvalidSlashArgument"
+        );
+    }
+
+    // 4. /setattr
+    assert_eq!(
+        parse_setattr_slash_args("\"me\" 9 512.5").expect("/setattr quoted me"),
+        SetAttrSlashArgs {
+            target: SetAttrTarget::SelfShip,
+            attr_id: 9,
+            value: 512.5
+        }
+    );
+    assert_eq!(
+        parse_setattr_slash_args("7001 3 25.0").expect("/setattr item"),
+        SetAttrSlashArgs {
+            target: SetAttrTarget::ItemOrCharId(7001),
+            attr_id: 3,
+            value: 25.0
+        }
+    );
+    for bad in ["", "me 3", "bad 3 1.0", "me bad 1.0", "me 3 NaN", "me 3 inf", "me 3 1.0 extra"] {
+        assert_eq!(
+            parse_setattr_slash_args(bad).expect_err(bad).code,
+            "InvalidSlashArgument"
+        );
+    }
+
+    // 5. /spawnwreck (`InvalidArguments`)
+    assert_eq!(
+        parse_spawnwreck_slash_args("606").expect("/spawnwreck 606"),
+        SpawnWreckSlashArgs::Caller {
+            source_type_id: 606,
+            count: 1
+        }
+    );
+    let wreck_pair = parse_spawnwreck_slash_args("606 3").expect("/spawnwreck 606 3");
+    assert_eq!(
+        wreck_pair
+            .resolve(90_000_001, |_| false)
+            .expect("wreck count resolved"),
+        ResolvedSpawnWreckSlashArgs {
+            target_char_id: 90_000_001,
+            source_type_id: 606,
+            count: 3
+        }
+    );
+    for bad in ["", "0", "me", "606 0", "606 51", "606 bad"] {
+        assert_eq!(
+            parse_spawnwreck_slash_args(bad)
+                .and_then(|p| p.resolve(90_000_001, |_| false))
+                .expect_err(bad)
+                .code,
+            "InvalidArguments"
+        );
+    }
+    assert_eq!(
+        parse_spawnwreck_slash_args("99999999 587 2")
+            .and_then(|p| p.resolve(90_000_001, |_| false))
+            .expect_err("unknown 3-arg /spawnwreck target")
+            .code,
+        "CharacterNotFound"
+    );
+    assert_eq!(
+        parse_spawnwreck_slash_args("90000001 587 2")
+            .and_then(|p| p.resolve(90_000_001, |_| false))
+            .expect("caller self ID 3-arg /spawnwreck"),
+        ResolvedSpawnWreckSlashArgs {
+            target_char_id: 90_000_001,
+            source_type_id: 587,
+            count: 2,
+        }
+    );
+
+    // 6. /soak (`InvalidArguments`)
+    assert_eq!(
+        parse_soak_slash_args("logi 4").expect("/soak logi 4"),
+        SoakSlashArgs::Logi(SoakLogiAction::Start { count: 4 })
+    );
+    assert_eq!(
+        parse_soak_slash_args("logi status").expect("/soak logi status"),
+        SoakSlashArgs::Logi(SoakLogiAction::Status)
+    );
+    assert_eq!(
+        parse_soak_slash_args("stop").expect("/soak stop"),
+        SoakSlashArgs::Logi(SoakLogiAction::Stop)
+    );
+    for bad in ["", "logi 0", "logi 51", "logi abc", "other 2"] {
+        assert_eq!(
+            parse_soak_slash_args(bad).expect_err(bad).code,
+            "InvalidArguments"
+        );
+    }
+
+    // 7. /deadwarp (`InvalidArguments`)
+    assert_eq!(parse_deadwarp_slash_args("").expect("default"), DeadwarpSlashArgs::Start);
+    assert_eq!(parse_deadwarp_slash_args("STATUS").expect("status"), DeadwarpSlashArgs::Status);
+    assert_eq!(parse_deadwarp_slash_args("stop").expect("stop"), DeadwarpSlashArgs::Stop);
+    for bad in ["bogus", "status extra"] {
+        assert_eq!(
+            parse_deadwarp_slash_args(bad).expect_err(bad).code,
+            "InvalidArguments"
+        );
+    }
+
+    // 8. /sysjunkclear (`InvalidArguments`)
+    assert_eq!(
+        parse_sysjunkclear_slash_args("   ").expect("/sysjunkclear"),
+        SysJunkClearSlashArgs
+    );
+    assert_eq!(
+        parse_sysjunkclear_slash_args("extra").expect_err("extra").code,
+        "InvalidArguments"
+    );
+
+    // 9. /backintime (`InvalidArguments`)
+    assert_eq!(parse_backintime_slash_args("").expect("empty"), BackInTimeSlashArgs);
+    assert_eq!(parse_backintime_slash_args("ME").expect("me"), BackInTimeSlashArgs);
+    for bad in ["other", "me extra"] {
+        assert_eq!(
+            parse_backintime_slash_args(bad).expect_err(bad).code,
+            "InvalidArguments"
+        );
+    }
+}
+
+#[tokio::test]
+async fn spawn_and_spawnwreck_three_arg_unknown_char_returns_character_not_found() {
+    let ctx = test_ctx();
+    let demo_uid = ctx
+        .db
+        .with_snapshot(|s| s.accounts.values().next().map(|a| a.user_id))
+        .expect("seeded account");
+    let cid = 90_000_001_i64;
+    let mut sess = auth_session(demo_uid, cid, 98_000_001, 30_000_142);
+    sess.role = service_roles::ROLE_GM_MASK | service_roles::ROLE_SPAWN;
+
+    let spawn_err = exec_slash_async(&ctx, &mut sess, "slash", "/spawn 99999999 587 2")
+        .await
+        .expect_err("unknown 3-arg /spawn target must reject");
+    assert_eq!(spawn_err.code, "CharacterNotFound"); // rpc-lint: allow MachoNet error code assertion
+
+    let wreck_err = exec_slash_async(&ctx, &mut sess, "slash", "/spawnwreck 99999999 587 2")
+        .await
+        .expect_err("unknown 3-arg /spawnwreck target must reject");
+    assert_eq!(wreck_err.code, "CharacterNotFound"); // rpc-lint: allow MachoNet error code assertion
+}

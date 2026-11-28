@@ -12,10 +12,13 @@ use crate::combat::npc_ai::{
 use crate::domain::DomainError;
 use crate::router::notify_registry::BallparkScene;
 use crate::router::{NotificationTarget, ServerContext};
-use eve_db::{KillmailRecord, WorldStateSnapshot};
-use eve_destiny::{Ball, MovementMode, SlimItemMeta};
+use crate::system_actor::{AsteroidState, SystemHandle};
+use eve_db::{
+    AsteroidRecord, InventoryItemRecord, KillmailRecord, MintItemSpec, WorldStateSnapshot,
+};
+use eve_destiny::{Ball, CombatState, DestinyEvent, MovementMode, SlimItemMeta};
 use glam::DVec3;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Target parameters for [`restore_ship_vital_state`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +58,411 @@ pub struct DestroyEntityOutcome {
     pub wreck_id: i64,
     pub killmail_id: i64,
     pub ejected_capsule_id: Option<i64>,
+}
+
+/// Ballpark payload for [`spawn_entity_in_ballpark`].
+#[derive(Debug, Clone)]
+pub enum SpawnBallPayload {
+    /// Dynamic or static ball carrying explicit `CombatState` and `SlimItemMeta`.
+    Meta {
+        combat_state: CombatState,
+        slim_meta: SlimItemMeta,
+    },
+    /// Harvestable asteroid ball with optional persisted `AsteroidRecord`.
+    Asteroid {
+        asteroid: AsteroidState,
+        record: Option<AsteroidRecord>,
+    },
+}
+
+/// Request specification for [`spawn_entity_in_ballpark`].
+#[derive(Debug, Clone)]
+pub struct SpawnEntityInBallparkRequest {
+    pub entity_id: Option<i64>,
+    pub db_item: Option<InventoryItemRecord>,
+    pub ball: Ball,
+    pub payload: SpawnBallPayload,
+    pub mark_non_interactive: bool,
+}
+
+/// Request specification for [`despawn_entity_in_ballpark`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DespawnEntityInBallparkRequest {
+    pub entity_id: i64,
+    pub remove_from_db: bool,
+    pub remove_warp_bubble: bool,
+    pub clean_npc_runtime_system: Option<u32>,
+}
+
+/// Cleanup summary returned by [`despawn_entity_in_ballpark`].
+#[derive(Debug, Clone)]
+pub struct DespawnEntityInBallparkOutcome {
+    pub entity_id: i64,
+    pub removed_from_db: bool,
+    pub removed_children: usize,
+    pub removed_ball: Option<Ball>,
+}
+
+/// Request specification for [`spawn_wreck_with_loot_in_ballpark`].
+#[derive(Debug, Clone)]
+pub struct SpawnWreckWithLootRequest {
+    pub solar_system_id: u32,
+    pub owner_char_id: i64,
+    pub pos: DVec3,
+    pub now_unix: u64,
+    pub wreck_type_id: u32,
+    pub loot_entries: Vec<(u32, i32, bool)>,
+    pub name_override: Option<String>,
+}
+
+/// Persisted loot item metadata returned by [`spawn_wreck_with_loot_in_ballpark`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpawnedWreckLootItem {
+    pub item_id: i64,
+    pub type_id: u32,
+    pub quantity: i32,
+}
+
+/// Outcome returned by [`spawn_wreck_with_loot_in_ballpark`].
+#[derive(Debug, Clone)]
+pub struct SpawnWreckWithLootOutcome {
+    pub wreck_id: i64,
+    pub loot_items: Vec<SpawnedWreckLootItem>,
+}
+
+/// Atomically inserts any persisted DB space item/asteroid records and spawns the corresponding
+/// ballpark ball on `handle`, rolling back DB records if the ballpark command fails (`#1193`).
+pub async fn spawn_entity_in_ballpark(
+    ctx: &ServerContext,
+    handle: &SystemHandle,
+    mut req: SpawnEntityInBallparkRequest,
+) -> Result<i64, DomainError> {
+    if req.entity_id.is_some_and(|id| id <= 0) {
+        return Err(DomainError::invalid_input(
+            "InvalidEntityId",
+            "Spawned entity ID must be positive",
+        ));
+    }
+    let needs_db_write = req.db_item.is_some()
+        || matches!(
+            &req.payload,
+            SpawnBallPayload::Asteroid {
+                record: Some(_),
+                ..
+            }
+        );
+    let entity_id = if needs_db_write || req.entity_id.is_none() {
+        ctx.db.try_with_mut_snapshot(|snap| {
+            let id = if let Some(item) = req.db_item.take() {
+                snap.mint_inventory_item_with_id_in_snap(
+                    req.entity_id,
+                    MintItemSpec {
+                        type_id: item.type_id,
+                        owner_id: item.owner_id,
+                        location_id: item.location_id,
+                        flag: item.flag,
+                        quantity: item.quantity,
+                        singleton: item.singleton,
+                        is_blueprint_copy: item.is_blueprint_copy,
+                        blueprint_runs_remaining: item.blueprint_runs_remaining,
+                        merge_existing_stack: false,
+                    },
+                )
+                .map(|minted| minted.item_id)
+                .map_err(|err| DomainError::invalid_input("SpawnFailed", err.to_string()))?
+            } else {
+                req.entity_id.unwrap_or_else(|| snap.alloc_entity_id())
+            };
+            if id <= 0 {
+                return Err(DomainError::invalid_input(
+                    "InvalidEntityId",
+                    "Spawned entity ID must be positive",
+                ));
+            }
+            if let SpawnBallPayload::Asteroid {
+                ref mut record, ..
+            } = req.payload
+            {
+                if let Some(mut ast_rec) = record.take() {
+                    ast_rec.asteroid_id = id;
+                    snap.asteroids.insert(id, ast_rec);
+                }
+            }
+            Ok::<i64, DomainError>(id)
+        })?
+    } else {
+        req.entity_id.unwrap_or(0)
+    };
+    if entity_id <= 0 {
+        return Err(DomainError::invalid_input(
+            "InvalidEntityId",
+            "Spawned entity ID must be positive",
+        ));
+    }
+
+    req.ball.id = entity_id;
+    let spawn_res = match req.payload {
+        SpawnBallPayload::Asteroid { mut asteroid, .. } => {
+            asteroid.asteroid_id = entity_id;
+            handle.spawn_asteroid(asteroid, req.ball).await.map(|_| ())
+        }
+        SpawnBallPayload::Meta {
+            combat_state,
+            slim_meta,
+        } => handle
+            .spawn_ball_with_meta(req.ball, combat_state, slim_meta)
+            .await
+            .map(|_| ()),
+    };
+    if let Err(err) = spawn_res {
+        if needs_db_write {
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.remove_system_cleanup_item(entity_id);
+                snap.asteroids.remove(&entity_id);
+            });
+        }
+        return Err(DomainError::internal("SpawnFailed", err));
+    }
+
+    if req.mark_non_interactive {
+        let _ = handle
+            .emit_destiny_event(
+                entity_id,
+                DestinyEvent::SetBallInteractive {
+                    ball_id: entity_id,
+                    is_interactive: false,
+                },
+            )
+            .await;
+    }
+
+    Ok(entity_id)
+}
+
+/// Removes `entity_ids` from `WorldRepository` (including child items, asteroid records, positions,
+/// and SP6 space metadata when `remove_from_db` is true), from live `handle` ballpark/warp bubbles,
+/// and from optional NPC/container runtime caches (`#1193`).
+pub async fn despawn_entities_in_ballpark(
+    ctx: &ServerContext,
+    handle: Option<&SystemHandle>,
+    entity_ids: &[i64],
+    remove_from_db: bool,
+    remove_warp_bubble: bool,
+    clean_npc_runtime_system: Option<u32>,
+) -> Vec<DespawnEntityInBallparkOutcome> {
+    let valid_ids: Vec<i64> = entity_ids.iter().copied().filter(|&id| id > 0).collect();
+    if valid_ids.is_empty() {
+        return Vec::new();
+    }
+
+    let db_results: Vec<(bool, usize)> = if remove_from_db {
+        let id_set: HashSet<i64> = valid_ids.iter().copied().collect();
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut children_by_parent: HashMap<i64, Vec<i64>> = HashMap::new();
+            for item in snap.items.values() {
+                if id_set.contains(&item.location_id) {
+                    children_by_parent
+                        .entry(item.location_id)
+                        .or_default()
+                        .push(item.item_id);
+                }
+            }
+            valid_ids
+                .iter()
+                .map(|&id| {
+                    let item_removed = snap.remove_system_cleanup_item(id).is_some();
+                    let ast_removed = snap.asteroids.remove(&id).is_some();
+                    snap.sp6_lifecycle.space_object_meta.remove(&id);
+                    snap.sp6_lifecycle.ship_combat_hp.remove(&id);
+                    let mut child_count = 0usize;
+                    if let Some(children) = children_by_parent.remove(&id) {
+                        for cid in children {
+                            if snap.remove_system_cleanup_item(cid).is_some() {
+                                child_count += 1;
+                            }
+                        }
+                    }
+                    (item_removed || ast_removed, child_count)
+                })
+                .collect()
+        })
+    } else {
+        vec![(false, 0); valid_ids.len()]
+    };
+
+    if let Some(sys_id) = clean_npc_runtime_system {
+        if let Ok(mut map) = ctx.npc_spawns.write() {
+            if let Some(mgr) = map.get_mut(&sys_id) {
+                for &id in &valid_ids {
+                    mgr.entities.remove(&id);
+                }
+            }
+        }
+    }
+    if clean_npc_runtime_system.is_some() || remove_from_db {
+        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+            for &id in &valid_ids {
+                if clean_npc_runtime_system.is_some() {
+                    rt.npc_entities.remove(&id);
+                    rt.destroyed_npc_cache.remove(&id);
+                }
+                if remove_from_db {
+                    rt.container_lifetimes.remove(&id);
+                }
+            }
+        });
+    }
+
+    let mut outcomes = Vec::with_capacity(valid_ids.len());
+    for (&entity_id, (removed_from_db, removed_children)) in
+        valid_ids.iter().zip(db_results.into_iter())
+    {
+        let removed_ball = if let Some(h) = handle {
+            if remove_warp_bubble {
+                let _ = h.remove_warp_bubble(entity_id).await;
+            }
+            h.remove_ball(entity_id).await
+        } else {
+            None
+        };
+        outcomes.push(DespawnEntityInBallparkOutcome {
+            entity_id,
+            removed_from_db,
+            removed_children,
+            removed_ball,
+        });
+    }
+    outcomes
+}
+
+/// Removes a single entity from `WorldRepository`, `handle`, and runtime caches (`#1193`).
+pub async fn despawn_entity_in_ballpark(
+    ctx: &ServerContext,
+    handle: Option<&SystemHandle>,
+    req: DespawnEntityInBallparkRequest,
+) -> DespawnEntityInBallparkOutcome {
+    despawn_entities_in_ballpark(
+        ctx,
+        handle,
+        &[req.entity_id],
+        req.remove_from_db,
+        req.remove_warp_bubble,
+        req.clean_npc_runtime_system,
+    )
+    .await
+    .into_iter()
+    .next()
+    .unwrap_or(DespawnEntityInBallparkOutcome {
+        entity_id: req.entity_id,
+        removed_from_db: false,
+        removed_children: 0,
+        removed_ball: None,
+    })
+}
+
+pub(crate) async fn spawn_wreck_ball_in_ballpark(
+    ctx: &ServerContext,
+    handle: &SystemHandle,
+    wreck_id: i64,
+    wreck_type_id: u32,
+    owner_id: i64,
+    pos: DVec3,
+    name_override: Option<String>,
+) -> Result<(), DomainError> {
+    let wreck_sde = ctx.sde.types.get(&wreck_type_id);
+    let name = name_override
+        .filter(|n| !n.is_empty())
+        .or_else(|| wreck_sde.map(|t| t.name.clone()).filter(|n| !n.is_empty()));
+    handle
+        .spawn_ball_with_meta(
+            Ball {
+                id: wreck_id,
+                type_id: wreck_type_id,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 50_000.0,
+                radius: 30.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(wreck_type_id),
+            SlimItemMeta {
+                group_id: wreck_sde.map(|t| t.group_id).unwrap_or(186),
+                category_id: wreck_sde.map(|t| t.category_id).unwrap_or(2),
+                owner_id,
+                char_id: None,
+                corp_id: -1,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+                name,
+                ..Default::default()
+            },
+        )
+        .await
+        .map(|_| ())
+        .map_err(|err| DomainError::internal("SpawnFailed", err))
+}
+
+/// Inserts a wreck and its loot items in `WorldRepository` via
+/// [`spawn_npc_wreck_and_loot_in_snap`] and spawns the matching stationary (`MovementMode::Stop`)
+/// grid-local ballpark ball (`#1193`), rolling back persisted DB rows if the ballpark spawn fails.
+pub async fn spawn_wreck_with_loot_in_ballpark(
+    ctx: &ServerContext,
+    handle: &SystemHandle,
+    req: SpawnWreckWithLootRequest,
+) -> Result<SpawnWreckWithLootOutcome, DomainError> {
+    let (wreck_id, mut loot_items) = ctx.db.with_mut_snapshot(|snap| {
+        let wid = spawn_npc_wreck_and_loot_in_snap(
+            snap,
+            req.solar_system_id,
+            req.owner_char_id,
+            req.pos,
+            req.now_unix,
+            req.wreck_type_id,
+            &req.loot_entries,
+        );
+        let items: Vec<SpawnedWreckLootItem> = snap
+            .items
+            .values()
+            .filter(|it| it.location_id == wid)
+            .map(|it| SpawnedWreckLootItem {
+                item_id: it.item_id,
+                type_id: it.type_id,
+                quantity: it.quantity,
+            })
+            .collect();
+        (wid, items)
+    });
+    loot_items.sort_by_key(|it| it.item_id);
+
+    if let Err(err) = spawn_wreck_ball_in_ballpark(
+        ctx,
+        handle,
+        wreck_id,
+        req.wreck_type_id,
+        req.owner_char_id,
+        req.pos,
+        req.name_override,
+    )
+    .await
+    {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.remove_system_cleanup_item(wreck_id);
+            snap.sp6_lifecycle.space_object_meta.remove(&wreck_id);
+            for loot in &loot_items {
+                snap.remove_system_cleanup_item(loot.item_id);
+            }
+        });
+        return Err(err);
+    }
+
+    Ok(SpawnWreckWithLootOutcome {
+        wreck_id,
+        loot_items,
+    })
 }
 
 /// Clears persisted ship hull/armor/shield/capacitor damage (`clear_ship_combat_damage_in_snap`)
@@ -488,7 +896,17 @@ pub async fn destroy_entity_in_system(
         ));
     };
     let victim_pos = ball.position;
-    let _ = handle.remove_ball(req.victim_ship_id).await;
+    let _ = despawn_entity_in_ballpark(
+        ctx,
+        Some(&handle),
+        DespawnEntityInBallparkRequest {
+            entity_id: req.victim_ship_id,
+            remove_from_db: false,
+            remove_warp_bubble: false,
+            clean_npc_runtime_system: None,
+        },
+    )
+    .await;
     ctx.systems
         .invoke_npc_death_hook(req.sys_id, req.victim_ship_id, Some(req.killer_char_id))
         .await;
@@ -527,13 +945,22 @@ pub async fn destroy_entity_in_system(
         rt.destroyed_npc_cache.remove(&req.victim_ship_id);
     });
 
-    let (wreck_id, killmail_id, wreck_type_id, wreck_pos) = match tracked_res {
-        Some(Ok(npc_out)) => (
-            npc_out.wreck_id,
-            npc_out.killmail_id,
-            npc_out.wreck_type_id,
-            npc_out.wreck_pos,
-        ),
+    let (wreck_id, killmail_id) = match tracked_res {
+        Some(Ok(npc_out)) => {
+            if npc_out.wreck_id > 0 && npc_out.wreck_type_id > 0 {
+                let _ = spawn_wreck_ball_in_ballpark(
+                    ctx,
+                    &handle,
+                    npc_out.wreck_id,
+                    npc_out.wreck_type_id,
+                    req.killer_char_id,
+                    npc_out.wreck_pos,
+                    None,
+                )
+                .await;
+            }
+            (npc_out.wreck_id, npc_out.killmail_id)
+        }
         Some(Err(err)) => return Err(DomainError::internal("KillFailed", err)),
         None => {
             let in_abyssal = (32_000_000..=32_999_999).contains(&req.sys_id);
@@ -557,20 +984,7 @@ pub async fn destroy_entity_in_system(
                     bounty.max(t.base_price).max(0.0)
                 })
                 .unwrap_or(0.0);
-            let (wid, kid) = ctx.db.with_mut_snapshot(|snap| {
-                let wid = if in_abyssal {
-                    0
-                } else {
-                    spawn_npc_wreck_and_loot_in_snap(
-                        snap,
-                        req.sys_id,
-                        req.killer_char_id,
-                        victim_pos,
-                        now_unix,
-                        wt_id,
-                        &[],
-                    )
-                };
+            let kid = ctx.db.with_mut_snapshot(|snap| {
                 let kid = snap.alloc_entity_id();
                 snap.record_killmail(
                     KillmailRecord {
@@ -584,44 +998,31 @@ pub async fn destroy_entity_in_system(
                     },
                     now_unix,
                 );
-                (wid, kid)
+                kid
             });
-            (wid, kid, wt_id, victim_pos)
+            let wid = if !in_abyssal && wt_id > 0 {
+                spawn_wreck_with_loot_in_ballpark(
+                    ctx,
+                    &handle,
+                    SpawnWreckWithLootRequest {
+                        solar_system_id: req.sys_id,
+                        owner_char_id: req.killer_char_id,
+                        pos: victim_pos,
+                        now_unix,
+                        wreck_type_id: wt_id,
+                        loot_entries: Vec::new(),
+                        name_override: None,
+                    },
+                )
+                .await
+                .map(|o| o.wreck_id)
+                .unwrap_or(0)
+            } else {
+                0
+            };
+            (wid, kid)
         }
     };
-
-    if wreck_id > 0 && wreck_type_id > 0 {
-        let wreck_sde = ctx.sde.types.get(&wreck_type_id);
-        let _ = handle
-            .spawn_ball_with_meta(
-                Ball {
-                    id: wreck_id,
-                    type_id: wreck_type_id,
-                    position: wreck_pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 50_000.0,
-                    radius: 30.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                ctx.build_type_combat_state(wreck_type_id),
-                SlimItemMeta {
-                    group_id: wreck_sde.map(|t| t.group_id).unwrap_or(186),
-                    category_id: wreck_sde.map(|t| t.category_id).unwrap_or(2),
-                    owner_id: req.killer_char_id,
-                    char_id: None,
-                    corp_id: -1,
-                    alliance_id: -1,
-                    security_status: 0.0,
-                    is_cloaked: false,
-                    name: wreck_sde.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
-                    ..Default::default()
-                },
-            )
-            .await;
-    }
     let _ = handle.flush_peer_observer_updates(None).await;
 
     Ok(DestroyEntityOutcome {
@@ -1127,5 +1528,323 @@ mod tests {
         crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
             assert!(!rt.destroyed_npc_cache.contains_key(&npc_id));
         });
+    }
+
+    #[tokio::test]
+    async fn spawn_despawn_and_wreck_with_loot_roundtrip_atomically() {
+        let ctx = ServerContext::new();
+        let sys_id = 30_000_142_u32;
+        let cid = 90_000_001_i64;
+        let handle = ctx
+            .systems
+            .wake_for_gm_command_async(sys_id, "domain_combat_ops_test")
+            .await
+            .expect("wake system");
+
+        let ship_pos = DVec3::new(1_000.0, 2_000.0, 3_000.0);
+        let spawned_id = spawn_entity_in_ballpark(
+            &ctx,
+            &handle,
+            SpawnEntityInBallparkRequest {
+                entity_id: None,
+                db_item: Some(InventoryItemRecord {
+                    item_id: 0,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: i64::from(sys_id),
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                }),
+                ball: Ball {
+                    id: 0,
+                    type_id: 587,
+                    position: ship_pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                payload: SpawnBallPayload::Meta {
+                    combat_state: ctx.build_type_combat_state(587),
+                    slim_meta: ctx.build_ship_slim_meta(cid, 587),
+                },
+                mark_non_interactive: true,
+            },
+        )
+        .await
+        .expect("spawn entity in ballpark");
+        assert!(spawned_id > 0);
+        assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&spawned_id)));
+        assert!(handle
+            .get_ball_snapshot(spawned_id)
+            .await
+            .expect("ball query")
+            .is_some());
+
+        let wreck_out = spawn_wreck_with_loot_in_ballpark(
+            &ctx,
+            &handle,
+            SpawnWreckWithLootRequest {
+                solar_system_id: sys_id,
+                owner_char_id: cid,
+                pos: ship_pos + DVec3::new(500.0, 0.0, 0.0),
+                now_unix: ctx.now_unix(),
+                wreck_type_id: 26_557,
+                loot_entries: vec![(34, 15, false)],
+                name_override: Some("Test Wreck".to_string()),
+            },
+        )
+        .await
+        .expect("spawn wreck with loot");
+        assert_eq!(wreck_out.loot_items.len(), 1);
+        assert_eq!(wreck_out.loot_items[0].type_id, 34);
+        assert_eq!(wreck_out.loot_items[0].quantity, 15);
+        let (_, wreck_ball) = handle
+            .get_ball_snapshot(wreck_out.wreck_id)
+            .await
+            .expect("wreck query")
+            .expect("wreck ball live");
+        assert_eq!(wreck_ball.mode, MovementMode::Stop);
+        assert!(
+            !handle.hydrated_view().is_static_ball(wreck_out.wreck_id),
+            "wreck must be a grid-local dynamic ball, not a static celestial"
+        );
+        let on_grid = handle
+            .list_dynamic_balls_in_bubble(spawned_id)
+            .await
+            .expect("same-grid dynamic balls");
+        assert!(on_grid.iter().any(|b| b.id == wreck_out.wreck_id));
+
+        let far_obs_id = spawn_entity_in_ballpark(
+            &ctx,
+            &handle,
+            SpawnEntityInBallparkRequest {
+                entity_id: None,
+                db_item: None,
+                ball: Ball {
+                    id: 0,
+                    type_id: 587,
+                    position: ship_pos + DVec3::new(10_000_000.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                payload: SpawnBallPayload::Meta {
+                    combat_state: ctx.build_type_combat_state(587),
+                    slim_meta: ctx.build_ship_slim_meta(cid, 587),
+                },
+                mark_non_interactive: false,
+            },
+        )
+        .await
+        .expect("spawn off-grid observer");
+        let off_grid = handle
+            .list_balls_in_bubble(far_obs_id)
+            .await
+            .expect("off-grid balls");
+        assert!(
+            !off_grid.iter().any(|b| b.id == wreck_out.wreck_id),
+            "wreck must stay grid-local and must not leak to off-grid observers"
+        );
+        let _ = despawn_entity_in_ballpark(
+            &ctx,
+            Some(&handle),
+            DespawnEntityInBallparkRequest {
+                entity_id: far_obs_id,
+                remove_from_db: false,
+                remove_warp_bubble: false,
+                clean_npc_runtime_system: None,
+            },
+        )
+        .await;
+
+        let _ = handle.drain_observer_updates_with_seq(spawned_id).await;
+        let moved_pos = ship_pos + DVec3::new(250.0, 0.0, 0.0);
+        assert!(
+            handle
+                .set_ball_position(wreck_out.wreck_id, moved_pos)
+                .await,
+            "set_ball_position on grid-local wreck must succeed"
+        );
+        let (_, moved_events, _, _) = handle
+            .drain_observer_updates_with_seq(spawned_id)
+            .await
+            .expect("drain observer events after wreck move");
+        assert!(
+            moved_events.iter().any(|ev| matches!(
+                ev,
+                DestinyEvent::SetBallPosition { ball_id, .. } if *ball_id == wreck_out.wreck_id
+            )),
+            "moving a stationary Stop wreck via Tractor Beam must emit SetBallPosition"
+        );
+
+        let despawned_wreck = despawn_entity_in_ballpark(
+            &ctx,
+            Some(&handle),
+            DespawnEntityInBallparkRequest {
+                entity_id: wreck_out.wreck_id,
+                remove_from_db: true,
+                remove_warp_bubble: false,
+                clean_npc_runtime_system: None,
+            },
+        )
+        .await;
+        assert!(despawned_wreck.removed_from_db);
+        assert_eq!(despawned_wreck.removed_children, 1);
+        assert!(despawned_wreck.removed_ball.is_some());
+        ctx.db.with_snapshot(|snap| {
+            assert!(!snap.items.contains_key(&wreck_out.wreck_id));
+            assert!(!snap.items.contains_key(&wreck_out.loot_items[0].item_id));
+        });
+
+        let despawned_ship = despawn_entity_in_ballpark(
+            &ctx,
+            Some(&handle),
+            DespawnEntityInBallparkRequest {
+                entity_id: spawned_id,
+                remove_from_db: true,
+                remove_warp_bubble: false,
+                clean_npc_runtime_system: None,
+            },
+        )
+        .await;
+        assert!(despawned_ship.removed_from_db);
+        assert!(despawned_ship.removed_ball.is_some());
+    }
+
+    #[tokio::test]
+    async fn spawn_entity_in_ballpark_rejects_non_positive_asteroid_id_without_committing_db() {
+        let ctx = ServerContext::new();
+        let sys_id = 30_000_142_u32;
+        let handle = ctx
+            .systems
+            .wake_for_gm_command_async(sys_id, "domain_combat_ops_non_pos_test")
+            .await
+            .expect("wake system");
+
+        let before_count = ctx.db.with_snapshot(|snap| snap.asteroids.len());
+        for bad_id in [0_i64, -5_i64] {
+            let err = spawn_entity_in_ballpark(
+                &ctx,
+                &handle,
+                SpawnEntityInBallparkRequest {
+                    entity_id: Some(bad_id),
+                    db_item: None,
+                    ball: Ball {
+                        id: 0,
+                        type_id: 1230,
+                        position: DVec3::new(100.0, 200.0, 300.0),
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 0.0,
+                        mass: 1_000_000.0,
+                        radius: 250.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Rigid,
+                    },
+                    payload: SpawnBallPayload::Asteroid {
+                        asteroid: AsteroidState {
+                            asteroid_id: 0,
+                            belt_id: 0,
+                            type_id: 1230,
+                            initial_units: 50_000,
+                            remaining_units: 50_000,
+                            unit_volume: 0.1,
+                            depleted: false,
+                            respawn_at_tick: None,
+                        },
+                        record: Some(AsteroidRecord {
+                            asteroid_id: 0,
+                            solar_system_id: sys_id,
+                            belt_id: 0,
+                            type_id: 1230,
+                            quantity: 50_000,
+                            initial_quantity: 50_000,
+                            position: (100.0, 200.0, 300.0),
+                            radius: 250.0,
+                        }),
+                    },
+                    mark_non_interactive: false,
+                },
+            )
+            .await
+            .expect_err("non-positive entity_id must fail");
+            assert_eq!(err.code, "InvalidEntityId");
+            ctx.db.with_snapshot(|snap| {
+                assert!(!snap.asteroids.contains_key(&bad_id));
+                assert_eq!(snap.asteroids.len(), before_count);
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn despawn_entities_in_ballpark_ignores_non_positive_ids_and_preserves_location_zero_items()
+    {
+        let ctx = ServerContext::new();
+        let sys_id = 30_000_142_u32;
+        let cid = 90_000_001_i64;
+        let handle = ctx
+            .systems
+            .wake_for_gm_command_async(sys_id, "domain_combat_ops_despawn_zero_test")
+            .await
+            .expect("wake system");
+
+        let zero_loc_item_id = ctx.db.with_mut_snapshot(|snap| {
+            let minted = snap
+                .mint_inventory_item_with_id_in_snap(
+                    None,
+                    MintItemSpec {
+                        type_id: 34,
+                        owner_id: cid,
+                        location_id: i64::from(sys_id),
+                        flag: eve_db::InventoryFlag::None,
+                        quantity: 10,
+                        singleton: false,
+                        is_blueprint_copy: false,
+                        blueprint_runs_remaining: None,
+                        merge_existing_stack: false,
+                    },
+                )
+                .expect("mint item for zero-location test");
+            if let Some(rec) = snap.get_any_item_mut(minted.item_id) {
+                rec.location_id = 0;
+            }
+            minted.item_id
+        });
+        let balls_before = handle
+            .list_balls()
+            .await
+            .expect("list balls before")
+            .len();
+
+        let outcomes = despawn_entities_in_ballpark(
+            &ctx,
+            Some(&handle),
+            &[0, -42],
+            true,
+            true,
+            Some(sys_id),
+        )
+        .await;
+        assert!(outcomes.is_empty());
+        assert!(ctx
+            .db
+            .with_snapshot(|snap| snap.items.contains_key(&zero_loc_item_id)));
+        let balls_after = handle
+            .list_balls()
+            .await
+            .expect("list balls after")
+            .len();
+        assert_eq!(balls_after, balls_before);
     }
 }

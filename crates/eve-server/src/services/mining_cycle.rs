@@ -509,23 +509,39 @@ fn damage_crystal(ctx: &ServerContext, cycle: &ActiveMiningCycle, crystal: Cryst
     }
     let slot = ctx.db.with_snapshot(|s| s.items.get(&cycle.module_id).map(|m| m.flag));
     let shattered = ctx.db.with_mut_snapshot(|snap| {
-        let Some(item) = snap
+        let Some((crystal_item_id, owner_id, cur_dmg)) = snap
             .items
-            .values_mut()
-            .find(|i| i.location_id == cycle.ship_id && Some(i.flag) == slot && i.type_id == crystal.type_id)
+            .values()
+            .find(|i| {
+                i.location_id == cycle.ship_id
+                    && Some(i.flag) == slot
+                    && i.type_id == crystal.type_id
+            })
+            .map(|i| {
+                (
+                    i.item_id,
+                    i.owner_id,
+                    i.dynamic_attributes
+                        .get(&attr::DAMAGE)
+                        .copied()
+                        .unwrap_or(0.0),
+                )
+            })
         else {
             return false;
         };
-        let total = item.dynamic_attributes.get(&attr::DAMAGE).copied().unwrap_or(0.0) + dmg;
+        let total = cur_dmg + dmg;
         if total + 1e-9 < hp {
-            item.dynamic_attributes.insert(attr::DAMAGE, total);
-            if item.quantity == 1 {
-                item.singleton = true;
-            }
-            item.version += 1;
+            let _ = crate::domain::items::set_item_dynamic_attribute_in_snap(
+                snap,
+                Some(&ctx.sde),
+                crystal_item_id,
+                attr::DAMAGE,
+                total,
+                true,
+            );
             return false;
         }
-        let (id, owner_id) = (item.item_id, item.owner_id);
         let opts = eve_db::ConsumeExactOptions {
             reject_fitted: false,
             ..eve_db::ConsumeExactOptions::for_owner_exact(
@@ -534,10 +550,13 @@ fn damage_crystal(ctx: &ServerContext, cycle: &ActiveMiningCycle, crystal: Cryst
                 eve_db::ItemClassPolicy::ExactAssembledItem,
             )
         };
-        if snap.consume_exact_item_quantity(id, 1, opts).is_err() {
+        if snap
+            .consume_exact_item_quantity(crystal_item_id, 1, opts)
+            .is_err()
+        {
             return false;
         }
-        if let Some(rem) = snap.items.get_mut(&id) {
+        if let Some(rem) = snap.items.get_mut(&crystal_item_id) {
             rem.dynamic_attributes.remove(&attr::DAMAGE);
         }
         true

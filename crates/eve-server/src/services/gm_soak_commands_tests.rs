@@ -5,6 +5,7 @@ use super::combat_ephemeral_test_helpers::{
 };
 use super::*;
 use eve_db::WorldRepository;
+use eve_destiny::{Ball, SlimItemMeta};
 use eve_sde::{InvType, RaceInfo, SdeRegistry, TypeMaterialEntry};
 use std::sync::Arc;
 

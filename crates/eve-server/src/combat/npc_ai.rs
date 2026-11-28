@@ -338,9 +338,21 @@ impl NpcSpawnManager {
                 name: sde_t.map(|t| t.name.clone()).filter(|n| !n.is_empty()),
                 ..Default::default()
             };
-            let _ = sys_handle
-                .spawn_ball_with_meta(ball, combat_state, npc_meta)
-                .await;
+            let _ = crate::domain::combat_ops::spawn_entity_in_ballpark(
+                ctx,
+                &sys_handle,
+                crate::domain::combat_ops::SpawnEntityInBallparkRequest {
+                    entity_id: Some(ball_id),
+                    db_item: None,
+                    ball,
+                    payload: crate::domain::combat_ops::SpawnBallPayload::Meta {
+                        combat_state,
+                        slim_meta: npc_meta,
+                    },
+                    mark_non_interactive: false,
+                },
+            )
+            .await;
 
             let entity = NpcCombatEntity {
                 ball_id,

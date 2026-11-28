@@ -1009,3 +1009,248 @@ async fn gm_kill_npc_updates_shadow_client_and_invalid_args_reject_over_wire() {
     }
     harness.assert_shadow_converged();
 }
+
+/// Consolidated `#1193` wire-path parity acceptance test exercising `/heal`, `/giveisk`,
+/// `/giveskill`, `/fit`, `/tr`, `/spawn`, and `/soak` end-to-end over `:26000` with
+/// [`eve_testkit::shadow_client::ShadowClient`] convergence against server DB and space state.
+#[tokio::test]
+async fn gm_heal_giveisk_giveskill_fit_tr_update_shadow_client_over_wire() {
+    let ctx = ServerContext::new();
+    let _guard = common::teardown_guard(&ctx);
+    let kw = HashMap::new();
+    let (mut harness, ship_id) = prepare_undocked_gm_wire_harness(&ctx, 119_320).await;
+
+    // 1. `/giveisk` credits personal wallet and converges ShadowClient wallet over wire.
+    let bal_before = ctx
+        .db
+        .with_snapshot(|snap| snap.characters[&PILOT].balance.to_wire_f64());
+    let giveisk_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveisk 5000000".into())],
+            &kw,
+        )
+        .await;
+    assert_eq!(
+        giveisk_rep.dict_get("command"),
+        Some(&PyRep::String("/giveisk 5000000".into()))
+    );
+    harness.assert_shadow_converged();
+    let shadow_bal = harness
+        .shadow()
+        .and_then(|s| s.wallet.personal_balance_isk)
+        .expect("ShadowClient personal wallet balance synced");
+    assert!(
+        ((shadow_bal - bal_before) - 5_000_000.0).abs() < 0.01,
+        "expected +5,000,000 ISK delta, before={bal_before}, shadow={shadow_bal}"
+    );
+
+    // 2. `/giveskill` trains skill to level 5 and updates ShadowClient skill sheet over wire.
+    let skill_cmd = format!("/giveskill {SKILL_MINMATAR_CRUISER} 5");
+    let giveskill_rep = harness
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String(skill_cmd)], &kw)
+        .await;
+    assert_eq!(
+        giveskill_rep.dict_get("level"),
+        Some(&PyRep::Integer(5))
+    );
+    harness.assert_shadow_converged();
+    assert_eq!(
+        harness
+            .shadow()
+            .and_then(|s| s.skills.get(&SKILL_MINMATAR_CRUISER).map(|&(lvl, _)| lvl)),
+        Some(5),
+        "ShadowClient skill sheet must reflect /giveskill 5"
+    );
+
+    // 3. `/fit` equips module onto active ship and converges ShadowClient inventory.
+    let fit_cmd = format!("/fit {MODULE_DCU_II}");
+    let fit_rep = harness
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String(fit_cmd)], &kw)
+        .await;
+    let fitted_item_id = fit_rep
+        .dict_get("itemID")
+        .and_then(PyRep::as_i64)
+        .filter(|&id| id > 0)
+        .expect("positive fitted module itemID");
+    harness.assert_shadow_converged();
+    assert!(
+        harness
+            .shadow()
+            .is_some_and(|s| s.inventory.items.contains_key(&fitted_item_id)),
+        "ShadowClient inventory must contain module {fitted_item_id} fitted via /fit"
+    );
+
+    // 4. `/setattr` damage + `/heal` restores full ship vitals and ego-ball damage state.
+    let dmg_hull_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/setattr me 3 25.0".into())],
+            &kw,
+        )
+        .await;
+    assert_eq!(dmg_hull_rep.dict_get("itemID"), Some(&PyRep::Integer(ship_id)));
+    let dmg_armor_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/setattr me 266 40.0".into())],
+            &kw,
+        )
+        .await;
+    assert_eq!(dmg_armor_rep.dict_get("itemID"), Some(&PyRep::Integer(ship_id)));
+    harness.assert_shadow_converged();
+
+    let heal_rep = harness
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String("/heal".into())], &kw)
+        .await;
+    assert_eq!(heal_rep.dict_get("shipID"), Some(&PyRep::Integer(ship_id)));
+    harness.assert_shadow_converged();
+    let sh_healed = harness.shadow().expect("shadow active");
+    assert_eq!(
+        sh_healed.item_attributes.get(&(ship_id, attr_ids::DAMAGE)),
+        Some(&0.0)
+    );
+    assert_eq!(
+        sh_healed
+            .item_attributes
+            .get(&(ship_id, attr_ids::ARMOR_DAMAGE)),
+        Some(&0.0)
+    );
+    let dmg_state = sh_healed
+        .ballpark
+        .damage_states
+        .get(&ship_id)
+        .expect("/heal must push OnDamageStateChange for ego ball");
+    assert!(
+        (dmg_state.shield - 1.0).abs() < 1e-3
+            && (dmg_state.armor - 1.0).abs() < 1e-3
+            && (dmg_state.hull - 1.0).abs() < 1e-3,
+        "full damage state expected after /heal: {dmg_state:?}"
+    );
+
+    // 5. `/tr` relocates pilot + ship to Perimeter cleanly without stale scene/inventory drift.
+    let tr_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/tr me {PERIMETER}"))],
+            &kw,
+        )
+        .await;
+    assert_eq!(
+        tr_rep.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(i64::from(PERIMETER)))
+    );
+    let dogma_info = harness
+        .call_ok("dogmaIM", None, "GetAllInfo", &[], &kw)
+        .await;
+    assert!(
+        !matches!(dogma_info, PyRep::None),
+        "dogmaIM.GetAllInfo after /tr must return fit payload"
+    );
+    harness.assert_shadow_converged();
+    let sh_tr = harness.shadow().expect("shadow active after /tr");
+    assert_eq!(sh_tr.session.solar_system_id, Some(PERIMETER));
+    assert_eq!(sh_tr.session.station_id, None);
+    assert_eq!(
+        sh_tr.inventory.items.get(&ship_id).map(|i| i.location_id),
+        Some(i64::from(PERIMETER))
+    );
+
+    // 6. `/spawn` spawns entity into active destination system via woken handle + domain op.
+    let spawn_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/spawn 1230 1".into())],
+            &kw,
+        )
+        .await;
+    let spawned_id = spawn_rep
+        .dict_get("spawnedID")
+        .and_then(PyRep::as_i64)
+        .filter(|&id| id > 0)
+        .expect("positive spawnedID from /spawn");
+    assert_eq!(
+        spawn_rep.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(i64::from(PERIMETER)))
+    );
+    let perim_handle = ctx
+        .systems
+        .get_handle(PERIMETER)
+        .expect("Perimeter system handle live after /tr + /spawn");
+    assert!(
+        perim_handle
+            .get_ball_snapshot(spawned_id)
+            .await
+            .expect("ball snapshot")
+            .is_some(),
+        "spawned entity {spawned_id} must be live in Perimeter ballpark"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.items.contains_key(&spawned_id));
+        assert!(snap.asteroids.contains_key(&spawned_id));
+    });
+
+    // 7. `/soak logi 2` and `/soak logi stop` use live non-waking handle cleanly over wire.
+    let soak_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/soak logi 2".into())],
+            &kw,
+        )
+        .await;
+    assert_eq!(soak_rep.dict_get("active"), Some(&PyRep::Bool(true)));
+    assert_eq!(soak_rep.dict_get("npcCount"), Some(&PyRep::Integer(2)));
+    assert_eq!(
+        soak_rep.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(i64::from(PERIMETER)))
+    );
+
+    let stop_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/soak logi stop".into())],
+            &kw,
+        )
+        .await;
+    assert_eq!(stop_rep.dict_get("active"), Some(&PyRep::Bool(false)));
+    assert_eq!(stop_rep.dict_get("stoppedCount"), Some(&PyRep::Integer(2)));
+
+    harness.assert_shadow_converged();
+    let sh_final = harness.shadow().expect("final shadow state");
+    ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&PILOT).expect("pilot record");
+        assert_eq!(ch.solar_system_id, PERIMETER);
+        assert_eq!(
+            sh_final
+                .wallet
+                .personal_balance_isk
+                .map(|b| (b - ch.balance.to_wire_f64()).abs() < 0.01),
+            Some(true)
+        );
+        assert_eq!(
+            sh_final
+                .skills
+                .get(&SKILL_MINMATAR_CRUISER)
+                .map(|&(lvl, _)| lvl),
+            snap.skills
+                .get(&PILOT)
+                .and_then(|m| m.get(&SKILL_MINMATAR_CRUISER))
+                .map(|s| s.level)
+        );
+        assert!(sh_final.inventory.items.contains_key(&fitted_item_id));
+    });
+}

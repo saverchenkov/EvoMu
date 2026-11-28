@@ -1180,7 +1180,8 @@ pub(crate) fn dispatch_spawnnpc_slash<'a>(
             return Err(unknown_slash_error(inv.raw));
         }
         let (_, cid) = ServerContext::require_character(session)?;
-        handle_slash_spawn_npc(ctx, session, cid, inv.raw, inv.rest).await
+        let parsed = crate::router::slash_registry::parse_spawn_npc_slash_args(inv.rest)?;
+        handle_slash_spawn_npc(ctx, session, cid, inv.raw, parsed).await
     })
 }
 
@@ -1260,69 +1261,31 @@ pub(crate) fn dispatch_createccpevent_slash(
     super::fleet_social::create_ccp_calendar_event(ctx, cid, dt, dur, imp, title, desc)
 }
 
-/// Parses an optional `[me|self|<characterID>]` prefix token, validating explicit numeric
-/// character IDs against `snap.characters` so unknown targets fail closed with `CharacterNotFound`.
-fn resolve_explicit_slash_target(
-    ctx: &ServerContext,
-    caller_cid: i64,
-    who: &str,
-    usage: &str,
-) -> Result<(i64, bool), BridgeRpcError> {
-    if who.eq_ignore_ascii_case("me") || who.eq_ignore_ascii_case("self") {
-        return Ok((caller_cid, false));
-    }
-    let Some(target_cid) = who.parse::<i64>().ok().filter(|&id| id > 0) else {
-        return Err(BridgeRpcError {
-            code: "InvalidSlashArgument".into(),
-            message: usage.to_string(),
-            client_error: None,
-        });
-    };
-    if !ctx
-        .db
-        .with_snapshot(|snap| snap.characters.contains_key(&target_cid))
-    {
-        return Err(BridgeRpcError {
-            code: "CharacterNotFound".into(),
-            message: format!("Character {target_cid} not found"),
-            client_error: None,
-        });
-    }
-    Ok((target_cid, true))
-}
-
 /// Handles `/spawnnpc` GM slash commands (`[me|<characterID>] <typeID>`).
 async fn handle_slash_spawn_npc(
     ctx: &ServerContext,
     session: &SessionState,
     cid: i64,
     cmd: &str,
-    rest: &str,
+    parsed: crate::router::slash_registry::SpawnNpcSlashArgs,
 ) -> Result<PyRep, BridgeRpcError> {
-    let usage = "Usage: /spawnnpc [me|<characterID>] <type_id>";
-    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
-    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-    let (target_cid, explicit_target, type_id_str) = match token_strs.as_slice() {
-        [type_str] => (cid, false, *type_str),
-        [who, type_str] => {
-            let (target_cid, explicit) = resolve_explicit_slash_target(ctx, cid, who, usage)?;
-            (target_cid, explicit, *type_str)
-        }
-        _ => {
-            return Err(BridgeRpcError {
-                code: "InvalidSlashArgument".into(),
-                message: usage.to_string(),
-                client_error: None,
-            });
+    let (target_cid, explicit_target) = match parsed.target {
+        crate::router::slash_registry::SpawnNpcTarget::Caller => (cid, false),
+        crate::router::slash_registry::SpawnNpcTarget::ExplicitCharId(target_cid) => {
+            if !ctx
+                .db
+                .with_snapshot(|snap| snap.characters.contains_key(&target_cid))
+            {
+                return Err(BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("Character {target_cid} not found"),
+                    client_error: None,
+                });
+            }
+            (target_cid, true)
         }
     };
-    let Ok(type_id) = type_id_str.parse::<u32>() else {
-        return Err(BridgeRpcError {
-            code: "InvalidSlashArgument".into(),
-            message: usage.to_string(),
-            client_error: None,
-        });
-    };
+    let type_id = parsed.type_id;
     if !ctx.sde.types.contains_key(&type_id) {
         return Err(BridgeRpcError {
             code: "TypeNotFound".into(),
@@ -1351,8 +1314,23 @@ async fn handle_slash_spawn_npc(
             .or_else(|| session.solar_system_id.map(|s| (s, 0)))
             .unwrap_or((0, 0))
     };
+    if sys_id == 0 {
+        return Err(BridgeRpcError {
+            code: "NoSolarSystem".into(),
+            message: "Target is not in a solar system for /spawnnpc".into(),
+            client_error: None,
+        });
+    }
 
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let handle = ctx
+        .systems
+        .wake_for_gm_command_async(sys_id, "/spawnnpc")
+        .await
+        .map_err(|err| BridgeRpcError {
+            code: "SpawnFailed".into(),
+            message: format!("Failed to activate solar system {sys_id} for /spawnnpc: {err}"),
+            client_error: None,
+        })?;
     let origin = if ship_id > 0 {
         handle
             .get_ball_snapshot(ship_id)
@@ -1364,14 +1342,42 @@ async fn handle_slash_spawn_npc(
     } else {
         DVec3::ZERO
     };
-    let npc_id = crate::services::combat_crimewatch::combat_npc_ai::spawn_npc_entity_from_sde(
+    let npc_id = ctx.db.with_mut_snapshot(|snap| snap.alloc_entity_id());
+    let rng_seed = ctx
+        .combat_rng_seq
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (ball, combat_state, slim_meta, entity) =
+        crate::services::combat_crimewatch::combat_npc_ai::build_specialized_npc_spawn_item(
+            &ctx.sde,
+            sys_id,
+            npc_id,
+            type_id,
+            "",
+            0,
+            origin + DVec3::new(1_000.0, 0.0, 0.0),
+            rng_seed,
+            &mut |_| {},
+        );
+    let npc_id = crate::domain::combat_ops::spawn_entity_in_ballpark(
         ctx,
-        sys_id,
-        type_id,
-        0,
-        origin + DVec3::new(1_000.0, 0.0, 0.0),
+        &handle,
+        crate::domain::combat_ops::SpawnEntityInBallparkRequest {
+            entity_id: Some(npc_id),
+            db_item: None,
+            ball,
+            payload: crate::domain::combat_ops::SpawnBallPayload::Meta {
+                combat_state,
+                slim_meta,
+            },
+            mark_non_interactive: false,
+        },
     )
-    .await;
+    .await
+    .map_err(crate::services::domain_err_to_rpc)?;
+    crate::combat::npc_ai_weapons_loot::clear_extended_npc_weapon_runtime(ctx, sys_id, &[npc_id]);
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.npc_entities.insert(npc_id, entity);
+    });
 
     Ok(PyRep::keyval([
         ("command", PyRep::String(cmd.to_string())),

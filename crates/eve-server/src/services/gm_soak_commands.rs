@@ -13,18 +13,12 @@ use crate::services::mobile_deployables::{
     GROUP_MOBILE_OBSERVATORY, GROUP_MOBILE_TRACTOR, GROUP_MOBILE_WARP_DISRUPTOR,
 };
 use crate::services::mobile_deployables_ext::{GROUP_MOBILE_SCAN_INHIBITOR, GROUP_MOBILE_SIPHON};
-use eve_db::snapshot_ext::SkillHistoryEntry;
-use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
-use eve_destiny::{
-    unix_to_filetime, Ball, DestinyEvent, MovementMode, SlimItemMeta, SpecialFxWireMeta,
-};
+use eve_destiny::{unix_to_filetime, DestinyEvent, MovementMode, SpecialFxWireMeta};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-const MAX_SOAK_LOGI_COUNT: usize = 50;
-const MAX_SPAWNWRECK_COUNT: usize = 50;
 const SOAK_LOGI_ORBIT_RANGE_M: f64 = 12_000.0;
 const SOAK_LOGI_REP_RANGE_M: f64 = 75_000.0;
 const SOAK_LOGI_SHIELD_REP_PER_CYCLE: f64 = 450.0;
@@ -44,7 +38,6 @@ const DEFAULT_SESSION_LEDGER_LIMIT: usize = 50;
 const GROUP_CARGO_CONTAINER: u32 = 12;
 const GROUP_WRECK: u32 = 186;
 const DEFAULT_WRECK_TYPE_ID: u32 = 26_557;
-const SKILL_EVENT_CHAR_CREATION: i64 = 33;
 
 /// V24 SDE Shield/Armor Command Burst dbuffs cycled by `/soak logi` cruisers (`dbuff_id`, `value`).
 const SOAK_LOGI_COMMAND_BURST_DBUFFS: [(u32, f64); 4] = [
@@ -353,9 +346,10 @@ fn remove_soak_dbuffs_and_notify(
         rem
     });
 
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    if let Err(err) = sys_handle.update_ball_dbuffs_sync(ship_id, remaining_wire) {
-        tracing::warn!(solar_system_id, ship_id, %err, "update_ball_dbuffs_sync failed");
+    if let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) {
+        if let Err(err) = sys_handle.update_ball_dbuffs_sync(ship_id, remaining_wire) {
+            tracing::warn!(solar_system_id, ship_id, %err, "update_ball_dbuffs_sync failed");
+        }
     }
     ctx.invalidate_ship_fitting(ship_id);
     ctx.push_fit_projection(char_id, ship_id);
@@ -370,41 +364,37 @@ async fn stop_logi_soak_in_system(
     solar_system_id: u32,
 ) -> Option<GmLogiSoakState> {
     let prev = with_mut_combat_runtime(ctx, |rt| rt.gm_logi_soaks.remove(&solar_system_id))?;
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    if prev.cycle_count > 0 && !prev.npc_ids.is_empty() {
-        let mod_type_ids = logi_soak_fx_module_type_ids(&ctx.sde);
-        let fx_duration_ms = (prev.cycle_interval_ticks as f64) * 1_000.0;
-        let active_parity = ((prev.cycle_count - 1) % 2) as u8;
-        if let Err(err) = sys_handle
-            .emit_logi_soak_stop_fx(
-                prev.npc_ids.clone(),
-                prev.target_ship_id,
-                mod_type_ids,
-                fx_duration_ms,
-                active_parity,
-            )
-            .await
-        {
-            tracing::warn!(solar_system_id, %err, "emit_logi_soak_stop_fx failed");
-        }
-        // Flush stop FX while special_fx_meta and cruiser balls are still live (`#1088`).
-        let _ = sys_handle.flush_peer_observer_updates(None).await;
-    }
-    for &npc_id in &prev.npc_ids {
-        let _ = sys_handle.remove_ball(npc_id).await;
-    }
-    if let Ok(mut map) = ctx.npc_spawns.write() {
-        if let Some(mgr) = map.get_mut(&solar_system_id) {
-            for &npc_id in &prev.npc_ids {
-                mgr.entities.remove(&npc_id);
+    let sys_handle_opt = ctx.systems.get_handle(solar_system_id);
+    if let Some(ref sys_handle) = sys_handle_opt {
+        if prev.cycle_count > 0 && !prev.npc_ids.is_empty() {
+            let mod_type_ids = logi_soak_fx_module_type_ids(&ctx.sde);
+            let fx_duration_ms = (prev.cycle_interval_ticks as f64) * 1_000.0;
+            let active_parity = ((prev.cycle_count - 1) % 2) as u8;
+            if let Err(err) = sys_handle
+                .emit_logi_soak_stop_fx(
+                    prev.npc_ids.clone(),
+                    prev.target_ship_id,
+                    mod_type_ids,
+                    fx_duration_ms,
+                    active_parity,
+                )
+                .await
+            {
+                tracing::warn!(solar_system_id, %err, "emit_logi_soak_stop_fx failed");
             }
+            // Flush stop FX while special_fx_meta and cruiser balls are still live (`#1088`).
+            let _ = sys_handle.flush_peer_observer_updates(None).await;
         }
     }
-    with_mut_combat_runtime(ctx, |rt| {
-        for &npc_id in &prev.npc_ids {
-            rt.npc_entities.remove(&npc_id);
-        }
-    });
+    let _ = crate::domain::combat_ops::despawn_entities_in_ballpark(
+        ctx,
+        sys_handle_opt.as_ref(),
+        &prev.npc_ids,
+        false,
+        false,
+        Some(solar_system_id),
+    )
+    .await;
     remove_soak_dbuffs_and_notify(ctx, solar_system_id, prev.target_char_id, prev.target_ship_id);
     Some(prev)
 }
@@ -457,58 +447,50 @@ fn logi_soak_status_pyrep(
     PyRep::keyval(pairs)
 }
 
-async fn handle_soak_cmd(
+async fn handle_soak_parsed(
     ctx: &ServerContext,
     session: &SessionState,
     cid: i64,
     cmd: &str,
+    parsed: crate::router::slash_registry::SoakSlashArgs,
 ) -> Result<PyRep, BridgeRpcError> {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    let usage = "Usage: /soak logi <count|status|stop>";
-    let (subcmd, arg) = match parts.as_slice() {
-        ["/soak", "logi", arg] => ("logi", *arg),
-        ["/soak", "status"] => ("logi", "status"),
-        ["/soak", "stop"] => ("logi", "stop"),
-        _ => return Err(err("InvalidArguments", usage)),
-    };
-    if subcmd != "logi" {
-        return Err(err("InvalidArguments", usage));
-    }
-
     let caller_sys = ctx
         .db
         .with_snapshot(|snap| snap.characters.get(&cid).map(|c| c.solar_system_id))
         .or(session.solar_system_id)
         .unwrap_or(0);
 
-    if arg.eq_ignore_ascii_case("status") {
-        let state = with_combat_runtime(ctx, |rt| rt.gm_logi_soaks.get(&caller_sys).cloned());
-        return Ok(logi_soak_status_pyrep(cmd, caller_sys, state.as_ref(), None));
-    }
-
-    if arg.eq_ignore_ascii_case("stop") {
-        let prev = stop_logi_soak_in_system(ctx, caller_sys).await;
-        let stopped_n = prev.as_ref().map_or(0, |s| s.npc_ids.len());
-        return Ok(logi_soak_status_pyrep(
-            cmd,
-            caller_sys,
-            prev.as_ref(),
-            Some(stopped_n),
-        ));
-    }
-
-    let Ok(count) = arg.parse::<usize>() else {
-        return Err(err("InvalidArguments", usage));
+    let count = match parsed {
+        crate::router::slash_registry::SoakSlashArgs::Logi(
+            crate::router::slash_registry::SoakLogiAction::Status,
+        ) => {
+            let state = with_combat_runtime(ctx, |rt| rt.gm_logi_soaks.get(&caller_sys).cloned());
+            return Ok(logi_soak_status_pyrep(cmd, caller_sys, state.as_ref(), None));
+        }
+        crate::router::slash_registry::SoakSlashArgs::Logi(
+            crate::router::slash_registry::SoakLogiAction::Stop,
+        ) => {
+            let prev = stop_logi_soak_in_system(ctx, caller_sys).await;
+            let stopped_n = prev.as_ref().map_or(0, |s| s.npc_ids.len());
+            return Ok(logi_soak_status_pyrep(
+                cmd,
+                caller_sys,
+                prev.as_ref(),
+                Some(stopped_n),
+            ));
+        }
+        crate::router::slash_registry::SoakSlashArgs::Logi(
+            crate::router::slash_registry::SoakLogiAction::Start { count },
+        ) => count,
     };
-    if !(1..=MAX_SOAK_LOGI_COUNT).contains(&count) {
-        return Err(err(
-            "InvalidArguments",
-            format!("Logi soak cruiser count must be between 1 and {MAX_SOAK_LOGI_COUNT}"),
-        ));
-    }
 
     let (sys_id, ship_id) = resolve_gm_soak_space_ship(ctx, session, cid, "/soak logi")?;
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(err(
+            "ShipNotFound",
+            format!("Active ship {ship_id} is not present in solar system {sys_id}"),
+        ));
+    };
     let Some((bp_tick, ship_ball)) = sys_handle
         .get_ball_snapshot(ship_id)
         .await
@@ -532,23 +514,77 @@ async fn handle_soak_cmd(
         .map(|pos| (npc_type_id, "GmLogiSoak", 0_u32, pos))
         .collect();
 
-    let npc_ids = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_batch(
-        ctx,
-        sys_id,
-        &specs,
-        |entity| {
-            entity.archetype = "GmLogiSoak".to_string();
-            entity.faction_id = 500_021;
-            entity.damage_vector = Default::default();
-            entity.remote_shield_rep = SOAK_LOGI_SHIELD_REP_PER_CYCLE;
-            entity.remote_armor_rep = SOAK_LOGI_ARMOR_REP_PER_CYCLE;
-            entity.remote_rep_range = SOAK_LOGI_REP_RANGE_M;
-            entity.optimal_range = SOAK_LOGI_ORBIT_RANGE_M;
-            entity.orbit_range = SOAK_LOGI_ORBIT_RANGE_M;
-            entity.bounty_isk = 0.0;
-        },
-    )
-    .await;
+    let spec_count = specs.len() as i64;
+    let start_ball_id = ctx.db.with_mut_snapshot(|snap| {
+        let start = snap.next_entity_id + 1;
+        snap.next_entity_id += spec_count;
+        start
+    });
+    let mut npc_ids = Vec::with_capacity(specs.len());
+    let mut built = Vec::with_capacity(specs.len());
+    for (idx, &(tid, archetype_hint, spawn_group_id, pos)) in specs.iter().enumerate() {
+        let ball_id = start_ball_id + idx as i64;
+        let rng_seed = ctx
+            .combat_rng_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (ball, cs, npc_meta, entity) =
+            crate::services::combat_crimewatch::combat_npc_ai::build_specialized_npc_spawn_item(
+                &ctx.sde,
+                sys_id,
+                ball_id,
+                tid,
+                archetype_hint,
+                spawn_group_id,
+                pos,
+                rng_seed,
+                &mut |entity| {
+                    entity.archetype = "GmLogiSoak".to_string();
+                    entity.faction_id = 500_021;
+                    entity.damage_vector = Default::default();
+                    entity.remote_shield_rep = SOAK_LOGI_SHIELD_REP_PER_CYCLE;
+                    entity.remote_armor_rep = SOAK_LOGI_ARMOR_REP_PER_CYCLE;
+                    entity.remote_rep_range = SOAK_LOGI_REP_RANGE_M;
+                    entity.optimal_range = SOAK_LOGI_ORBIT_RANGE_M;
+                    entity.orbit_range = SOAK_LOGI_ORBIT_RANGE_M;
+                    entity.bounty_isk = 0.0;
+                },
+            );
+        if let Err(domain_err) = crate::domain::combat_ops::spawn_entity_in_ballpark(
+            ctx,
+            &sys_handle,
+            crate::domain::combat_ops::SpawnEntityInBallparkRequest {
+                entity_id: Some(ball_id),
+                db_item: None,
+                ball,
+                payload: crate::domain::combat_ops::SpawnBallPayload::Meta {
+                    combat_state: cs,
+                    slim_meta: npc_meta,
+                },
+                mark_non_interactive: false,
+            },
+        )
+        .await
+        {
+            let _ = crate::domain::combat_ops::despawn_entities_in_ballpark(
+                ctx,
+                Some(&sys_handle),
+                &npc_ids,
+                false,
+                false,
+                Some(sys_id),
+            )
+            .await;
+            return Err(crate::services::domain_err_to_rpc(domain_err));
+        }
+        built.push((ball_id, entity));
+        npc_ids.push(ball_id);
+    }
+    crate::combat::npc_ai_weapons_loot::clear_extended_npc_weapon_runtime(ctx, sys_id, &npc_ids);
+    with_mut_combat_runtime(ctx, |rt| {
+        for (ball_id, entity) in built {
+            rt.npc_entities.insert(ball_id, entity);
+        }
+    });
 
     for &npc_id in &npc_ids {
         let _ = sys_handle
@@ -634,18 +670,13 @@ fn deadwarp_status_pyrep(
     PyRep::keyval(pairs)
 }
 
-async fn handle_deadwarp_cmd(
+async fn handle_deadwarp_parsed(
     ctx: &ServerContext,
     session: &SessionState,
     cid: i64,
     cmd: &str,
+    parsed: crate::router::slash_registry::DeadwarpSlashArgs,
 ) -> Result<PyRep, BridgeRpcError> {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    let usage = "Usage: /deadwarp [status|stop]";
-    if parts.len() > 2 {
-        return Err(err("InvalidArguments", usage));
-    }
-
     let (caller_sys, caller_ship) = ctx
         .db
         .with_snapshot(|snap| {
@@ -658,8 +689,8 @@ async fn handle_deadwarp_cmd(
             session.ship_id.unwrap_or(0),
         ));
 
-    if let Some(sub) = parts.get(1).copied() {
-        if sub.eq_ignore_ascii_case("status") {
+    match parsed {
+        crate::router::slash_registry::DeadwarpSlashArgs::Status => {
             let st = with_combat_runtime(ctx, |rt| {
                 rt.gm_deadwarps
                     .get(&caller_ship)
@@ -674,7 +705,7 @@ async fn handle_deadwarp_cmd(
                 None,
             ));
         }
-        if sub.eq_ignore_ascii_case("stop") {
+        crate::router::slash_registry::DeadwarpSlashArgs::Stop => {
             let removed = with_mut_combat_runtime(ctx, |rt| {
                 rt.gm_deadwarps.remove(&caller_ship).or_else(|| {
                     let key = rt
@@ -690,14 +721,15 @@ async fn handle_deadwarp_cmd(
                 .map(|s| (s.solar_system_id, s.ship_id))
                 .unwrap_or((caller_sys, caller_ship));
             if target_sys > 0 && target_ship > 0 {
-                let sys_handle = ctx.systems.get_or_spawn(target_sys);
-                let _ = sys_handle
-                    .set_movement_mode(target_ship, MovementMode::Stop)
-                    .await;
-                crate::services::space_destiny::clear_warp_tracking(
-                    &sys_handle,
-                    target_ship,
-                );
+                if let Some(sys_handle) = ctx.systems.get_handle(target_sys) {
+                    let _ = sys_handle
+                        .set_movement_mode(target_ship, MovementMode::Stop)
+                        .await;
+                    crate::services::space_destiny::clear_warp_tracking(
+                        &sys_handle,
+                        target_ship,
+                    );
+                }
             }
             return Ok(deadwarp_status_pyrep(
                 cmd,
@@ -707,13 +739,16 @@ async fn handle_deadwarp_cmd(
                 Some(removed.is_some()),
             ));
         }
-        if !sub.eq_ignore_ascii_case("start") {
-            return Err(err("InvalidArguments", usage));
-        }
+        crate::router::slash_registry::DeadwarpSlashArgs::Start => {}
     }
 
     let (sys_id, ship_id) = resolve_gm_soak_space_ship(ctx, session, cid, "/deadwarp")?;
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(err(
+            "ShipNotFound",
+            format!("Active ship {ship_id} is not present in solar system {sys_id}"),
+        ));
+    };
     let Some((_, ship_ball)) = sys_handle
         .get_ball_snapshot(ship_id)
         .await
@@ -769,17 +804,13 @@ async fn handle_deadwarp_cmd(
     Ok(deadwarp_status_pyrep(cmd, ship_id, sys_id, Some(&state), None))
 }
 
-async fn handle_sysjunkclear_cmd(
+async fn handle_sysjunkclear_parsed(
     ctx: &ServerContext,
     session: &SessionState,
     cid: i64,
     cmd: &str,
+    _parsed: crate::router::slash_registry::SysJunkClearSlashArgs,
 ) -> Result<PyRep, BridgeRpcError> {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    if parts.len() != 1 {
-        return Err(err("InvalidArguments", "Usage: /sysjunkclear"));
-    }
-
     let sys_id = ctx
         .db
         .with_snapshot(|snap| snap.characters.get(&cid).map(|c| c.solar_system_id))
@@ -870,8 +901,8 @@ async fn handle_sysjunkclear_cmd(
         }
     });
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    {
+    let sys_handle_opt = ctx.systems.get_handle(sys_id);
+    if let Some(ref sys_handle) = sys_handle_opt {
         let view = sys_handle.view();
         for (&bid, b) in &view.balls {
             let group_id = view
@@ -884,10 +915,9 @@ async fn handle_sysjunkclear_cmd(
                 jetcan_ids.insert(bid);
             }
         }
-    }
-
-    for &bid in &warp_bubble_ids {
-        let _ = sys_handle.remove_warp_bubble(bid).await;
+        for &bid in &warp_bubble_ids {
+            let _ = sys_handle.remove_warp_bubble(bid).await;
+        }
     }
 
     let mut all_purged: Vec<i64> = wreck_ids
@@ -900,29 +930,18 @@ async fn handle_sysjunkclear_cmd(
         .collect();
     all_purged.sort_unstable();
 
-    for &iid in &all_purged {
-        let _ = sys_handle.remove_ball(iid).await;
-    }
-
     if !all_purged.is_empty() {
-        let purged_set: HashSet<i64> = all_purged.iter().copied().collect();
-        ctx.db.with_mut_snapshot(|snap| {
-            let child_ids: Vec<i64> = snap
-                .items
-                .values()
-                .filter(|it| purged_set.contains(&it.location_id))
-                .map(|it| it.item_id)
-                .collect();
-            for &iid in &all_purged {
-                snap.items.remove(&iid);
-                snap.item_positions.remove(&iid);
-                snap.sp6_lifecycle.space_object_meta.remove(&iid);
-                snap.sp6_lifecycle.ship_combat_hp.remove(&iid);
-            }
-            for cid in child_ids {
-                snap.items.remove(&cid);
-            }
-            if !expired_dep_ids.is_empty() {
+        let _ = crate::domain::combat_ops::despawn_entities_in_ballpark(
+            ctx,
+            sys_handle_opt.as_ref(),
+            &all_purged,
+            true,
+            false,
+            None,
+        )
+        .await;
+        if !expired_dep_ids.is_empty() {
+            ctx.db.with_mut_snapshot(|snap| {
                 write_deployable_state_snap(snap, |dep_state| {
                     for &did in &expired_dep_ids {
                         dep_state.deployables.remove(&did);
@@ -935,13 +954,8 @@ async fn handle_sysjunkclear_cmd(
                         .mmju_spools
                         .retain(|_, spool| !expired_dep_ids.contains(&spool.unit_id));
                 });
-            }
-        });
-        with_mut_combat_runtime(ctx, |rt| {
-            for &iid in &all_purged {
-                rt.container_lifetimes.remove(&iid);
-            }
-        });
+            });
+        }
     }
 
     let wrecks_purged = wreck_ids.len() as i64;
@@ -1066,21 +1080,24 @@ fn handle_session_dump(
     });
     let (is_observer_registered, grid_ball_count, current_tick) =
         if let (true, Some(sys_id)) = (in_space, active_sys) {
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let view = sys_handle.view();
-            let obs_ship = session.ship_id.unwrap_or(0);
-            let registered = obs_ship > 0
-                && view
-                    .registered_observers
-                    .as_ref()
-                    .is_some_and(|set| set.contains(&obs_ship));
-            let mut visible: HashSet<i64> = view.static_ball_ids.iter().copied().collect();
-            if let Some(gid) = (obs_ship > 0).then(|| view.ball_grid_ids.get(&obs_ship)).flatten() {
-                if let Some(bubble) = view.grids.get(gid) {
-                    visible.extend(bubble.members.iter().copied());
+            if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+                let view = sys_handle.view();
+                let obs_ship = session.ship_id.unwrap_or(0);
+                let registered = obs_ship > 0
+                    && view
+                        .registered_observers
+                        .as_ref()
+                        .is_some_and(|set| set.contains(&obs_ship));
+                let mut visible: HashSet<i64> = view.static_ball_ids.iter().copied().collect();
+                if let Some(gid) = (obs_ship > 0).then(|| view.ball_grid_ids.get(&obs_ship)).flatten() {
+                    if let Some(bubble) = view.grids.get(gid) {
+                        visible.extend(bubble.members.iter().copied());
+                    }
                 }
+                (registered, visible.len(), view.current_tick)
+            } else {
+                (false, 0, 0)
             }
-            (registered, visible.len(), view.current_tick)
         } else {
             (false, 0, 0)
         };
@@ -1374,141 +1391,29 @@ pub(crate) fn handle_session_cmd(
     ]))
 }
 
-fn handle_backintime_cmd(
+fn handle_backintime_parsed(
     ctx: &ServerContext,
     cid: i64,
     cmd: &str,
+    _parsed: crate::router::slash_registry::BackInTimeSlashArgs,
 ) -> Result<PyRep, BridgeRpcError> {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    if parts.len() > 1 && !(parts.len() == 2 && parts[1].eq_ignore_ascii_case("me")) {
-        return Err(err("InvalidArguments", "Usage: /backintime"));
-    }
-
-    let now_ft = ctx.now_blueos_filetime_ticks();
-    let res = ctx.db.try_with_mut_snapshot(|snap| {
-        let Some(ch) = snap.characters.get_mut(&cid) else {
-            return Err(err("CharacterNotFound", format!("Character {cid} not found")));
-        };
-        let race_id = ch.race_id;
-        let active_ship_id = ch.active_ship_id;
-        let old_skill_ids: Vec<u32> = snap
-            .skills
-            .get(&cid)
-            .map(|m| m.keys().copied().collect())
-            .unwrap_or_default();
-
-        let mut starter_skills_map: HashMap<u32, TrainedSkillRecord> = HashMap::new();
-        let mut total_sp = 0.0;
-        if let Some(race) = ctx.sde.races.get(&race_id) {
-            for (&skill_id, &lvl) in &race.starter_skills {
-                if lvl > 0 {
-                    let rank = ctx
-                        .sde
-                        .types
-                        .get(&skill_id)
-                        .and_then(|t| {
-                            t.default_attributes
-                                .get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT)
-                                .copied()
-                        })
-                        .unwrap_or(1.0);
-                    let sp = (250.0
-                        * rank
-                        * 2.0_f64.powf(2.5 * (i32::from(lvl.min(5)) - 1) as f64))
-                    .ceil();
-                    total_sp += sp;
-                    starter_skills_map.insert(
-                        skill_id,
-                        TrainedSkillRecord {
-                            type_id: skill_id,
-                            level: lvl,
-                            skill_points: sp,
-                        },
-                    );
-                }
-            }
-        }
-        if starter_skills_map.is_empty() {
-            total_sp = 400_000.0;
-        }
-
-        let mut sorted_starter: Vec<TrainedSkillRecord> =
-            starter_skills_map.values().cloned().collect();
-        sorted_starter.sort_by_key(|s| s.type_id);
-        let starter_history: Vec<SkillHistoryEntry> = sorted_starter
-            .into_iter()
-            .map(|s| SkillHistoryEntry {
-                log_date_ft: now_ft,
-                event_type_id: SKILL_EVENT_CHAR_CREATION,
-                skill_type_id: s.type_id,
-                skill_level: s.level,
-                absolute_points: s.skill_points,
-            })
-            .collect();
-
-        let mut changed_tids: BTreeSet<u32> = old_skill_ids.iter().copied().collect();
-        changed_tids.extend(starter_skills_map.keys().copied());
-        let removed_count = old_skill_ids
-            .iter()
-            .filter(|tid| !starter_skills_map.contains_key(tid))
-            .count();
-        let starter_count = starter_skills_map.len();
-
-        ch.skill_points = total_sp;
-        ch.free_skill_points = 0.0;
-        if starter_skills_map.is_empty() {
-            snap.skills.remove(&cid);
-        } else {
-            snap.skills.insert(cid, starter_skills_map);
-        }
-        snap.skill_queues.remove(&cid);
-        snap.paused_skill_queues.remove(&cid);
-        if starter_history.is_empty() {
-            snap.skill_history.remove(&cid);
-        } else {
-            snap.skill_history.insert(cid, starter_history);
-        }
-
-        Ok((
-            race_id,
-            active_ship_id,
-            starter_count,
-            removed_count,
-            total_sp,
-            changed_tids.into_iter().collect::<Vec<u32>>(),
-        ))
-    })?;
-
-    let (race_id, active_ship_id, starter_count, removed_count, total_sp, changed_tids) = res;
-    crate::services::jump_clone_names::emit_server_skills_changed(
-        ctx,
-        cid,
-        &changed_tids,
-        Some("SkillReset"),
-    );
-    let _ = ctx.notify_new_skill_queue_saved(
-        cid,
-        crate::services::jump_clone_names::skill_queue_rowset(ctx, cid),
-    );
-    ctx.emit_typed(
-        NotificationTarget::Character(cid),
-        crate::router::notify_registry::OnFreeSkillPointsChanged {
-            new_free_skill_points: 0.0,
-        },
-    );
-    ctx.push_brain_update(cid);
-    if active_ship_id > 0 {
-        ctx.invalidate_and_push_fit(active_ship_id);
-    }
+    let outcome = crate::domain::skills::reset_character_skills_to_race_starter(ctx, cid)
+        .map_err(crate::services::domain_err_to_rpc)?;
 
     Ok(PyRep::keyval([
         ("command", PyRep::String(cmd.to_string())),
-        ("characterID", PyRep::Integer(cid)),
-        ("raceID", PyRep::Integer(i64::from(race_id))),
-        ("starterSkillCount", PyRep::Integer(starter_count as i64)),
-        ("removedSkillCount", PyRep::Integer(removed_count as i64)),
-        ("totalSkillPoints", PyRep::Real(total_sp)),
-        ("freeSkillPoints", PyRep::Real(0.0)),
+        ("characterID", PyRep::Integer(outcome.char_id)),
+        ("raceID", PyRep::Integer(i64::from(outcome.race_id))),
+        (
+            "starterSkillCount",
+            PyRep::Integer(outcome.starter_skill_count as i64),
+        ),
+        (
+            "removedSkillCount",
+            PyRep::Integer(outcome.removed_skill_count as i64),
+        ),
+        ("totalSkillPoints", PyRep::Real(outcome.total_skill_points)),
+        ("freeSkillPoints", PyRep::Real(outcome.free_skill_points)),
         ("queueLength", PyRep::Integer(0)),
     ]))
 }
@@ -1557,34 +1462,14 @@ pub(crate) fn derive_sde_wreck_loot(
     loot
 }
 
-pub(crate) async fn handle_spawnwreck_cmd(
+pub(crate) async fn handle_spawnwreck_parsed(
     ctx: &ServerContext,
     session: &SessionState,
     cid: i64,
     cmd: &str,
+    source_type_id: u32,
+    count: usize,
 ) -> Result<PyRep, BridgeRpcError> {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    let usage = "Usage: /spawnwreck <typeID> [count]";
-    let Some(source_type_id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()).filter(|&id| id > 0)
-    else {
-        return Err(err("InvalidArguments", usage));
-    };
-    if parts.len() > 3 {
-        return Err(err("InvalidArguments", usage));
-    }
-    let count = match parts.get(2) {
-        Some(raw) => match raw.parse::<usize>() {
-            Ok(n) if (1..=MAX_SPAWNWRECK_COUNT).contains(&n) => n,
-            _ => {
-                return Err(err(
-                    "InvalidArguments",
-                    format!("Count for /spawnwreck must be between 1 and {MAX_SPAWNWRECK_COUNT}"),
-                ));
-            }
-        },
-        None => 1,
-    };
-
     if !ctx.sde.types.contains_key(&source_type_id) {
         return Err(err(
             "TypeNotFound",
@@ -1593,7 +1478,12 @@ pub(crate) async fn handle_spawnwreck_cmd(
     }
 
     let (sys_id, ship_id) = resolve_gm_soak_space_ship(ctx, session, cid, "/spawnwreck")?;
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(err(
+            "ShipNotFound",
+            format!("Active ship {ship_id} is not present in solar system {sys_id}"),
+        ));
+    };
     let Some((_, ship_ball)) = sys_handle
         .get_ball_snapshot(ship_id)
         .await
@@ -1629,111 +1519,66 @@ pub(crate) async fn handle_spawnwreck_cmd(
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| format!("{source_name} Wreck"));
 
-    let mut spawned_wrecks: Vec<(i64, DVec3, Vec<(u32, i32)>)> = Vec::with_capacity(count);
+    let mut wreck_ids: Vec<i64> = Vec::with_capacity(count);
     let mut total_loot_items = 0_usize;
     let mut sample_loot_reps: Vec<PyRep> = Vec::new();
 
-    ctx.db.with_mut_snapshot(|snap| {
-        for idx in 0..count {
-            snap.next_entity_id += 1;
-            let wid = snap.next_entity_id;
-            let pos = origin + DVec3::new(1_800.0 + (idx as f64) * 350.0, 0.0, 0.0);
-            let loot = derive_sde_wreck_loot(
-                &ctx.sde,
-                source_type_id,
+    for idx in 0..count {
+        let pos = origin + DVec3::new(1_800.0 + (idx as f64) * 350.0, 0.0, 0.0);
+        let loot_entries: Vec<(u32, i32, bool)> = derive_sde_wreck_loot(
+            &ctx.sde,
+            source_type_id,
+            wreck_type_id,
+            splitmix64(base_seed ^ (idx as u64)),
+        )
+        .into_iter()
+        .map(|(tid, qty)| (tid, qty, false))
+        .collect();
+
+        let spawned = match crate::domain::combat_ops::spawn_wreck_with_loot_in_ballpark(
+            ctx,
+            &sys_handle,
+            crate::domain::combat_ops::SpawnWreckWithLootRequest {
+                solar_system_id: sys_id,
+                owner_char_id: cid,
+                pos,
+                now_unix,
                 wreck_type_id,
-                splitmix64(base_seed ^ (idx as u64)),
-            );
-
-            crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
-                snap, wid, now_unix, true,
-            );
-            snap.items.insert(
-                wid,
-                InventoryItemRecord {
-                    item_id: wid,
-                    type_id: wreck_type_id,
-                    owner_id: cid,
-                    location_id: i64::from(sys_id),
-                    flag: InventoryFlag::Cargo,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                },
-            );
-            snap.item_positions.insert(wid, pos.to_array());
-
-            for &(loot_tid, loot_qty) in &loot {
-                snap.next_entity_id += 1;
-                let lid = snap.next_entity_id;
-                snap.items.insert(
-                    lid,
-                    InventoryItemRecord {
-                        item_id: lid,
-                        type_id: loot_tid,
-                        owner_id: cid,
-                        location_id: wid,
-                        flag: InventoryFlag::Cargo,
-                        quantity: loot_qty.max(1),
-                        singleton: false,
-                        version: 1,
-                        dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                        is_blueprint_copy: false,
-                        blueprint_runs_remaining: None,
-                    },
-                );
-                total_loot_items += 1;
-                if sample_loot_reps.len() < 32 {
-                    sample_loot_reps.push(PyRep::keyval([
-                        ("wreckID", PyRep::Integer(wid)),
-                        ("itemID", PyRep::Integer(lid)),
-                        ("typeID", PyRep::Integer(i64::from(loot_tid))),
-                        ("quantity", PyRep::Integer(i64::from(loot_qty.max(1)))),
-                    ]));
+                loot_entries,
+                name_override: Some(wreck_name.clone()),
+            },
+        )
+        .await
+        {
+            Ok(out) => out,
+            Err(domain_err) => {
+                if !wreck_ids.is_empty() {
+                    let _ = crate::domain::combat_ops::despawn_entities_in_ballpark(
+                        ctx,
+                        Some(&sys_handle),
+                        &wreck_ids,
+                        true,
+                        false,
+                        None,
+                    )
+                    .await;
                 }
+                return Err(crate::services::domain_err_to_rpc(domain_err));
             }
-            spawned_wrecks.push((wid, pos, loot));
-        }
-    });
+        };
 
-    let mut wreck_ids: Vec<i64> = Vec::with_capacity(spawned_wrecks.len());
-    for (wid, pos, _) in spawned_wrecks {
-        let _ = sys_handle
-            .spawn_ball_with_meta(
-                Ball {
-                    id: wid,
-                    type_id: wreck_type_id,
-                    position: pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 50_000.0,
-                    radius: 30.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                ctx.build_type_combat_state(wreck_type_id),
-                SlimItemMeta {
-                    group_id: wreck_sde.map(|t| t.group_id).unwrap_or(GROUP_WRECK),
-                    category_id: wreck_sde.map(|t| t.category_id).unwrap_or(2),
-                    owner_id: cid,
-                    char_id: None,
-                    corp_id: -1,
-                    alliance_id: -1,
-                    security_status: 0.0,
-                    is_cloaked: false,
-                    name: Some(wreck_name.clone()),
-                    ..Default::default()
-                },
-            )
-            .await;
+        let wid = spawned.wreck_id;
+        for item in spawned.loot_items {
+            total_loot_items += 1;
+            if sample_loot_reps.len() < 32 {
+                sample_loot_reps.push(PyRep::keyval([
+                    ("wreckID", PyRep::Integer(wid)),
+                    ("itemID", PyRep::Integer(item.item_id)),
+                    ("typeID", PyRep::Integer(i64::from(item.type_id))),
+                    ("quantity", PyRep::Integer(i64::from(item.quantity))),
+                ]));
+            }
+        }
         crate::services::combat_crimewatch::combat_wrecks_killmails::register_container_lifetime(
             ctx,
             wid,
@@ -1771,7 +1616,8 @@ pub(crate) fn dispatch_soak_slash<'a>(
 ) -> SlashBoxFuture<'a> {
     Box::pin(async move {
         let (_, cid) = ServerContext::require_character(session)?;
-        handle_soak_cmd(ctx, session, cid, inv.raw).await
+        let parsed = crate::router::slash_registry::parse_soak_slash_args(inv.rest)?;
+        handle_soak_parsed(ctx, session, cid, inv.raw, parsed).await
     })
 }
 
@@ -1783,7 +1629,8 @@ pub(crate) fn dispatch_deadwarp_slash<'a>(
 ) -> SlashBoxFuture<'a> {
     Box::pin(async move {
         let (_, cid) = ServerContext::require_character(session)?;
-        handle_deadwarp_cmd(ctx, session, cid, inv.raw).await
+        let parsed = crate::router::slash_registry::parse_deadwarp_slash_args(inv.rest)?;
+        handle_deadwarp_parsed(ctx, session, cid, inv.raw, parsed).await
     })
 }
 
@@ -1795,7 +1642,8 @@ pub(crate) fn dispatch_sysjunkclear_slash<'a>(
 ) -> SlashBoxFuture<'a> {
     Box::pin(async move {
         let (_, cid) = ServerContext::require_character(session)?;
-        handle_sysjunkclear_cmd(ctx, session, cid, inv.raw).await
+        let parsed = crate::router::slash_registry::parse_sysjunkclear_slash_args(inv.rest)?;
+        handle_sysjunkclear_parsed(ctx, session, cid, inv.raw, parsed).await
     })
 }
 
@@ -1806,7 +1654,8 @@ pub(crate) fn dispatch_backintime_slash(
     inv: &SlashInvocation<'_>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, cid) = ServerContext::require_character(session)?;
-    handle_backintime_cmd(ctx, cid, inv.raw)
+    let parsed = crate::router::slash_registry::parse_backintime_slash_args(inv.rest)?;
+    handle_backintime_parsed(ctx, cid, inv.raw, parsed)
 }
 
 fn step_deadwarps_for_system(ctx: &ServerContext, solar_system_id: u32) {
@@ -1821,7 +1670,9 @@ fn step_deadwarps_for_system(ctx: &ServerContext, solar_system_id: u32) {
         return;
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) else {
+        return;
+    };
     let now_unix = ctx.now_unix();
     let ball_snaps: HashMap<i64, (DVec3, bool)> = {
         let view = sys_handle.view();
@@ -1924,7 +1775,9 @@ fn step_logi_soak_for_system(ctx: &ServerContext, solar_system_id: u32) {
         return;
     };
 
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) else {
+        return;
+    };
     let now_unix = ctx.now_unix();
     let (bp_tick, target_pos_opt, target_in_warp, live_npcs) = {
         let view = sys_handle.view();
