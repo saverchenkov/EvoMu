@@ -394,6 +394,10 @@ pub async fn step_bosonic_doomsday_system(ctx: &ServerContext, sys_id: u32) {
         return;
     }
     let now_unix = ctx.now_unix_secs();
+    // Resolve system TiDi outside the DB snapshot write lock to preserve lock hierarchy
+    // (`Systems -> ServiceState -> Database Snapshot`).
+    let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id)
+        .clamp(0.10, 1.0);
     let pending_batches: Vec<(usize, PersistedSuperweaponCycle, usize, usize)> =
         mutate_superweapon_runtime(&ctx.db, |rt| {
             let mut batches = Vec::new();
@@ -401,8 +405,6 @@ pub async fn step_bosonic_doomsday_system(ctx: &ServerContext, sys_id: u32) {
                 if cycle.sys_id != sys_id {
                     continue;
                 }
-                let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id)
-                    .clamp(0.10, 1.0);
                 let elapsed = now_unix.saturating_sub(cycle.started_at_unix);
                 if elapsed >= cycle.warmup_secs && cycle.ticks_applied < cycle.total_ticks {
                     let prev_ticks = cycle.ticks_applied;
