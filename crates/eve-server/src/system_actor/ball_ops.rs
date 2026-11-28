@@ -115,7 +115,8 @@ async fn await_actor_cmd_on_channels<T>(
     cmd: SystemCommand,
     rx: oneshot::Receiver<T>,
 ) -> Result<T, String> {
-    if let Some(cb_tx) = worker_cb_tx.filter(|_| !matches!(cmd, SystemCommand::ShutdownActor { .. }))
+    let send_fut_opt = if let Some(cb_tx) =
+        worker_cb_tx.filter(|_| !matches!(cmd, SystemCommand::ShutdownActor { .. }))
     {
         if cb_tx.is_closed()
             || cb_tx
@@ -124,13 +125,25 @@ async fn await_actor_cmd_on_channels<T>(
         {
             return Err(format!("system {solar_system_id} actor closed"));
         }
+        None
     } else {
         if cmd_sender.is_closed()
             || shutting_down.is_some_and(|s| s.load(std::sync::atomic::Ordering::SeqCst))
         {
             return Err(format!("system {solar_system_id} actor closed"));
         }
-        match tokio::time::timeout(timeout_dur, cmd_sender.send(cmd)).await {
+        match cmd_sender.try_send(cmd) {
+            Ok(()) => None,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                return Err(format!("system {solar_system_id} actor closed"));
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(c)) => {
+                Some(Box::pin(cmd_sender.send(c)))
+            }
+        }
+    };
+    if let Some(send_fut) = send_fut_opt {
+        match tokio::time::timeout(timeout_dur, send_fut).await {
             Err(_) => {
                 return Err(format!(
                     "system {solar_system_id} actor timed out queuing {label} after {}ms",
@@ -2237,9 +2250,9 @@ mod tests {
             system_step_hook: Arc::new(RankedRwLock::new(None)),
             post_unlock_actions: Arc::new(RankedMutex::new(Vec::new())),
             post_unlock_actions_in_flight: Arc::new(AtomicUsize::new(0)),
-            post_unlock_fallback_drain_lock: Arc::new(std::sync::Mutex::new(())),
-            post_unlock_fallback_owner_tid: Arc::new(std::sync::Mutex::new(None)),
-            post_unlock_fallback_scheduled: Arc::new(AtomicBool::new(false)),
+            post_unlock_fallback: Arc::new(
+                crate::system_actor::post_unlock::FallbackCoordinator::new(),
+            ),
             actor_shutting_down: Arc::new(AtomicBool::new(false)),
             published_live: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cooldown_persist_gate: Arc::new(crate::system_actor::CooldownPersistGate::default()),

@@ -359,6 +359,7 @@ impl SystemHandle {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .is_empty()
+            || self.post_unlock_fallback.has_pending_work()
     }
 
     #[inline]
@@ -384,30 +385,39 @@ impl SystemHandle {
         &self.cmd_tx
     }
 
-    pub(in crate::system_actor) async fn send_actor_cmd(
+    pub(in crate::system_actor) fn send_actor_cmd(
         &self,
         cmd: SystemCommand,
-    ) -> Result<(), mpsc::error::SendError<SystemCommand>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), mpsc::error::SendError<SystemCommand>>> + Send + '_>,
+    > {
         assert_no_locks_held();
         if self.is_on_post_unlock_callback_thread()
             && !matches!(cmd, SystemCommand::ShutdownActor { .. })
         {
-            if self.worker_cb_tx.is_closed() {
-                return Err(mpsc::error::SendError(cmd));
+            let res = if self.worker_cb_tx.is_closed() {
+                Err(mpsc::error::SendError(cmd))
+            } else {
+                self.worker_cb_tx
+                    .send(super::post_unlock::PostUnlockActorCallback::ActorCmd(Box::new(cmd)))
+                    .map_err(|mpsc::error::SendError(cb)| match cb {
+                        super::post_unlock::PostUnlockActorCallback::ActorCmd(boxed) => {
+                            mpsc::error::SendError(*boxed)
+                        }
+                        _ => unreachable!(),
+                    })
+            };
+            return Box::pin(std::future::ready(res));
+        }
+        if self.is_actor_closed() {
+            return Box::pin(std::future::ready(Err(mpsc::error::SendError(cmd))));
+        }
+        match self.cmd_tx.try_send(cmd) {
+            Ok(()) => Box::pin(std::future::ready(Ok(()))),
+            Err(mpsc::error::TrySendError::Closed(c)) => {
+                Box::pin(std::future::ready(Err(mpsc::error::SendError(c))))
             }
-            self.worker_cb_tx
-                .send(super::post_unlock::PostUnlockActorCallback::ActorCmd(Box::new(cmd)))
-                .map_err(|mpsc::error::SendError(cb)| match cb {
-                    super::post_unlock::PostUnlockActorCallback::ActorCmd(boxed) => {
-                        mpsc::error::SendError(*boxed)
-                    }
-                    _ => unreachable!(),
-                })
-        } else {
-            if self.is_actor_closed() {
-                return Err(mpsc::error::SendError(cmd));
-            }
-            self.cmd_tx.send(cmd).await
+            Err(mpsc::error::TrySendError::Full(c)) => Box::pin(self.cmd_tx.send(c)),
         }
     }
 
@@ -2301,10 +2311,7 @@ pub struct SystemHandle {
     pub(crate) system_step_hook: Arc<RankedRwLock<Option<super::SystemStepHook>, RANK_LEAF>>,
     pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<super::PostUnlockHookAction>, RANK_LEAF>>,
     pub(in crate::system_actor) post_unlock_actions_in_flight: Arc<std::sync::atomic::AtomicUsize>,
-    pub(in crate::system_actor) post_unlock_fallback_drain_lock: Arc<std::sync::Mutex<()>>,
-    pub(in crate::system_actor) post_unlock_fallback_owner_tid:
-        Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
-    pub(in crate::system_actor) post_unlock_fallback_scheduled: Arc<std::sync::atomic::AtomicBool>,
+    pub(in crate::system_actor) post_unlock_fallback: Arc<super::post_unlock::FallbackCoordinator>,
     pub(in crate::system_actor) actor_shutting_down: Arc<std::sync::atomic::AtomicBool>,
     pub(in crate::system_actor) published_live: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) cooldown_persist_gate: Arc<super::CooldownPersistGate>,

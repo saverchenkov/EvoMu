@@ -1451,42 +1451,18 @@ impl SystemHandle {
     }
 
     async fn drain_closed_worker_fallback_if_pending(&self) {
-        let has_pending_fallback = self
-            .post_unlock_actions_in_flight
-            .load(std::sync::atomic::Ordering::SeqCst)
-            > 0
-            || !self
-                .post_unlock_actions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_empty();
-        if !has_pending_fallback {
-            return;
-        }
-        let drain_lock = Arc::clone(&self.post_unlock_fallback_drain_lock);
-        let owner_tid = Arc::clone(&self.post_unlock_fallback_owner_tid);
+        let fallback = Arc::clone(&self.post_unlock_fallback);
         let actions = Arc::clone(&self.post_unlock_actions);
-        let scheduled = Arc::clone(&self.post_unlock_fallback_scheduled);
+        let actions_in_flight = Arc::clone(&self.post_unlock_actions_in_flight);
         let command_panics = Arc::clone(&self.command_panics);
         let solar_system_id = self.solar_system_id;
         let _ = tokio::task::spawn_blocking(move || {
-            let _drain_guard = drain_lock.lock().unwrap_or_else(|e| e.into_inner());
-            let _owner_guard = post_unlock::FallbackOwnerGuard::enter(owner_tid);
-            loop {
-                let _ = crate::system_actor::ewar_cooldowns::flush_post_unlock_actions_catching(
-                    &actions,
-                    solar_system_id,
-                    &command_panics,
-                );
-                scheduled.store(false, std::sync::atomic::Ordering::SeqCst);
-                let still_empty = actions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .is_empty();
-                if still_empty || scheduled.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    break;
-                }
-            }
+            fallback.drain_closed_worker_blocking(
+                solar_system_id,
+                &actions,
+                &actions_in_flight,
+                &command_panics,
+            );
         })
         .await;
     }

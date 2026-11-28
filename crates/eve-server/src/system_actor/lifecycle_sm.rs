@@ -1151,8 +1151,17 @@ impl SystemRegistry {
     ) {
         self.clear_db_ballpark_for_handle(solar_system_id, &handle);
         let post_unlock = Arc::clone(&handle.post_unlock_actions);
+        let fallback = Arc::clone(&handle.post_unlock_fallback);
+        let in_flight = Arc::clone(&handle.post_unlock_actions_in_flight);
+        let panics = Arc::clone(&handle.command_panics);
         drop(handle);
-        super::flush_post_unlock_actions(&post_unlock);
+        fallback.drain_synchronously_on_shutdown(
+            solar_system_id,
+            &post_unlock,
+            &in_flight,
+            &panics,
+            true,
+        );
         self.finish_stopping_slot(solar_system_id, generation, gate, "reclaim_dead_live_to_cold");
     }
 
@@ -1185,18 +1194,30 @@ impl SystemRegistry {
             .send(SystemCommand::ShutdownActor { reply: tx })
             .await
             .is_ok();
-        let post_unlock_actions = cleanup.handle.take().map(|handle| {
+        let post_unlock_cleanup = cleanup.handle.take().map(|handle| {
             self.clear_db_ballpark_for_handle(solar_system_id, &handle);
             let post_unlock_actions = Arc::clone(&handle.post_unlock_actions);
+            let fallback = Arc::clone(&handle.post_unlock_fallback);
+            let in_flight = Arc::clone(&handle.post_unlock_actions_in_flight);
+            let panics = Arc::clone(&handle.command_panics);
             drop(handle);
-            post_unlock_actions
+            (post_unlock_actions, fallback, in_flight, panics)
         });
         if sent {
             let _ = rx.await;
         }
         cmd_tx.closed().await;
-        if let Some(post_unlock_actions) = post_unlock_actions {
-            super::flush_post_unlock_actions(&post_unlock_actions);
+        if let Some((post_unlock_actions, fallback, in_flight, panics)) = post_unlock_cleanup {
+            let _ = tokio::task::spawn_blocking(move || {
+                fallback.drain_synchronously_on_shutdown(
+                    solar_system_id,
+                    &post_unlock_actions,
+                    &in_flight,
+                    &panics,
+                    true,
+                );
+            })
+            .await;
         }
         if origin.reclaim_transient() {
             self.reclaim_transient_items_in_db(solar_system_id);

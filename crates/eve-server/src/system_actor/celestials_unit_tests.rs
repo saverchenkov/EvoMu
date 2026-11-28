@@ -660,9 +660,7 @@ fn make_dummy_system_handle(cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>) ->
         system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
         post_unlock_actions_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        post_unlock_fallback_drain_lock: Arc::new(std::sync::Mutex::new(())),
-        post_unlock_fallback_owner_tid: Arc::new(std::sync::Mutex::new(None)),
-        post_unlock_fallback_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        post_unlock_fallback: Arc::new(crate::system_actor::post_unlock::FallbackCoordinator::new()),
         actor_shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         published_live: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cooldown_persist_gate: Arc::new(super::super::CooldownPersistGate::default()),
@@ -3046,4 +3044,199 @@ async fn arch_1342_4d5_callback_barrier_reentrancy_and_external_isolation_mt_and
         ct_join.is_ok(),
         "CurrentThread callback reentrancy test must complete without deadlock"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4d5_closed_worker_fifo_fallback_and_barrier_ordering_without_pre_sync() {
+    use std::sync::atomic::Ordering;
+
+    let ctx = test_ctx();
+    let h = ctx.systems.get_or_spawn(30_000_142);
+    let ball_a = 799_921_i64;
+    h.try_spawn_ball_with_meta(
+        make_ball(ball_a, 587, DVec3::ZERO),
+        make_combat_state(100.0, 100.0, 100.0, 100.0),
+        SlimItemMeta {
+            char_id: Some(90_000_802),
+            ..Default::default()
+        },
+    );
+
+    let _ = h.post_unlock_tx.send(crate::system_actor::post_unlock::PostUnlockMsg::Shutdown);
+    for _ in 0..100 {
+        if h.post_unlock_tx.is_closed() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(h.post_unlock_tx.is_closed());
+
+    let (gate_tx, gate_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let gate_rx = Arc::new(std::sync::Mutex::new(gate_rx));
+    let order = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+
+    // Intentionally do NOT pre-sync on fallback worker entry (`entered_rx`) so we also
+    // exercise `InFlightActionsGuard` / `FallbackCoordinator` ordering before thread startup.
+    let order_1 = Arc::clone(&order);
+    let gate_1 = Arc::clone(&gate_rx);
+    h.enqueue_post_unlock_action(Box::new(move || {
+        order_1.lock().unwrap().push(1);
+        let _ = gate_1.lock().unwrap().recv();
+    }));
+
+    let order_2 = Arc::clone(&order);
+    h.enqueue_post_unlock_action(Box::new(move || {
+        order_2.lock().unwrap().push(2);
+    }));
+
+    let rm_fut = tokio::task::spawn_blocking({
+        let h_rm = h.clone();
+        move || h_rm.remove_ball_sync(ball_a)
+    });
+    let barrier_fut = tokio::spawn({
+        let h_bar = h.clone();
+        async move { h_bar.wait_for_post_unlock_barrier().await }
+    });
+    let step_fut = tokio::spawn({
+        let h_step = h.clone();
+        async move { h_step.step_manual(0.1).await }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert!(
+        !rm_fut.is_finished(),
+        "remove_ball_sync barrier must not overtake blocked closed-worker fallback"
+    );
+    assert!(
+        !barrier_fut.is_finished(),
+        "wait_for_post_unlock_barrier must wait for fallback runner completion"
+    );
+    assert!(
+        !step_fut.is_finished(),
+        "step_manual must wait for closed-worker fallback drain"
+    );
+
+    let order_3 = Arc::clone(&order);
+    h.enqueue_post_unlock_action(Box::new(move || {
+        order_3.lock().unwrap().push(3);
+    }));
+
+    gate_tx.send(()).unwrap();
+    let rm_res = tokio::time::timeout(std::time::Duration::from_secs(2), rm_fut)
+        .await
+        .expect("remove_ball_sync must finish after fallback unblocks")
+        .unwrap();
+    assert!(rm_res.is_ok_and(|b| b.is_some()));
+    let barrier_res = tokio::time::timeout(std::time::Duration::from_secs(2), barrier_fut)
+        .await
+        .expect("barrier must finish after fallback unblocks")
+        .unwrap();
+    assert!(!barrier_res);
+    let step_res = tokio::time::timeout(std::time::Duration::from_secs(2), step_fut)
+        .await
+        .expect("step_manual must finish after fallback unblocks")
+        .unwrap();
+    assert!(step_res.is_ok());
+
+    let observed = order.lock().unwrap().clone();
+    assert_eq!(observed, vec![1, 2, 3]);
+    assert_eq!(h.post_unlock_actions_in_flight.load(Ordering::SeqCst), 0);
+    assert!(h.view().ball(ball_a).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4d5_mid_shutdown_worker_drain_serializes_fallback_and_barrier() {
+    use std::sync::atomic::Ordering;
+
+    let ctx = test_ctx();
+    let h = ctx.systems.get_or_spawn(30_000_142);
+    let log = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+
+    let (act1_entered_tx, act1_entered_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (act1_release_tx, act1_release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let act1_release_rx = Arc::new(std::sync::Mutex::new(act1_release_rx));
+
+    let (drain_entered_tx, drain_entered_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (drain_release_tx, drain_release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let drain_release_rx = Arc::new(std::sync::Mutex::new(drain_release_rx));
+
+    // Action #1 pauses the worker while handling FlushActions.
+    let log_1 = Arc::clone(&log);
+    h.enqueue_post_unlock_action(Box::new(move || {
+        log_1.lock().unwrap().push(1);
+        let _ = act1_entered_tx.send(());
+        let _ = act1_release_rx.lock().unwrap().recv();
+    }));
+    tokio::task::spawn_blocking(move || {
+        act1_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("action 1 entered worker");
+    })
+    .await
+    .unwrap();
+
+    // Queue Shutdown BEFORE Work(#2) while Action #1 blocks FlushActions, so Shutdown runs first,
+    // acquires `drain_lock`, sets `worker_draining`, closes `post_unlock_rx`, and then drains
+    // Work(#2) from `try_recv()` while holding `drain_lock` with `post_unlock_tx.is_closed()`.
+    h.post_unlock_tx
+        .send(crate::system_actor::post_unlock::PostUnlockMsg::Shutdown)
+        .unwrap();
+    let log_2 = Arc::clone(&log);
+    h.post_unlock_tx
+        .send(crate::system_actor::post_unlock::PostUnlockMsg::Work(
+            crate::system_actor::post_unlock::PostUnlockWorkItem {
+                db_opt: None,
+                sde_opt: None,
+                ops: crate::system_actor::post_unlock::PostUnlockOps::default(),
+                replies: vec![Box::new(move || {
+                    log_2.lock().unwrap().push(2);
+                    let _ = drain_entered_tx.send(());
+                    let _ = drain_release_rx.lock().unwrap().recv();
+                })],
+                in_flight_guard: None,
+                work_seq: 0,
+            },
+        ))
+        .unwrap();
+    act1_release_tx.send(()).unwrap();
+
+    tokio::task::spawn_blocking(move || {
+        drain_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("worker entered Shutdown drain action 2");
+    })
+    .await
+    .unwrap();
+    assert!(h.post_unlock_tx.is_closed());
+    assert!(h.has_in_flight_post_unlock());
+
+    // Enqueue Action #3 via public handle while worker is mid-shutdown-drain (`drain_lock` held).
+    let log_3 = Arc::clone(&log);
+    h.enqueue_post_unlock_action(Box::new(move || {
+        log_3.lock().unwrap().push(3);
+    }));
+    let barrier_fut = tokio::spawn({
+        let h_bar = h.clone();
+        async move { h_bar.wait_for_post_unlock_barrier().await }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![1, 2],
+        "fallback runner must wait on drain_lock until worker finishes Shutdown drain"
+    );
+    assert!(
+        !barrier_fut.is_finished(),
+        "wait_for_post_unlock_barrier must block while worker is mid-shutdown-drain"
+    );
+
+    drain_release_tx.send(()).unwrap();
+    let bar_ok = tokio::time::timeout(std::time::Duration::from_secs(2), barrier_fut)
+        .await
+        .expect("barrier must finish after Shutdown drain completes")
+        .unwrap();
+    assert!(!bar_ok);
+    assert_eq!(*log.lock().unwrap(), vec![1, 2, 3]);
+    assert_eq!(h.post_unlock_actions_in_flight.load(Ordering::SeqCst), 0);
 }

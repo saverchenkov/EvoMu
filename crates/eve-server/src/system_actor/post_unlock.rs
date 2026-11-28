@@ -1938,6 +1938,13 @@ pub(in crate::system_actor) fn enqueue_barrier_under_locks(handle: &super::Syste
 
 struct InFlightActionsGuard(Arc<AtomicUsize>);
 
+impl InFlightActionsGuard {
+    fn enter(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
 impl Drop for InFlightActionsGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
@@ -1961,173 +1968,405 @@ impl Drop for FallbackOwnerGuard {
     }
 }
 
-struct UnsentFallbackCtx {
-    post_commit_targets: PostCommitActorTargets,
-    completed_post_unlock_seq: Arc<AtomicU64>,
-    deact_lock: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
-    lock_lock: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
+pub(in crate::system_actor) struct UnsentFallbackCtx {
+    pub(in crate::system_actor) post_commit_targets: PostCommitActorTargets,
+    pub(in crate::system_actor) completed_post_unlock_seq: Arc<AtomicU64>,
+    pub(in crate::system_actor) deact_lock: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
+    pub(in crate::system_actor) lock_lock: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn spawn_fallback_thread_impl(
-    solar_system_id: SolarSystemId,
+struct FallbackWorkEntry {
+    seq: u64,
     unsent_ctx: Option<UnsentFallbackCtx>,
-    post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
-    post_unlock_actions_in_flight: Arc<AtomicUsize>,
-    fallback_drain_lock: Arc<std::sync::Mutex<()>>,
-    fallback_owner_tid: Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
-    fallback_scheduled: Arc<AtomicBool>,
-    command_panics: Arc<AtomicU64>,
-    actor_rt_handle: Option<tokio::runtime::Handle>,
     items: Vec<PostUnlockWorkItem>,
     deferred_db_replies: Vec<Box<dyn FnOnce() + Send>>,
-) {
-    let reset_scheduled_on_err = unsent_ctx.is_none();
-    post_unlock_actions_in_flight.fetch_add(1, Ordering::SeqCst);
-    let in_flight_for_thread = Arc::clone(&post_unlock_actions_in_flight);
-    let fallback_scheduled_for_thread = Arc::clone(&fallback_scheduled);
-    let spawn_res = std::thread::Builder::new()
-        .name(format!("post-unlock-fallback-{solar_system_id}"))
-        .spawn(move || {
-            let _in_flight_guard = InFlightActionsGuard(in_flight_for_thread);
-            let _drain_guard = fallback_drain_lock.lock().unwrap_or_else(|e| e.into_inner());
-            let _owner_guard = FallbackOwnerGuard::enter(fallback_owner_tid);
-            if let Some(ctx) = unsent_ctx {
-                if !items.is_empty() {
-                    let deact_g = ctx.deact_lock.read().unwrap_or_else(|e| e.into_inner()).clone();
-                    let lock_g = ctx.lock_lock.read().unwrap_or_else(|e| e.into_inner()).clone();
-                    let sink = ActorCallbackSink::Worker(&ctx.post_commit_targets);
-                    for mut unsent in items {
-                        let work_seq = unsent.work_seq;
-                        let replies_fallback = std::mem::take(&mut unsent.replies);
-                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            execute_unsent_work_item_direct(
-                                sink,
-                                &ctx.completed_post_unlock_seq,
-                                deact_g.as_ref(),
-                                lock_g.as_ref(),
-                                actor_rt_handle.as_ref(),
-                                unsent,
-                            )
-                        }));
-                        match outcome {
-                            Ok(extra_replies) => {
-                                for send_reply in replies_fallback { send_reply(); }
-                                for send_reply in extra_replies { send_reply(); }
+}
+
+struct FallbackCoordinatorState {
+    next_seq: u64,
+    completed_seq: u64,
+    queue: std::collections::VecDeque<FallbackWorkEntry>,
+    runner_active: bool,
+}
+
+/// Shared FIFO fallback coordinator serializing closed-worker `PostUnlockWorkItem`s, barrier
+/// replies, `post_unlock_actions`, and `post_unlock_worker` shutdown draining (`#1342` Track 4D-5).
+pub(in crate::system_actor) struct FallbackCoordinator {
+    pub(in crate::system_actor) drain_lock: std::sync::Mutex<()>,
+    pub(in crate::system_actor) owner_tid: Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
+    pub(in crate::system_actor) worker_draining: std::sync::atomic::AtomicBool,
+    state: std::sync::Mutex<FallbackCoordinatorState>,
+    done_cv: std::sync::Condvar,
+}
+
+impl FallbackCoordinator {
+    pub(in crate::system_actor) fn new() -> Self {
+        Self {
+            drain_lock: std::sync::Mutex::new(()),
+            owner_tid: Arc::new(std::sync::Mutex::new(None)),
+            worker_draining: std::sync::atomic::AtomicBool::new(false),
+            state: std::sync::Mutex::new(FallbackCoordinatorState {
+                next_seq: 0,
+                completed_seq: 0,
+                queue: std::collections::VecDeque::new(),
+                runner_active: false,
+            }),
+            done_cv: std::sync::Condvar::new(),
+        }
+    }
+
+    pub(in crate::system_actor) fn is_current_thread_owner(&self) -> bool {
+        self.owner_tid
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some_and(|tid| tid == std::thread::current().id())
+    }
+
+    pub(in crate::system_actor) fn has_pending_work(&self) -> bool {
+        if self.worker_draining.load(Ordering::SeqCst) {
+            return true;
+        }
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.runner_active || !st.queue.is_empty()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::system_actor) fn enqueue_unsent_or_barrier(
+        self: &Arc<Self>,
+        unsent_ctx: UnsentFallbackCtx,
+        post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+        post_unlock_actions_in_flight: Arc<AtomicUsize>,
+        command_panics: Arc<AtomicU64>,
+        actor_rt_handle: Option<tokio::runtime::Handle>,
+        items: Vec<PostUnlockWorkItem>,
+        deferred_db_replies: Vec<Box<dyn FnOnce() + Send>>,
+    ) {
+        let solar_system_id = unsent_ctx.post_commit_targets.solar_system_id;
+        let need_spawn = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.next_seq = st.next_seq.saturating_add(1);
+            let seq = st.next_seq;
+            st.queue.push_back(FallbackWorkEntry {
+                seq,
+                unsent_ctx: Some(unsent_ctx),
+                items,
+                deferred_db_replies,
+            });
+            if !st.runner_active {
+                st.runner_active = true;
+                post_unlock_actions_in_flight.fetch_add(1, Ordering::SeqCst);
+                true
+            } else {
+                false
+            }
+        };
+        if need_spawn {
+            self.spawn_runner_thread(
+                solar_system_id,
+                post_unlock_actions,
+                post_unlock_actions_in_flight,
+                command_panics,
+                actor_rt_handle,
+            );
+        }
+    }
+
+    pub(in crate::system_actor) fn ensure_actions_runner(
+        self: &Arc<Self>,
+        solar_system_id: SolarSystemId,
+        post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+        post_unlock_actions_in_flight: Arc<AtomicUsize>,
+        command_panics: Arc<AtomicU64>,
+    ) {
+        let need_spawn = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.next_seq = st.next_seq.saturating_add(1);
+            if !st.runner_active {
+                st.runner_active = true;
+                post_unlock_actions_in_flight.fetch_add(1, Ordering::SeqCst);
+                true
+            } else {
+                false
+            }
+        };
+        if need_spawn {
+            self.spawn_runner_thread(
+                solar_system_id,
+                post_unlock_actions,
+                post_unlock_actions_in_flight,
+                command_panics,
+                None,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::system_actor) fn enqueue_barrier_if_busy(
+        self: &Arc<Self>,
+        unsent_ctx: UnsentFallbackCtx,
+        post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+        post_unlock_actions_in_flight: Arc<AtomicUsize>,
+        command_panics: Arc<AtomicU64>,
+        actor_rt_handle: Option<tokio::runtime::Handle>,
+        deferred_db_replies: Vec<Box<dyn FnOnce() + Send>>,
+    ) -> Option<Vec<Box<dyn FnOnce() + Send>>> {
+        let solar_system_id = unsent_ctx.post_commit_targets.solar_system_id;
+        let (unsent_back, need_spawn) = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let actions_non_empty = !post_unlock_actions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty();
+            let actions_in_flight = post_unlock_actions_in_flight.load(Ordering::SeqCst) > 0;
+            let worker_draining = self.worker_draining.load(Ordering::SeqCst);
+            if !st.runner_active
+                && st.queue.is_empty()
+                && !actions_non_empty
+                && !actions_in_flight
+                && !worker_draining
+            {
+                (Some(deferred_db_replies), false)
+            } else {
+                st.next_seq = st.next_seq.saturating_add(1);
+                let seq = st.next_seq;
+                st.queue.push_back(FallbackWorkEntry {
+                    seq,
+                    unsent_ctx: Some(unsent_ctx),
+                    items: Vec::new(),
+                    deferred_db_replies,
+                });
+                let spawn = if !st.runner_active {
+                    st.runner_active = true;
+                    post_unlock_actions_in_flight.fetch_add(1, Ordering::SeqCst);
+                    true
+                } else {
+                    false
+                };
+                (None, spawn)
+            }
+        };
+        if need_spawn {
+            self.spawn_runner_thread(
+                solar_system_id,
+                post_unlock_actions,
+                post_unlock_actions_in_flight,
+                command_panics,
+                actor_rt_handle,
+            );
+        }
+        unsent_back
+    }
+
+    pub(in crate::system_actor) fn drain_closed_worker_blocking(
+        &self,
+        solar_system_id: SolarSystemId,
+        post_unlock_actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+        post_unlock_actions_in_flight: &Arc<AtomicUsize>,
+        command_panics: &Arc<AtomicU64>,
+    ) {
+        let _in_flight_guard =
+            InFlightActionsGuard::enter(Arc::clone(post_unlock_actions_in_flight));
+        let target_seq = self.state.lock().unwrap_or_else(|e| e.into_inner()).next_seq;
+        {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            while st.runner_active && st.completed_seq < target_seq {
+                st = self.done_cv.wait(st).unwrap_or_else(|e| e.into_inner());
+            }
+        }
+        let _drain_guard = self.drain_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _owner_guard = FallbackOwnerGuard::enter(Arc::clone(&self.owner_tid));
+        let _ = super::ewar_cooldowns::flush_post_unlock_actions_catching(
+            post_unlock_actions,
+            solar_system_id,
+            command_panics,
+        );
+        drop(_owner_guard);
+        drop(_drain_guard);
+        drop(_in_flight_guard);
+    }
+
+    pub(in crate::system_actor) fn drain_synchronously_on_shutdown(
+        &self,
+        solar_system_id: SolarSystemId,
+        post_unlock_actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+        post_unlock_actions_in_flight: &Arc<AtomicUsize>,
+        command_panics: &Arc<AtomicU64>,
+        wait_for_runner: bool,
+    ) {
+        if wait_for_runner {
+            self.drain_closed_worker_blocking(
+                solar_system_id,
+                post_unlock_actions,
+                post_unlock_actions_in_flight,
+                command_panics,
+            );
+            return;
+        }
+        let Ok(_drain_guard) = self.drain_lock.try_lock() else {
+            return;
+        };
+        let _in_flight_guard =
+            InFlightActionsGuard::enter(Arc::clone(post_unlock_actions_in_flight));
+        let _owner_guard = FallbackOwnerGuard::enter(Arc::clone(&self.owner_tid));
+        let _ = super::ewar_cooldowns::flush_post_unlock_actions_catching(
+            post_unlock_actions,
+            solar_system_id,
+            command_panics,
+        );
+    }
+
+    fn spawn_runner_thread(
+        self: &Arc<Self>,
+        solar_system_id: SolarSystemId,
+        post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
+        post_unlock_actions_in_flight: Arc<AtomicUsize>,
+        command_panics: Arc<AtomicU64>,
+        actor_rt_handle: Option<tokio::runtime::Handle>,
+    ) {
+        let fallback = Arc::clone(self);
+        let in_flight_for_thread = Arc::clone(&post_unlock_actions_in_flight);
+        let spawn_res = std::thread::Builder::new()
+            .name(format!("post-unlock-fallback-{solar_system_id}"))
+            .spawn(move || {
+                struct RunnerResetGuard {
+                    fallback: Arc<FallbackCoordinator>,
+                    in_flight: Arc<AtomicUsize>,
+                    active: bool,
+                }
+                impl Drop for RunnerResetGuard {
+                    fn drop(&mut self) {
+                        if self.active {
+                            {
+                                let mut st = self.fallback.state.lock().unwrap_or_else(|e| e.into_inner());
+                                st.runner_active = false;
+                                st.completed_seq = st.next_seq;
                             }
-                            Err(panic_payload) => {
-                                if work_seq > 0 {
-                                    ctx.completed_post_unlock_seq.store(work_seq, Ordering::Release);
-                                }
-                                let panic_count = command_panics.fetch_add(1, Ordering::SeqCst) + 1;
-                                let msg = panic_payload
-                                    .downcast_ref::<&str>()
-                                    .copied()
-                                    .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
-                                    .unwrap_or("non-string panic payload");
-                                tracing::error!(
-                                    solar_system_id,
-                                    panic_count,
-                                    panic = %msg,
-                                    "SystemActor fallback post_unlock flush panicked; continuing actor loop"
-                                );
-                                for send_reply in replies_fallback { send_reply(); }
-                            }
+                            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                            self.fallback.done_cv.notify_all();
                         }
                     }
                 }
-            }
-            loop {
-                let _ = super::ewar_cooldowns::flush_post_unlock_actions_catching(
-                    &post_unlock_actions,
-                    solar_system_id,
-                    &command_panics,
-                );
-                fallback_scheduled_for_thread.store(false, Ordering::SeqCst);
-                let still_empty = post_unlock_actions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .is_empty();
-                if still_empty || fallback_scheduled_for_thread.swap(true, Ordering::SeqCst) {
-                    break;
+
+                let mut reset_guard = RunnerResetGuard {
+                    fallback: Arc::clone(&fallback),
+                    in_flight: in_flight_for_thread,
+                    active: true,
+                };
+                let _drain_guard = fallback.drain_lock.lock().unwrap_or_else(|e| e.into_inner());
+                let _owner_guard = FallbackOwnerGuard::enter(Arc::clone(&fallback.owner_tid));
+                loop {
+                    let next_entry_opt = {
+                        let mut st = fallback.state.lock().unwrap_or_else(|e| e.into_inner());
+                        st.queue.pop_front()
+                    };
+                    if let Some(entry) = next_entry_opt {
+                        if let Some(ctx) = entry.unsent_ctx {
+                            if !entry.items.is_empty() {
+                                let deact_g = ctx.deact_lock.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                let lock_g = ctx.lock_lock.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                let sink = ActorCallbackSink::Worker(&ctx.post_commit_targets);
+                                for mut unsent in entry.items {
+                                    let work_seq = unsent.work_seq;
+                                    let replies_fallback = std::mem::take(&mut unsent.replies);
+                                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        execute_unsent_work_item_direct(
+                                            sink,
+                                            &ctx.completed_post_unlock_seq,
+                                            deact_g.as_ref(),
+                                            lock_g.as_ref(),
+                                            actor_rt_handle.as_ref(),
+                                            unsent,
+                                        )
+                                    }));
+                                    match outcome {
+                                        Ok(extra_replies) => {
+                                            for send_reply in replies_fallback { send_reply(); }
+                                            for send_reply in extra_replies { send_reply(); }
+                                        }
+                                        Err(panic_payload) => {
+                                            if work_seq > 0 {
+                                                ctx.completed_post_unlock_seq.store(work_seq, Ordering::Release);
+                                            }
+                                            let panic_count = command_panics.fetch_add(1, Ordering::SeqCst) + 1;
+                                            let msg = panic_payload
+                                                .downcast_ref::<&str>()
+                                                .copied()
+                                                .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+                                                .unwrap_or("non-string panic payload");
+                                            tracing::error!(
+                                                solar_system_id,
+                                                panic_count,
+                                                panic = %msg,
+                                                "SystemActor fallback post_unlock flush panicked; continuing actor loop"
+                                            );
+                                            for send_reply in replies_fallback { send_reply(); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let _ = super::ewar_cooldowns::flush_post_unlock_actions_catching(
+                            &post_unlock_actions,
+                            solar_system_id,
+                            &command_panics,
+                        );
+                        for send_reply in entry.deferred_db_replies {
+                            send_reply();
+                        }
+                        let mut st = fallback.state.lock().unwrap_or_else(|e| e.into_inner());
+                        st.completed_seq = st.completed_seq.max(entry.seq);
+                        fallback.done_cv.notify_all();
+                        continue;
+                    }
+                    let _ = super::ewar_cooldowns::flush_post_unlock_actions_catching(
+                        &post_unlock_actions,
+                        solar_system_id,
+                        &command_panics,
+                    );
+                    let has_more = {
+                        let mut st = fallback.state.lock().unwrap_or_else(|e| e.into_inner());
+                        let actions_non_empty = !post_unlock_actions
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .is_empty();
+                        if !st.queue.is_empty() || actions_non_empty {
+                            true
+                        } else {
+                            st.runner_active = false;
+                            st.completed_seq = st.next_seq;
+                            false
+                        }
+                    };
+                    if !has_more {
+                        break;
+                    }
+                }
+                drop(_owner_guard);
+                drop(_drain_guard);
+                reset_guard.active = false;
+                reset_guard.in_flight.fetch_sub(1, Ordering::SeqCst);
+                fallback.done_cv.notify_all();
+            });
+        if spawn_res.is_err() {
+            let drained_replies: Vec<Vec<Box<dyn FnOnce() + Send>>> = {
+                let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                st.runner_active = false;
+                st.completed_seq = st.next_seq;
+                st.queue
+                    .drain(..)
+                    .map(|e| e.deferred_db_replies)
+                    .collect()
+            };
+            post_unlock_actions_in_flight.fetch_sub(1, Ordering::SeqCst);
+            self.done_cv.notify_all();
+            for replies in drained_replies {
+                for send_reply in replies {
+                    send_reply();
                 }
             }
-            drop(_owner_guard);
-            drop(_drain_guard);
-            drop(_in_flight_guard);
-            for send_reply in deferred_db_replies {
-                send_reply();
-            }
-        });
-    if spawn_res.is_err() {
-        if reset_scheduled_on_err {
-            fallback_scheduled.store(false, Ordering::SeqCst);
+            tracing::error!(solar_system_id, "failed to spawn post-unlock fallback thread");
         }
-        post_unlock_actions_in_flight.fetch_sub(1, Ordering::SeqCst);
-        tracing::error!(solar_system_id, "failed to spawn post-unlock fallback thread");
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(in crate::system_actor) fn spawn_unsent_fallback_thread(
-    post_commit_targets: PostCommitActorTargets,
-    completed_post_unlock_seq: Arc<AtomicU64>,
-    deact_lock: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
-    lock_lock: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
-    post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
-    post_unlock_actions_in_flight: Arc<AtomicUsize>,
-    fallback_drain_lock: Arc<std::sync::Mutex<()>>,
-    fallback_owner_tid: Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
-    fallback_scheduled: Arc<AtomicBool>,
-    command_panics: Arc<AtomicU64>,
-    actor_rt_handle: Option<tokio::runtime::Handle>,
-    items: Vec<PostUnlockWorkItem>,
-    deferred_db_replies: Vec<Box<dyn FnOnce() + Send>>,
-) {
-    let solar_system_id = post_commit_targets.solar_system_id;
-    spawn_fallback_thread_impl(
-        solar_system_id,
-        Some(UnsentFallbackCtx {
-            post_commit_targets,
-            completed_post_unlock_seq,
-            deact_lock,
-            lock_lock,
-        }),
-        post_unlock_actions,
-        post_unlock_actions_in_flight,
-        fallback_drain_lock,
-        fallback_owner_tid,
-        fallback_scheduled,
-        command_panics,
-        actor_rt_handle,
-        items,
-        deferred_db_replies,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(in crate::system_actor) fn spawn_actions_fallback_thread(
-    solar_system_id: SolarSystemId,
-    post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
-    post_unlock_actions_in_flight: Arc<AtomicUsize>,
-    fallback_drain_lock: Arc<std::sync::Mutex<()>>,
-    fallback_owner_tid: Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
-    fallback_scheduled: Arc<AtomicBool>,
-    command_panics: Arc<AtomicU64>,
-) {
-    spawn_fallback_thread_impl(
-        solar_system_id,
-        None,
-        post_unlock_actions,
-        post_unlock_actions_in_flight,
-        fallback_drain_lock,
-        fallback_owner_tid,
-        fallback_scheduled,
-        command_panics,
-        None,
-        Vec::new(),
-        Vec::new(),
-    );
 }
 
 pub(in crate::system_actor) fn execute_unsent_work_item_direct(
@@ -2166,7 +2405,14 @@ pub(in crate::system_actor) fn execute_unsent_work_item_direct(
 pub(in crate::system_actor) fn finish_post_unlock_after_unlock(handle: &super::SystemHandle, deact_guard: Option<&ModuleDeactivationHook>, lock_guard: Option<&TargetLockCompletedHook>, ticket: PostUnlockWaitTicket) {
     let safe_sync = can_run_post_unlock_sync_now() && !handle.is_on_post_unlock_callback_thread();
     match ticket {
-        PostUnlockWaitTicket::None => if safe_sync { super::flush_post_unlock_actions(&handle.post_unlock_actions); },
+        PostUnlockWaitTicket::None => if safe_sync {
+            handle.post_unlock_fallback.drain_closed_worker_blocking(
+                handle.solar_system_id,
+                &handle.post_unlock_actions,
+                &handle.post_unlock_actions_in_flight,
+                &handle.command_panics,
+            );
+        },
         PostUnlockWaitTicket::WaitWorker(rx) => { let _ = rx.recv(); }
         PostUnlockWaitTicket::RunDirectAfterUnlock(unsent) => {
             let unsent = *unsent;
@@ -2181,7 +2427,12 @@ pub(in crate::system_actor) fn finish_post_unlock_after_unlock(handle: &super::S
                     rt_opt.as_ref().or(handle.actor_rt_handle.as_ref()),
                     unsent,
                 );
-                super::flush_post_unlock_actions(&handle.post_unlock_actions);
+                handle.post_unlock_fallback.drain_closed_worker_blocking(
+                    handle.solar_system_id,
+                    &handle.post_unlock_actions,
+                    &handle.post_unlock_actions_in_flight,
+                    &handle.command_panics,
+                );
                 replies
             } else {
                 tracing::warn!(solar_system_id = handle.solar_system_id, intents = unsent.ops.intents.len(), "skipping RunDirectAfterUnlock after worker shutdown under held ranked locks or worker reentrancy");
@@ -2366,14 +2617,7 @@ fn flush_post_unlock_actions_tracked(
     solar_system_id: SolarSystemId,
     command_panics: &Arc<AtomicU64>,
 ) {
-    struct WorkerActionsGuard<'a>(&'a AtomicUsize);
-    impl Drop for WorkerActionsGuard<'_> {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-    in_flight.fetch_add(1, Ordering::SeqCst);
-    let _guard = WorkerActionsGuard(in_flight);
+    let _guard = InFlightActionsGuard::enter(Arc::clone(in_flight));
     let _ = super::ewar_cooldowns::flush_post_unlock_actions_catching(
         actions,
         solar_system_id,
@@ -2395,6 +2639,7 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
     lock_hook_worker: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
     post_unlock_actions_worker: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
     post_unlock_actions_in_flight_worker: Arc<AtomicUsize>,
+    fallback: Arc<FallbackCoordinator>,
     command_panics_worker: Arc<AtomicU64>,
     post_commit_targets: PostCommitActorTargets,
     rt_handle: Option<tokio::runtime::Handle>,
@@ -2457,6 +2702,19 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
                     &command_panics_worker,
                 ),
                 PostUnlockMsg::Shutdown => {
+                    struct WorkerDrainingGuard<'a>(&'a std::sync::atomic::AtomicBool);
+                    impl Drop for WorkerDrainingGuard<'_> {
+                        fn drop(&mut self) {
+                            self.0.store(false, Ordering::SeqCst);
+                        }
+                    }
+
+                    let _shutdown_drain_guard = fallback
+                        .drain_lock
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    fallback.worker_draining.store(true, Ordering::SeqCst);
+                    let _draining_guard = WorkerDrainingGuard(&fallback.worker_draining);
                     post_unlock_rx.close();
                     while let Ok(rem) = post_unlock_rx.try_recv() {
                         match rem {

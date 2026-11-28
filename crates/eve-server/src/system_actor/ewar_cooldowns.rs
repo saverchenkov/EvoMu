@@ -914,10 +914,7 @@ impl SystemHandle {
     }
 
     pub(in crate::system_actor) fn is_on_post_unlock_fallback_thread(&self) -> bool {
-        self.post_unlock_fallback_owner_tid
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some_and(|tid| tid == std::thread::current().id())
+        self.post_unlock_fallback.is_current_thread_owner()
     }
 
     pub(in crate::system_actor) fn is_on_post_unlock_callback_thread(&self) -> bool {
@@ -1149,17 +1146,11 @@ impl SystemHandle {
             .post_unlock_tx
             .send(super::post_unlock::PostUnlockMsg::FlushActions)
             .is_err()
-            && !self
-                .post_unlock_fallback_scheduled
-                .swap(true, std::sync::atomic::Ordering::SeqCst)
         {
-            super::post_unlock::spawn_actions_fallback_thread(
+            self.post_unlock_fallback.ensure_actions_runner(
                 self.solar_system_id,
                 Arc::clone(&self.post_unlock_actions),
                 Arc::clone(&self.post_unlock_actions_in_flight),
-                Arc::clone(&self.post_unlock_fallback_drain_lock),
-                Arc::clone(&self.post_unlock_fallback_owner_tid),
-                Arc::clone(&self.post_unlock_fallback_scheduled),
                 Arc::clone(&self.command_panics),
             );
         }
@@ -1537,23 +1528,10 @@ impl SystemRegistry {
     }
 }
 
-pub(crate) fn flush_post_unlock_actions(
-    actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
-) -> usize {
-    flush_post_unlock_actions_inner(actions, None)
-}
-
 pub(in crate::system_actor) fn flush_post_unlock_actions_catching(
     actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
     solar_system_id: SolarSystemId,
     command_panics: &std::sync::atomic::AtomicU64,
-) -> usize {
-    flush_post_unlock_actions_inner(actions, Some((solar_system_id, command_panics)))
-}
-
-fn flush_post_unlock_actions_inner(
-    actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
-    panic_ctx: Option<(SolarSystemId, &std::sync::atomic::AtomicU64)>,
 ) -> usize {
     if !held_lock_ranks().is_empty() {
         return 0;
@@ -1568,23 +1546,19 @@ fn flush_post_unlock_actions_inner(
             std::mem::take(&mut *guard)
         };
         for action in batch {
-            if let Some((solar_system_id, command_panics)) = panic_ctx {
-                if let Err(panic_payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
-                    let panic_count = command_panics.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                    let msg = panic_payload
-                        .downcast_ref::<&str>()
-                        .copied()
-                        .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
-                        .unwrap_or("non-string panic payload");
-                    tracing::error!(
-                        solar_system_id,
-                        panic_count,
-                        panic = %msg,
-                        "SystemActor post_unlock_action panicked; continuing actor loop"
-                    );
-                }
-            } else {
-                action();
+            if let Err(panic_payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
+                let panic_count = command_panics.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let msg = panic_payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("non-string panic payload");
+                tracing::error!(
+                    solar_system_id,
+                    panic_count,
+                    panic = %msg,
+                    "SystemActor post_unlock_action panicked; continuing actor loop"
+                );
             }
             executed += 1;
         }
