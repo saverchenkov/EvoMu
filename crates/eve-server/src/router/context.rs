@@ -62,6 +62,7 @@ pub struct ServerContext {
     pub bound_objects: Arc<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
     pub(crate) next_bound_id: Arc<AtomicU64>,
     pub(crate) next_fighter_res_id: Arc<AtomicI64>,
+    pub(crate) next_stargate_spawn_token: Arc<AtomicU64>,
     pub(crate) transition_grace_store: Arc<
         RankedRwLock<
             crate::router::binding_transition_policy::ContextGraceStore,
@@ -136,6 +137,12 @@ pub struct ServerContext {
     >,
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) fixture_census: Arc<super::fixture_census::FixtureCensusCollector>,
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) stargate_pre_take_ball_hooks:
+        Arc<std::sync::Mutex<HashMap<i64, crate::services::space_warp_jump::PreTakeBallHook>>>,
+    #[cfg(any(test, feature = "testkit"))]
+    pub(crate) stargate_post_dest_spawn_hooks:
+        Arc<std::sync::Mutex<HashMap<i64, crate::services::space_warp_jump::PreTakeBallHook>>>,
 }
 
 /// Non-owning weak handle to all shared [`ServerContext`] state (`RFC-1 E-4`, `#839`, `#919`).
@@ -158,6 +165,7 @@ pub(crate) struct ServerContextWeak {
     bound_objects: std::sync::Weak<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
     next_bound_id: std::sync::Weak<AtomicU64>,
     next_fighter_res_id: std::sync::Weak<AtomicI64>,
+    next_stargate_spawn_token: std::sync::Weak<AtomicU64>,
     transition_grace_store: std::sync::Weak<
         RankedRwLock<
             crate::router::binding_transition_policy::ContextGraceStore,
@@ -219,6 +227,12 @@ pub(crate) struct ServerContextWeak {
     >,
     #[cfg(any(test, feature = "testkit"))]
     fixture_census: std::sync::Weak<super::fixture_census::FixtureCensusCollector>,
+    #[cfg(any(test, feature = "testkit"))]
+    stargate_pre_take_ball_hooks:
+        std::sync::Weak<std::sync::Mutex<HashMap<i64, crate::services::space_warp_jump::PreTakeBallHook>>>,
+    #[cfg(any(test, feature = "testkit"))]
+    stargate_post_dest_spawn_hooks:
+        std::sync::Weak<std::sync::Mutex<HashMap<i64, crate::services::space_warp_jump::PreTakeBallHook>>>,
 }
 
 impl ServerContextWeak {
@@ -237,6 +251,7 @@ impl ServerContextWeak {
             bound_objects: self.bound_objects.upgrade()?,
             next_bound_id: self.next_bound_id.upgrade()?,
             next_fighter_res_id: self.next_fighter_res_id.upgrade()?,
+            next_stargate_spawn_token: self.next_stargate_spawn_token.upgrade()?,
             transition_grace_store: self.transition_grace_store.upgrade()?,
             object_cache: self.object_cache.upgrade()?,
             object_cache_timestamps: self.object_cache_timestamps.upgrade()?,
@@ -290,6 +305,10 @@ impl ServerContextWeak {
             cyno_portal_state: self.cyno_portal_state.upgrade()?,
             #[cfg(any(test, feature = "testkit"))]
             fixture_census: self.fixture_census.upgrade()?,
+            #[cfg(any(test, feature = "testkit"))]
+            stargate_pre_take_ball_hooks: self.stargate_pre_take_ball_hooks.upgrade()?,
+            #[cfg(any(test, feature = "testkit"))]
+            stargate_post_dest_spawn_hooks: self.stargate_post_dest_spawn_hooks.upgrade()?,
         })
     }
 }
@@ -405,6 +424,12 @@ impl ServerContext {
         self.next_fighter_res_id.fetch_sub(1, Ordering::Relaxed)
     }
 
+    #[inline]
+    pub(crate) fn next_stargate_spawn_token(&self) -> u64 {
+        self.next_stargate_spawn_token
+            .fetch_add(1, Ordering::Relaxed)
+    }
+
     /// Creates a non-owning weak handle referencing all shared runtime state on this `ServerContext`
     /// (`RFC-1 E-4`, `#839`, `#919`).
     pub(crate) fn downgrade(&self) -> ServerContextWeak {
@@ -422,6 +447,7 @@ impl ServerContext {
             bound_objects: Arc::downgrade(&self.bound_objects),
             next_bound_id: Arc::downgrade(&self.next_bound_id),
             next_fighter_res_id: Arc::downgrade(&self.next_fighter_res_id),
+            next_stargate_spawn_token: Arc::downgrade(&self.next_stargate_spawn_token),
             transition_grace_store: Arc::downgrade(&self.transition_grace_store),
             object_cache: Arc::downgrade(&self.object_cache),
             object_cache_timestamps: Arc::downgrade(&self.object_cache_timestamps),
@@ -475,6 +501,10 @@ impl ServerContext {
             cyno_portal_state: Arc::downgrade(&self.cyno_portal_state),
             #[cfg(any(test, feature = "testkit"))]
             fixture_census: Arc::downgrade(&self.fixture_census),
+            #[cfg(any(test, feature = "testkit"))]
+            stargate_pre_take_ball_hooks: Arc::downgrade(&self.stargate_pre_take_ball_hooks),
+            #[cfg(any(test, feature = "testkit"))]
+            stargate_post_dest_spawn_hooks: Arc::downgrade(&self.stargate_post_dest_spawn_hooks),
         }
     }
 
@@ -603,6 +633,7 @@ impl ServerContext {
             bound_objects: Arc::new(RankedRwLock::new(HashMap::new())),
             next_bound_id: Arc::new(AtomicU64::new(10_000)),
             next_fighter_res_id: Arc::new(AtomicI64::new(-300_000)),
+            next_stargate_spawn_token: Arc::new(AtomicU64::new(1)),
             transition_grace_store: Arc::new(RankedRwLock::new(
                 crate::router::binding_transition_policy::ContextGraceStore::default(),
             )),
@@ -658,6 +689,10 @@ impl ServerContext {
             cyno_portal_state,
             #[cfg(any(test, feature = "testkit"))]
             fixture_census: Arc::new(super::fixture_census::FixtureCensusCollector::new()),
+            #[cfg(any(test, feature = "testkit"))]
+            stargate_pre_take_ball_hooks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            #[cfg(any(test, feature = "testkit"))]
+            stargate_post_dest_spawn_hooks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
         if let Err(err) = crate::services::pve_content_providers::register_default_pve_content_providers(
             &ctx.systems,

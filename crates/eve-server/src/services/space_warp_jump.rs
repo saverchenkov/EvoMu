@@ -33,15 +33,12 @@ pub(crate) const SOLAR_SYSTEM_ZARZAKH: u32 = 30_100_000;
 const ZARZAKH_GATE_LOCK_SECS: u64 = 21_600;
 
 #[cfg(any(test, feature = "testkit"))]
-fn set_char_hook_in<T>(
-    slot: &OnceLock<Mutex<HashMap<(u64, i64), T>>>,
-    ctx: &ServerContext,
-    char_id: i64,
+fn set_context_char_hook<K: Eq + std::hash::Hash, T>(
+    slot: &Mutex<HashMap<K, T>>,
+    key: K,
     hook: Option<T>,
 ) {
-    let map = slot.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
-    let key = (ctx.instance_id, char_id);
+    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
     match hook {
         Some(h) => {
             guard.insert(key, h);
@@ -53,14 +50,33 @@ fn set_char_hook_in<T>(
 }
 
 #[cfg(any(test, feature = "testkit"))]
+fn take_context_char_hook<K: Eq + std::hash::Hash, T>(
+    slot: &Mutex<HashMap<K, T>>,
+    key: &K,
+) -> Option<T> {
+    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+    guard.remove(key)
+}
+
+#[cfg(test)]
+fn set_char_hook_in<T>(
+    slot: &OnceLock<Mutex<HashMap<(u64, i64), T>>>,
+    ctx: &ServerContext,
+    char_id: i64,
+    hook: Option<T>,
+) {
+    let map = slot.get_or_init(|| Mutex::new(HashMap::new()));
+    set_context_char_hook(map, (ctx.instance_id, char_id), hook);
+}
+
+#[cfg(test)]
 fn take_char_hook_from<T>(
     slot: &OnceLock<Mutex<HashMap<(u64, i64), T>>>,
     ctx: &ServerContext,
     char_id: i64,
 ) -> Option<T> {
     let map = slot.get()?;
-    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
-    guard.remove(&(ctx.instance_id, char_id))
+    take_context_char_hook(map, &(ctx.instance_id, char_id))
 }
 
 #[cfg(any(test, feature = "testkit"))]
@@ -69,10 +85,6 @@ pub type PreTakeBallHook = Box<
         + Send
         + 'static,
 >;
-
-#[cfg(any(test, feature = "testkit"))]
-static PRE_TAKE_BALL_HOOKS: OnceLock<Mutex<HashMap<(u64, i64), PreTakeBallHook>>> =
-    OnceLock::new();
 
 #[cfg(test)]
 type PostZarzakhTollHook = Box<dyn FnOnce() + Send + 'static>;
@@ -86,42 +98,38 @@ static POST_TAKE_BALL_HOOKS: OnceLock<Mutex<HashMap<(u64, i64), PreTakeBallHook>
     OnceLock::new();
 
 /// Installs or clears a one-shot test barrier immediately before `old_handle.take_ball`
-/// inside `handle_cmd_stargate_jump`, scoped by `(ctx.instance_id, char_id)`.
+/// inside `handle_cmd_stargate_jump`, scoped to `ctx` by `char_id`.
 #[cfg(any(test, feature = "testkit"))]
 pub fn set_pre_take_ball_hook_for_test(
     ctx: &ServerContext,
     char_id: i64,
     hook: Option<PreTakeBallHook>,
 ) {
-    set_char_hook_in(&PRE_TAKE_BALL_HOOKS, ctx, char_id, hook);
+    set_context_char_hook(&*ctx.stargate_pre_take_ball_hooks, char_id, hook);
 }
 
 #[cfg(any(test, feature = "testkit"))]
 async fn run_pre_take_ball_hook_for_test(ctx: &ServerContext, char_id: i64) {
-    if let Some(h) = take_char_hook_from(&PRE_TAKE_BALL_HOOKS, ctx, char_id) {
+    if let Some(h) = take_context_char_hook(&*ctx.stargate_pre_take_ball_hooks, &char_id) {
         h().await;
     }
 }
 
-#[cfg(any(test, feature = "testkit"))]
-static POST_DEST_SPAWN_HOOKS: OnceLock<Mutex<HashMap<(u64, i64), PreTakeBallHook>>> =
-    OnceLock::new();
-
 /// Installs or clears a one-shot test barrier immediately after `new_handle.spawn_ball_with_meta_tagged`
-/// succeeds and before `rollback_guard.disarm()` inside `handle_cmd_stargate_jump`, scoped by
-/// `(ctx.instance_id, char_id)`.
+/// succeeds and before `rollback_guard.disarm()` inside `handle_cmd_stargate_jump`, scoped to
+/// `ctx` by `char_id`.
 #[cfg(any(test, feature = "testkit"))]
 pub fn set_post_dest_spawn_hook_for_test(
     ctx: &ServerContext,
     char_id: i64,
     hook: Option<PreTakeBallHook>,
 ) {
-    set_char_hook_in(&POST_DEST_SPAWN_HOOKS, ctx, char_id, hook);
+    set_context_char_hook(&*ctx.stargate_post_dest_spawn_hooks, char_id, hook);
 }
 
 #[cfg(any(test, feature = "testkit"))]
 async fn run_post_dest_spawn_hook_for_test(ctx: &ServerContext, char_id: i64) {
-    if let Some(h) = take_char_hook_from(&POST_DEST_SPAWN_HOOKS, ctx, char_id) {
+    if let Some(h) = take_context_char_hook(&*ctx.stargate_post_dest_spawn_hooks, &char_id) {
         h().await;
     }
 }
@@ -309,11 +317,8 @@ impl Drop for TakenBallGuard {
     }
 }
 
-static NEXT_STARGATE_SPAWN_TOKEN: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
-
-fn next_stargate_spawn_token() -> u64 {
-    NEXT_STARGATE_SPAWN_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+fn next_stargate_spawn_token(ctx: &ServerContext) -> u64 {
+    ctx.next_stargate_spawn_token()
 }
 
 fn enqueue_remove_ball_nonblocking(
@@ -2359,7 +2364,7 @@ async fn handle_cmd_stargate_jump(
     combat_state.apply_jump_cloak_and_invuln_timers(60);
     let mut slim_meta = ctx.build_ship_slim_meta(char_id, new_ball.type_id);
     slim_meta.is_cloaked = true;
-    let spawn_token = next_stargate_spawn_token();
+    let spawn_token = next_stargate_spawn_token(ctx);
     rollback_guard.record_dest_spawn_target(new_handle.clone(), ship_id, spawn_token);
     let spawn_tick = match new_handle
         .spawn_ball_with_meta_tagged(new_ball, combat_state, slim_meta, spawn_token)
@@ -4360,7 +4365,7 @@ mod jump_displacement_and_toll_tests {
         });
         guard.record_db_commit(db_rb);
 
-        let spawn_token = next_stargate_spawn_token();
+        let spawn_token = next_stargate_spawn_token(&ctx);
         let mut dest_ball = taken.ball.clone();
         dest_ball.position = DVec3::new(1_000.0, 0.0, 0.0);
         guard.record_dest_spawn_target(fx.dest_handle.clone(), fx.ship_id, spawn_token);
