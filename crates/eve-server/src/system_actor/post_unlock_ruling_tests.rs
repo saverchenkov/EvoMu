@@ -2696,3 +2696,170 @@ fn track_4d2_post_unlock_has_zero_ballpark_or_actor_state_locks() {
         "PostCommitActorTargets must route actor callbacks through worker_cb_tx"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn track_4d5_closed_worker_async_fallback_preserves_charge_and_overheat_reservations() {
+    use crate::services::tactical_module_mechanics::RACK_HEAT_ATTR_IDS;
+    use std::sync::atomic::Ordering;
+
+    // Part A: `enqueue_actor_cmd_post_unlock_ops` (`allow_direct_fallback = true`) must push
+    // all 3 shadow-delta queues (`item_qty_deltas`, `crystal_dmg_deltas`, `overheat_dmg_deltas`)
+    // when returning `Err(unsent)` on a closed worker channel.
+    let mut actor_st = crate::system_actor::SystemActorState::default();
+    let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(closed_rx);
+    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let completed_seq = std::sync::atomic::AtomicU64::new(0);
+    let (charge_id, crystal_id, mod_id_a) = (880_001_i64, 880_002_i64, 880_003_i64);
+    let mut ops = PostUnlockOps::default();
+    ops.item_qty_deltas.push((charge_id, -3));
+    ops.crystal_dmg_deltas.push((crystal_id, 0.25));
+    ops.overheat_dmg_deltas.push((mod_id_a, 4.0, false));
+    ops.push(PostUnlockIntent::ShipCycleClearAll(880_000));
+    let unsent = super::enqueue_actor_cmd_post_unlock_ops(
+        &mut actor_st,
+        Some(&closed_tx),
+        &in_flight,
+        ops,
+        true,
+    )
+    .expect("closed worker with allow_direct_fallback=true must return unsent item");
+    assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+    let (_snap, res_qty, res_dmg) =
+        super::begin_tick_charge_reservations(SYS_ID, &mut actor_st, &completed_seq);
+    assert_eq!(res_qty.get(&charge_id).copied(), Some(-3));
+    assert!((res_dmg.get(&crystal_id).copied().unwrap_or(0.0) - 0.25).abs() < 1e-9);
+    assert_eq!(
+        actor_st.post_unlock_shadows.pending_overheat_dmg_deltas,
+        std::collections::VecDeque::from([(unsent.work_seq, mod_id_a, 4.0, false)])
+    );
+
+    // Part B: Consecutive `step_manual` ticks under closed-worker async fallback see uncommitted
+    // overheat deltas before `post-unlock-fallback` commits to SQLite and burn out the module.
+    let (ship_id, mod_hi) = (779_300_301_i64, 779_300_302_i64);
+    let (ctx, sys) = boot_ship(
+        ship_id,
+        &[(mod_hi, 484, InventoryFlag::HiSlot0, 35.0)],
+        None,
+        Some(make_combat_state(100.0, 100.0, 100.0, 1_000.0)),
+    )
+    .await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items
+            .get_mut(&mod_hi)
+            .unwrap()
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::HP_STRUCT, 40.0);
+        let ship_it = snap.items.get_mut(&ship_id).unwrap();
+        ship_it.dynamic_attributes.insert(14, 1.0);
+        ship_it.dynamic_attributes.insert(13, 0.0);
+        ship_it.dynamic_attributes.insert(12, 0.0);
+        ship_it.dynamic_attributes.insert(1137, 0.0);
+        ship_it.dynamic_attributes.insert(1179, 0.001);
+        ship_it.dynamic_attributes.insert(RACK_HEAT_ATTR_IDS[0], 1.0);
+        snap.transient_item_attributes
+            .entry(ship_id)
+            .or_default()
+            .insert(RACK_HEAT_ATTR_IDS[0], 1.0);
+    });
+    sys.test_with_actor_state_mut_async(move |st| {
+        st.active_module_cycles.push(ActiveModuleCycle {
+            ship_id,
+            module_id: mod_hi,
+            module_type_id: 484,
+            owner_char_id: Some(CHAR_ID),
+            rack_idx: 0,
+            is_overloaded: true,
+            heat_damage_per_cycle: 3.0,
+            duration_s: 1.0,
+            elapsed_s: 0.9,
+            repeat: -1,
+            ..Default::default()
+        });
+    })
+    .await;
+
+    let _ = sys.post_unlock_tx.send(PostUnlockMsg::Shutdown);
+    for _ in 0..100 {
+        if sys.post_unlock_tx.is_closed() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(sys.post_unlock_tx.is_closed());
+
+    let (fb_entered_tx, fb_entered_rx) = mpsc::sync_channel::<()>(1);
+    let (fb_release_tx, fb_release_rx) = mpsc::sync_channel::<()>(1);
+    let fb_release_rx = Arc::new(std::sync::Mutex::new(fb_release_rx));
+    sys.enqueue_post_unlock_action(Box::new(move || {
+        let _ = fb_entered_tx.send(());
+        let _ = fb_release_rx.lock().unwrap().recv();
+    }));
+    tokio::task::spawn_blocking(move || {
+        fb_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fallback entered");
+    })
+    .await
+    .unwrap();
+
+    // Dispatch consecutive `StepFullTick { wait_for_post_unlock: true }` commands while
+    // `post-unlock-fallback` is parked on `fb_release_rx`. With DB `mod_dmg` still `35.0`,
+    // two separate heat cycles (`35 -> 38 -> >= 40`) can only burn out the module if `Err(unsent)`
+    // preserves `pending_overheat_dmg_deltas` across ticks before fallback commits.
+    let mut step_rxs = Vec::new();
+    for _ in 0..20 {
+        for dt in [0.2_f64, 0.8_f64] {
+            let (r_tx, r_rx) = tokio::sync::oneshot::channel();
+            sys.cmd_sender()
+                .send(crate::system_actor::SystemCommand::StepFullTick {
+                    dt,
+                    wait_for_post_unlock: true,
+                    reply: r_tx,
+                })
+                .await
+                .unwrap();
+            step_rxs.push(r_rx);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if sys.view().active_module_cycles.is_empty() {
+                break;
+            }
+        }
+        if sys.view().active_module_cycles.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        mod_dmg(&ctx.db, mod_hi),
+        Some(35.0),
+        "DB must still be uncommitted while fallback runner is parked"
+    );
+    assert!(
+        sys.view().active_module_cycles.is_empty(),
+        "subsequent ticks must observe uncommitted overheat shadow deltas during closed-worker async fallback"
+    );
+    assert!(
+        step_rxs[0].try_recv().is_err(),
+        "barrier reply must still be queued behind parked fallback runner"
+    );
+
+    fb_release_tx.send(()).unwrap();
+    for rx in step_rxs {
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), rx)
+                .await
+                .expect("StepFullTick reply completes after fallback unblocks")
+                .is_ok()
+        );
+    }
+    let _ = sys.wait_for_post_unlock_barrier().await;
+    assert!(mod_dmg(&ctx.db, mod_hi).is_some_and(|d| d >= 40.0 - 1e-6));
+    assert!(
+        sys.test_with_actor_state_async(|st| {
+            st.post_unlock_shadows.pending_overheat_dmg_deltas.is_empty()
+                && st.pending_item_qty_deltas.is_empty()
+                && st.pending_crystal_dmg_deltas.is_empty()
+        })
+        .await
+    );
+}

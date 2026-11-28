@@ -347,18 +347,19 @@ impl SystemHandle {
     }
 
     pub(in crate::system_actor) fn has_in_flight_post_unlock(&self) -> bool {
-        self.post_unlock_in_flight
-            .load(std::sync::atomic::Ordering::SeqCst)
-            > 0
+        !self
+            .post_unlock_actions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
             || self
                 .post_unlock_actions_in_flight
                 .load(std::sync::atomic::Ordering::SeqCst)
                 > 0
-            || !self
-                .post_unlock_actions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_empty()
+            || self
+                .post_unlock_in_flight
+                .load(std::sync::atomic::Ordering::SeqCst)
+                > 0
             || self.post_unlock_fallback.has_pending_work()
     }
 

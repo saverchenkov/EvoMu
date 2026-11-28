@@ -483,6 +483,7 @@ pub(in crate::system_actor) struct CtActorDriver {
             Arc<std::sync::atomic::AtomicBool>,
         )>,
     >,
+    fallback_coordinators: std::sync::Mutex<Vec<std::sync::Weak<post_unlock::FallbackCoordinator>>>,
 }
 
 impl CtActorDriver {
@@ -510,6 +511,7 @@ impl CtActorDriver {
             shutdown_tx: Some(shutdown_tx),
             thread: Some(thread),
             post_unlock_worker_thread_ids: std::sync::Mutex::new(Vec::new()),
+            fallback_coordinators: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -529,6 +531,18 @@ impl CtActorDriver {
         ids.retain(|(_, exited)| !exited.load(std::sync::atomic::Ordering::Acquire));
         ids.push((worker_thread_id, worker_exited));
     }
+
+    pub(in crate::system_actor) fn register_fallback_coordinator(
+        &self,
+        fallback: &Arc<post_unlock::FallbackCoordinator>,
+    ) {
+        let mut coords = self
+            .fallback_coordinators
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        coords.retain(|w| w.strong_count() > 0);
+        coords.push(Arc::downgrade(fallback));
+    }
 }
 
 impl Drop for CtActorDriver {
@@ -546,9 +560,17 @@ impl Drop for CtActorDriver {
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .any(|(id, _)| id.get() == Some(&cur_tid));
+        let on_own_fallback_thread = self
+            .fallback_coordinators
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .any(|fb| fb.is_current_thread_owner());
         if let Some(thread) = self.thread.take() {
             if !on_driver_runtime
                 && !on_own_post_unlock_worker
+                && !on_own_fallback_thread
                 && thread.thread().id() != cur_tid
             {
                 let _ = thread.join();
@@ -2086,11 +2108,11 @@ fn execute_actor_cmd_batch(
                 completed_post_unlock_seq: Arc::clone(env.completed_post_unlock_seq_actor),
                 deact_lock: Arc::clone(env.module_deactivation_hook_actor),
                 lock_lock: Arc::clone(env.target_lock_completed_hook_actor),
+                actor_rt_handle: Some(env.actor_rt_handle_actor.clone()),
             },
             Arc::clone(env.post_unlock_actions_actor),
             Arc::clone(env.post_unlock_actions_in_flight_actor),
             Arc::clone(env.command_panics_actor),
-            Some(env.actor_rt_handle_actor.clone()),
             batch_unsent_direct_items,
             batch_deferred_db_replies,
         );
@@ -2119,11 +2141,11 @@ fn execute_actor_cmd_batch(
                     completed_post_unlock_seq: Arc::clone(env.completed_post_unlock_seq_actor),
                     deact_lock: Arc::clone(env.module_deactivation_hook_actor),
                     lock_lock: Arc::clone(env.target_lock_completed_hook_actor),
+                    actor_rt_handle: Some(env.actor_rt_handle_actor.clone()),
                 },
                 Arc::clone(env.post_unlock_actions_actor),
                 Arc::clone(env.post_unlock_actions_in_flight_actor),
                 Arc::clone(env.command_panics_actor),
-                Some(env.actor_rt_handle_actor.clone()),
                 unsent.replies,
             ) {
                 for send_reply in immediate_replies {
@@ -3236,6 +3258,7 @@ impl SystemRegistry {
                 Arc::clone(&post_unlock_worker_thread_id),
                 Arc::clone(&post_unlock_worker_exited),
             );
+            driver.register_fallback_coordinator(&post_unlock_fallback);
         }
         let post_unlock_in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let post_unlock_in_flight_actor = Arc::clone(&post_unlock_in_flight);
@@ -3583,13 +3606,22 @@ impl SystemRegistry {
                 &event_tx_actor,
                 true,
             );
-            post_unlock_fallback_actor.drain_synchronously_on_shutdown(
-                solar_system_id,
-                &post_unlock_actions_actor,
-                &post_unlock_actions_in_flight_actor,
-                &command_panics_actor,
-                worker_joined,
-            );
+            let _ = tokio::task::spawn_blocking({
+                let fallback = Arc::clone(&post_unlock_fallback_actor);
+                let actions = Arc::clone(&post_unlock_actions_actor);
+                let in_flight = Arc::clone(&post_unlock_actions_in_flight_actor);
+                let command_panics = Arc::clone(&command_panics_actor);
+                move || {
+                    fallback.drain_synchronously_on_shutdown(
+                        solar_system_id,
+                        &actions,
+                        &in_flight,
+                        &command_panics,
+                        worker_joined,
+                    );
+                }
+            })
+            .await;
             shutdown_cooldown_guard.flush_now();
             let leftover_post_unlock_actions = {
                 let mut actions = post_unlock_actions_actor.lock().unwrap_or_else(|e| e.into_inner());

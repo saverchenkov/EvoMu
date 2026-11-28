@@ -3240,3 +3240,250 @@ async fn arch_1342_4d5_mid_shutdown_worker_drain_serializes_fallback_and_barrier
     assert_eq!(*log.lock().unwrap(), vec![1, 2, 3]);
     assert_eq!(h.post_unlock_actions_in_flight.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4d5_has_in_flight_post_unlock_covers_action_draining_mid_flush_mt() {
+    use std::sync::atomic::Ordering;
+
+    let ctx = test_ctx();
+    let h = ctx.systems.get_or_spawn(30_000_142);
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+
+    // Park inside `flush_post_unlock_actions_tracked` AFTER `post_unlock_actions` Vec has been
+    // `mem::take`n empty, so `post_unlock_actions.is_empty()` is true while `in_flight > 0`.
+    h.enqueue_post_unlock_action(Box::new(move || {
+        let _ = entered_tx.send(());
+        let _ = release_rx.lock().unwrap().recv();
+    }));
+    tokio::task::spawn_blocking(move || {
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("action entered flush_post_unlock_actions_tracked");
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        h.post_unlock_actions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    );
+    assert!(h.post_unlock_actions_in_flight.load(Ordering::SeqCst) > 0);
+    assert!(
+        h.has_in_flight_post_unlock(),
+        "has_in_flight_post_unlock must stay true while FlushActions executes"
+    );
+
+    let step_fut = tokio::spawn({
+        let h_step = h.clone();
+        async move { h_step.step_manual(0.1).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert!(
+        !step_fut.is_finished(),
+        "step_manual / apply_step_output must wait while FlushActions action is still running"
+    );
+
+    release_tx.send(()).unwrap();
+    let step_res = tokio::time::timeout(std::time::Duration::from_secs(2), step_fut)
+        .await
+        .expect("step_manual must complete after action releases")
+        .unwrap();
+    assert!(step_res.is_ok());
+    assert!(!h.has_in_flight_post_unlock());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4d5_closed_worker_actions_run_before_later_work_item_hooks_and_keep_rt_handle() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let (char_id, ship_id, mod_id) = (90_000_805_i64, 799_941_i64, 799_942_i64);
+    let h = ctx.systems.get_or_spawn(sys_id);
+    h.try_spawn_ball_with_meta(
+        make_ball(ship_id, 587, DVec3::ZERO),
+        make_combat_state(100.0, 100.0, 100.0, 100.0),
+        SlimItemMeta {
+            char_id: Some(char_id),
+            ..Default::default()
+        },
+    );
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id,
+        module_id: mod_id,
+        module_type_id: 1978,
+        owner_char_id: Some(char_id),
+        duration_s: 10.0,
+        repeat: 1,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let order = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+    let order_hook = Arc::clone(&order);
+    ctx.systems.set_module_deactivation_hook(Arc::new(move |_sid, _cid, _cyc| {
+        order_hook.lock().unwrap().push(2);
+    }));
+
+    let _ = h.post_unlock_tx.send(crate::system_actor::post_unlock::PostUnlockMsg::Shutdown);
+    for _ in 0..100 {
+        if h.post_unlock_tx.is_closed() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(h.post_unlock_tx.is_closed());
+
+    // Hold `drain_lock` BEFORE `ensure_actions_runner` spawns the fallback runner so both
+    // `A1` (`ensure_actions_runner`) and coalesced `W2` (`enqueue_unsent_or_barrier`) enter
+    // `st.queue` before the runner starts popping items.
+    let (held_tx, mut held_rx) = tokio::sync::oneshot::channel::<()>();
+    let (rel_tx, rel_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let h_drain = h.clone();
+    let drain_holder = tokio::task::spawn_blocking(move || {
+        let _drain_guard = h_drain
+            .post_unlock_fallback
+            .drain_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _ = held_tx.send(());
+        let _ = rel_rx.recv();
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), &mut held_rx)
+        .await
+        .expect("acquired drain_lock")
+        .unwrap();
+
+    let order_act = Arc::clone(&order);
+    h.enqueue_post_unlock_action(Box::new(move || {
+        order_act.lock().unwrap().push(1);
+    }));
+
+    let (rm_tx, mut rm_rx) = tokio::sync::oneshot::channel();
+    h.cmd_sender()
+        .send(crate::system_actor::SystemCommand::RemoveBallSync {
+            ball_id: ship_id,
+            emit_destruction_fx: false,
+            wait_for_post_unlock: true,
+            reply: rm_tx,
+        })
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert!(order.lock().unwrap().is_empty());
+    assert!(rm_rx.try_recv().is_err());
+    assert!(
+        h.post_unlock_fallback.queued_ctx_has_rt_handle(),
+        "coalesced PostUnlockWorkItem must retain actor_rt_handle on UnsentFallbackCtx"
+    );
+
+    rel_tx.send(()).unwrap();
+    drain_holder.await.unwrap();
+    let () = tokio::time::timeout(std::time::Duration::from_secs(2), rm_rx)
+        .await
+        .expect("RemoveBallSync barrier must complete")
+        .unwrap();
+    assert!(h.view().ball(ship_id).is_none());
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec![1, 2],
+        "earlier post_unlock_action must run strictly before later PostUnlockWorkItem deactivation hook"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4d5_current_thread_last_handle_drop_on_fallback_during_shutdown_no_deadlock() {
+    let ctx = test_ctx();
+    let reg = Arc::new(crate::system_actor::SystemRegistry::with_sde(Arc::clone(&ctx.sde)));
+    let (h_tx, h_rx) = std::sync::mpsc::sync_channel(1);
+    let (drop_rt_tx, drop_rt_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let reg_ct = Arc::clone(&reg);
+    let ct_join = std::thread::spawn(move || {
+        let ct_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build CurrentThread runtime");
+        let h = {
+            let _enter = ct_rt.enter();
+            reg_ct.get_or_spawn(30_000_148)
+        };
+        let _ = h_tx.send(h);
+        let _ = drop_rt_rx.recv();
+        drop(ct_rt);
+    });
+    let h = h_rx.recv().unwrap();
+    let driver_weak = Arc::downgrade(
+        h.ct_driver
+            .as_ref()
+            .expect("CurrentThread actor attaches CtActorDriver"),
+    );
+
+    let _ = h.post_unlock_tx.send(crate::system_actor::post_unlock::PostUnlockMsg::Shutdown);
+    for _ in 0..100 {
+        if h.post_unlock_tx.is_closed() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(h.post_unlock_tx.is_closed());
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (action_tx, action_rx) = tokio::sync::oneshot::channel::<()>();
+    let h_cap = h.clone();
+    h.enqueue_post_unlock_action(Box::new(move || {
+        let _ = entered_tx.send(());
+        let _ = ready_rx.recv();
+        // Verify re-entrant `drain_closed_worker_blocking` from fallback owner returns immediately.
+        h_cap.post_unlock_fallback.drain_closed_worker_blocking(
+            h_cap.solar_system_id,
+            &h_cap.post_unlock_actions,
+            &h_cap.post_unlock_actions_in_flight,
+            &h_cap.command_panics,
+        );
+        // Drop the very last `SystemHandle` (`Arc<CtActorDriver>`) from `post-unlock-fallback`.
+        drop(h_cap);
+        let _ = action_tx.send(());
+    }));
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered_rx)
+        .await
+        .expect("fallback runner entered closure")
+        .unwrap();
+
+    // Initiate actor shutdown so the actor task reaches `spawn_blocking(drain_synchronously_on_shutdown)`
+    // while `post-unlock-fallback` still holds `drain_lock`, then drop external `h` & `reg`.
+    let (shut_tx, shut_rx) = tokio::sync::oneshot::channel();
+    h.cmd_sender()
+        .try_send(crate::system_actor::SystemCommand::ShutdownActor { reply: shut_tx })
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    drop(h);
+    drop(reg);
+
+    ready_tx.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), action_rx)
+        .await
+        .expect("fallback action dropping last CtActorDriver must not deadlock")
+        .unwrap();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), shut_rx)
+        .await
+        .expect("actor shutdown must finish after fallback drain unblocks");
+    let _ = drop_rt_tx.send(());
+    let join_res = tokio::task::spawn_blocking(move || ct_join.join())
+        .await
+        .unwrap();
+    assert!(join_res.is_ok());
+    for _ in 0..100 {
+        if driver_weak.strong_count() == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(driver_weak.strong_count(), 0);
+}

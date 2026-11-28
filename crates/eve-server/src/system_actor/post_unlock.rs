@@ -1836,7 +1836,10 @@ pub(in crate::system_actor) fn enqueue_actor_cmd_post_unlock_ops(
             push_pending_deltas(actor_st, work_seq, qty_deltas, dmg_deltas, overheat_deltas);
             None
         }
-        Err(unsent) if allow_direct_fallback => Some(unsent),
+        Err(unsent) if allow_direct_fallback => {
+            push_pending_deltas(actor_st, work_seq, qty_deltas, dmg_deltas, overheat_deltas);
+            Some(unsent)
+        }
         Err(unsent) => {
             tracing::warn!(intents = unsent.ops.intents.len(), "post_unlock_tx closed for non-waiting command; skipping direct fallback");
             None
@@ -1973,6 +1976,7 @@ pub(in crate::system_actor) struct UnsentFallbackCtx {
     pub(in crate::system_actor) completed_post_unlock_seq: Arc<AtomicU64>,
     pub(in crate::system_actor) deact_lock: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     pub(in crate::system_actor) lock_lock: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
+    pub(in crate::system_actor) actor_rt_handle: Option<tokio::runtime::Handle>,
 }
 
 struct FallbackWorkEntry {
@@ -2030,6 +2034,15 @@ impl FallbackCoordinator {
         st.runner_active || !st.queue.is_empty()
     }
 
+    #[cfg(test)]
+    pub(in crate::system_actor) fn queued_ctx_has_rt_handle(&self) -> bool {
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.queue
+            .iter()
+            .filter_map(|e| e.unsent_ctx.as_ref())
+            .any(|ctx| ctx.actor_rt_handle.is_some())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(in crate::system_actor) fn enqueue_unsent_or_barrier(
         self: &Arc<Self>,
@@ -2037,7 +2050,6 @@ impl FallbackCoordinator {
         post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
         post_unlock_actions_in_flight: Arc<AtomicUsize>,
         command_panics: Arc<AtomicU64>,
-        actor_rt_handle: Option<tokio::runtime::Handle>,
         items: Vec<PostUnlockWorkItem>,
         deferred_db_replies: Vec<Box<dyn FnOnce() + Send>>,
     ) {
@@ -2066,7 +2078,6 @@ impl FallbackCoordinator {
                 post_unlock_actions,
                 post_unlock_actions_in_flight,
                 command_panics,
-                actor_rt_handle,
             );
         }
     }
@@ -2081,6 +2092,13 @@ impl FallbackCoordinator {
         let need_spawn = {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             st.next_seq = st.next_seq.saturating_add(1);
+            let seq = st.next_seq;
+            st.queue.push_back(FallbackWorkEntry {
+                seq,
+                unsent_ctx: None,
+                items: Vec::new(),
+                deferred_db_replies: Vec::new(),
+            });
             if !st.runner_active {
                 st.runner_active = true;
                 post_unlock_actions_in_flight.fetch_add(1, Ordering::SeqCst);
@@ -2095,7 +2113,6 @@ impl FallbackCoordinator {
                 post_unlock_actions,
                 post_unlock_actions_in_flight,
                 command_panics,
-                None,
             );
         }
     }
@@ -2107,7 +2124,6 @@ impl FallbackCoordinator {
         post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
         post_unlock_actions_in_flight: Arc<AtomicUsize>,
         command_panics: Arc<AtomicU64>,
-        actor_rt_handle: Option<tokio::runtime::Handle>,
         deferred_db_replies: Vec<Box<dyn FnOnce() + Send>>,
     ) -> Option<Vec<Box<dyn FnOnce() + Send>>> {
         let solar_system_id = unsent_ctx.post_commit_targets.solar_system_id;
@@ -2151,7 +2167,6 @@ impl FallbackCoordinator {
                 post_unlock_actions,
                 post_unlock_actions_in_flight,
                 command_panics,
-                actor_rt_handle,
             );
         }
         unsent_back
@@ -2164,6 +2179,9 @@ impl FallbackCoordinator {
         post_unlock_actions_in_flight: &Arc<AtomicUsize>,
         command_panics: &Arc<AtomicU64>,
     ) {
+        if self.is_current_thread_owner() {
+            return;
+        }
         let _in_flight_guard =
             InFlightActionsGuard::enter(Arc::clone(post_unlock_actions_in_flight));
         let target_seq = self.state.lock().unwrap_or_else(|e| e.into_inner()).next_seq;
@@ -2221,7 +2239,6 @@ impl FallbackCoordinator {
         post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
         post_unlock_actions_in_flight: Arc<AtomicUsize>,
         command_panics: Arc<AtomicU64>,
-        actor_rt_handle: Option<tokio::runtime::Handle>,
     ) {
         let fallback = Arc::clone(self);
         let in_flight_for_thread = Arc::clone(&post_unlock_actions_in_flight);
@@ -2274,7 +2291,7 @@ impl FallbackCoordinator {
                                             &ctx.completed_post_unlock_seq,
                                             deact_g.as_ref(),
                                             lock_g.as_ref(),
-                                            actor_rt_handle.as_ref(),
+                                            ctx.actor_rt_handle.as_ref(),
                                             unsent,
                                         )
                                     }));
