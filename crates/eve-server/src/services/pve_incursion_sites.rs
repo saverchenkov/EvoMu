@@ -505,13 +505,16 @@ pub async fn process_incursion_site_completion_and_payout_core(
 
     let (target_cid, target_sys, boss_ball_id, matched_site_id, site_pos) = incursion_found;
 
-    let sys_handle = systems.get_or_spawn(target_sys);
-    let ball_alive = sys_handle
-        .get_ball_snapshot(boss_ball_id)
-        .await
-        .ok()
-        .flatten()
-        .is_some();
+    let sys_handle_opt = systems.get_handle(target_sys);
+    let ball_alive = match sys_handle_opt.as_ref() {
+        Some(h) => h
+            .get_ball_snapshot(boss_ball_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some(),
+        None => false,
+    };
     if ball_alive {
         return Err(rpc_err(
             "IncursionSiteNpcsRemaining",
@@ -579,7 +582,11 @@ pub async fn process_incursion_site_completion_and_payout_core(
         let ship_id = ch.active_ship_id;
         let mut on_grid = false;
         if ship_id > 0 {
-            if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+            let live_ball = match sys_handle_opt.as_ref() {
+                Some(h) => h.get_ball_snapshot(ship_id).await.ok().flatten(),
+                None => None,
+            };
+            if let Some((_, ball)) = live_ball {
                 on_grid = ball.position.distance(site_pos) <= 500_000.0;
             } else {
                 let pos_opt = db.with_snapshot(|snap| {
@@ -746,29 +753,31 @@ pub async fn process_incursion_site_completion_and_payout_core(
         stale_escorts,
     ) = step_res;
 
-    for bid in stale_escorts {
-        let _ = sys_handle.remove_ball(bid).await;
-    }
-
-    if let Some((new_bid, new_tid, new_escorts, spawn_boss_now)) = next_boss_ball {
-        if spawn_boss_now {
-            systems.claim_special_site_ball(target_sys, new_bid);
-            let _ = sys_handle
-                .spawn_ball_with_combat(
-                    make_site_npc_ball(new_bid, new_tid, site_pos),
-                    super::pve_incursion_lifecycle::build_incursion_npc_combat_state(sde, new_tid),
-                )
-                .await;
+    if let Some(ref sys_handle) = sys_handle_opt {
+        for bid in stale_escorts {
+            let _ = sys_handle.remove_ball(bid).await;
         }
-        for (esc_bid, esc_tid, esc_offset) in new_escorts {
-            systems.claim_special_site_ball(target_sys, esc_bid);
-            let esc_pos = site_pos + DVec3::new(esc_offset[0], esc_offset[1], esc_offset[2]);
-            let _ = sys_handle
-                .spawn_ball_with_combat(
-                    make_site_npc_ball(esc_bid, esc_tid, esc_pos),
-                    super::pve_incursion_lifecycle::build_incursion_npc_combat_state(sde, esc_tid),
-                )
-                .await;
+
+        if let Some((new_bid, new_tid, new_escorts, spawn_boss_now)) = next_boss_ball {
+            if spawn_boss_now {
+                systems.claim_special_site_ball(target_sys, new_bid);
+                let _ = sys_handle
+                    .spawn_ball_with_combat(
+                        make_site_npc_ball(new_bid, new_tid, site_pos),
+                        super::pve_incursion_lifecycle::build_incursion_npc_combat_state(sde, new_tid),
+                    )
+                    .await;
+            }
+            for (esc_bid, esc_tid, esc_offset) in new_escorts {
+                systems.claim_special_site_ball(target_sys, esc_bid);
+                let esc_pos = site_pos + DVec3::new(esc_offset[0], esc_offset[1], esc_offset[2]);
+                let _ = sys_handle
+                    .spawn_ball_with_combat(
+                        make_site_npc_ball(esc_bid, esc_tid, esc_pos),
+                        super::pve_incursion_lifecycle::build_incursion_npc_combat_state(sde, esc_tid),
+                    )
+                    .await;
+            }
         }
     }
 
@@ -812,8 +821,10 @@ pub async fn process_incursion_site_completion_and_payout_core(
                     })
                     .unwrap_or_default()
             });
-        for bid in escort_bids {
-            let _ = sys_handle.remove_ball(bid).await;
+        if let Some(ref sys_handle) = sys_handle_opt {
+            for bid in escort_bids {
+                let _ = sys_handle.remove_ball(bid).await;
+            }
         }
         db.with_mut_snapshot(|snap| {
             let stale: Vec<i64> = snap

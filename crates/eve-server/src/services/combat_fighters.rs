@@ -216,7 +216,15 @@ async fn resolve_in_space_fighter_ship(
         true,
         true,
     )?;
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            action_label,
+            "Active ship is not spawned in space",
+        ));
+    };
     ctx.systems
         .ensure_live_fighters_hydrated_async(sys_id, &sys_handle)
         .await

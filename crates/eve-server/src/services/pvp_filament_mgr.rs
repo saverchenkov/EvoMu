@@ -709,8 +709,8 @@ pub async fn handle(
             }
             let caller_origin_pos = ctx
                 .systems
-                .get_or_spawn(cur_sys_for_check)
-                .get_ball_position_sync(cur_ship_for_check)
+                .get_handle(cur_sys_for_check)
+                .and_then(|h| h.get_ball_position_sync(cur_ship_for_check))
                 .map(|p| [p.x, p.y, p.z])
                 .or_else(|| {
                     ctx.db
@@ -830,7 +830,7 @@ pub async fn handle(
                     return Some(Err(e));
                 }
             }
-            let sys_handle_origin = ctx.systems.get_or_spawn(cur_sys_for_check);
+            let sys_handle_origin = ctx.systems.get_handle(cur_sys_for_check);
             let caller_pos_vec = DVec3::from_array(caller_origin_pos);
             let mut party_origins: Vec<(i64, i64, [f64; 3])> = Vec::new();
             if fleet_members_info.is_empty() {
@@ -841,7 +841,8 @@ pub async fn handle(
                         Some(caller_origin_pos)
                     } else {
                         sys_handle_origin
-                            .get_ball_position_sync(mship)
+                            .as_ref()
+                            .and_then(|h| h.get_ball_position_sync(mship))
                             .map(|p| [p.x, p.y, p.z])
                             .or_else(|| ctx.db.with_snapshot(|s| s.item_positions.get(&mship).copied()))
                     };

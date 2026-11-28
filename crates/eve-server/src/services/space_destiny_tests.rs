@@ -3337,3 +3337,527 @@ async fn update_state_cooldown_uses_sim_clock_domain_not_wall_time_rt91() {
     assert!(!guards.contains_key(&(900_000, char_id)), "stale guard in sys_id must be pruned");
     assert!(guards.len() <= 4);
 }
+
+#[tokio::test]
+async fn cold_system_admin_get_bubble_id_rejects_without_spawning() {
+    let ctx = test_ctx();
+    let sys_id: u32 = 30_000_144;
+    let ship_id: i64 = 889_101;
+    let other_ball_id: i64 = 889_102;
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+
+    let gm_sess = make_session(
+        9402,
+        98_000_001,
+        Some(sys_id),
+        Some(ship_id),
+        service_roles::ROLE_GMH,
+    );
+    let bound = bound_sys(sys_id);
+
+    let err_self = super::handle_admin_get_bubble_id(&ctx, &gm_sess, Some(&bound), &[])
+        .await
+        .expect_err("cold system must reject self AdminGetBubbleID");
+    assert_eq!(err_self.code, "BallNotFound");
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+
+    let err_other = super::handle_admin_get_bubble_id(
+        &ctx,
+        &gm_sess,
+        Some(&bound),
+        &[PyRep::Integer(other_ball_id)],
+    )
+    .await
+    .expect_err("cold system must reject other-ball AdminGetBubbleID");
+    assert_eq!(err_other.code, "BallNotVisible");
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+}
+
+#[tokio::test]
+async fn cold_system_in_space_rpcs_reject_without_spawning() {
+    use crate::services::station_structure::{
+        handle as handle_station_structure,
+        structure_ansiblex_navigation::{
+            handle_cmd_jump_through_structure_stargate, is_sovereign_nullsec_for_ansiblex,
+            ANSIBLEX_TYPE_ID,
+        },
+        structure_upwell_ops::{load_ext_state, save_ext_state},
+    };
+    use eve_db::{ObservatorySiteState, UpwellStructureRecord};
+
+    let mut ctx = test_ctx();
+    let kw = HashMap::new();
+    let char_id: i64 = 955_001;
+    let corp_id: i64 = 98_000_001;
+    let ship_id: i64 = 955_101;
+    let cont_id: i64 = 955_102;
+    let cont_tid: u32 = 955_901;
+
+    clone_type_with(&mut ctx.sde, 587, cont_tid, 340, 22, 100.0, 1_000.0, &[]);
+    ctx.db
+        .provision_gm_account("cold_rpc_pilot", "pw", char_id, "ColdRpcPilot");
+
+    let dock_sys: u32 = 30_000_142;
+    let anchor_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| {
+            s.solar_system_id >= 30_000_000
+                && s.solar_system_id < 31_000_000
+                && s.security_status <= 0.0
+                && s.solar_system_id != 30_100_000
+                && s.solar_system_id != dock_sys
+        })
+        .map(|s| s.solar_system_id)
+        .expect("nullsec system for anchor test");
+
+    let sov_systems: Vec<u32> = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .filter(|&sid| {
+            sid != dock_sys
+                && sid != anchor_sys
+                && is_sovereign_nullsec_for_ansiblex(&ctx.sde, sid)
+        })
+        .take(80)
+        .collect();
+    let (jb_sys_a, jb_sys_b) = sov_systems
+        .iter()
+        .find_map(|&a| {
+            sov_systems.iter().find_map(|&b| {
+                let d = crate::services::space_destiny::space_nav_travel::distance_ly(&ctx, a, b);
+                (a != b && d > 0.0 && d <= 4.5).then_some((a, b))
+            })
+        })
+        .expect("pair of sov null systems within 4.5 LY");
+
+    let obs_sys = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| {
+            (30_000_000..31_000_000).contains(&sid)
+                && sid != 30_100_000
+                && sid != dock_sys
+                && sid != anchor_sys
+                && sid != jb_sys_a
+                && sid != jb_sys_b
+        })
+        .expect("distinct observatory system");
+    let fighter_sys = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| {
+            (30_000_000..31_000_000).contains(&sid)
+                && sid != 30_100_000
+                && sid != dock_sys
+                && sid != anchor_sys
+                && sid != jb_sys_a
+                && sid != jb_sys_b
+                && sid != obs_sys
+        })
+        .expect("distinct fighter system");
+
+    let jb_a: i64 = 1_000_000_955_001;
+    let jb_b: i64 = 1_000_000_955_002;
+    let obs_site_id = 1_899_000_000 + i64::from(obs_sys);
+    let obs_gate_id = obs_site_id + 2;
+
+    let user_id = ctx.db.with_mut_snapshot(|snap| {
+        let uid = snap.characters[&char_id].user_id;
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = dock_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        put_item(
+            snap,
+            Some(ship_id),
+            587,
+            char_id,
+            i64::from(dock_sys),
+            InventoryFlag::None,
+            1,
+            true,
+        );
+        put_item(
+            snap,
+            Some(cont_id),
+            cont_tid,
+            char_id,
+            ship_id,
+            InventoryFlag::Cargo,
+            1,
+            false,
+        );
+        for (sid, sys) in [(jb_a, jb_sys_a), (jb_b, jb_sys_b)] {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: ANSIBLEX_TYPE_ID,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys,
+                    name: format!("ColdAnsiblex-{sid}"),
+                    position: [10_000.0, 0.0, 0.0],
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 500,
+                    ..Default::default()
+                },
+            );
+        }
+        let mut ext = load_ext_state(snap);
+        ext.jump_bridge_links.insert(jb_a, jb_b);
+        ext.jump_bridge_links.insert(jb_b, jb_a);
+        save_ext_state(snap, &ext);
+        snap.fob_observatory_state.observatory_sites.insert(
+            obs_site_id,
+            ObservatorySiteState {
+                site_id: obs_site_id,
+                solar_system_id: obs_sys,
+                gate_id: obs_gate_id,
+                ..Default::default()
+            },
+        );
+        uid
+    });
+
+    let mut sess = make_session(char_id, corp_id, Some(dock_sys), Some(ship_id), 0);
+    sess.user_id = Some(user_id);
+
+    // 1. station_structure Dock
+    assert!(ctx.systems.get_handle(dock_sys).is_none());
+    let dock_err = handle_station_structure(
+        &ctx,
+        &mut sess,
+        "stationSvc",
+        "Dock",
+        &[PyRep::Integer(60_003_760)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(dock_err.code, "ShipNotInSpace");
+    assert!(ctx.systems.get_handle(dock_sys).is_none());
+
+    // 2. station_structure AnchorStructure (secure container)
+    sess.solar_system_id = Some(anchor_sys);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = anchor_sys;
+        }
+    });
+    assert!(ctx.systems.get_handle(anchor_sys).is_none());
+    let anchor_err = handle_station_structure(
+        &ctx,
+        &mut sess,
+        "posMgr",
+        "AnchorStructure",
+        &[PyRep::Integer(cont_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(anchor_err.code, "ShipNotInSpace");
+    assert!(ctx.systems.get_handle(anchor_sys).is_none());
+
+    // 3. structure_ansiblex_navigation::handle_cmd_jump_through_structure_stargate
+    sess.solar_system_id = Some(jb_sys_a);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = jb_sys_a;
+        }
+    });
+    assert!(ctx.systems.get_handle(jb_sys_a).is_none());
+    assert!(ctx.systems.get_handle(jb_sys_b).is_none());
+    let jb_err = handle_cmd_jump_through_structure_stargate(&ctx, &mut sess, &[PyRep::Integer(jb_a)])
+        .await
+        .unwrap_err();
+    assert_eq!(jb_err.code, "ShipNotInSpace");
+    assert!(ctx.systems.get_handle(jb_sys_a).is_none());
+    assert!(ctx.systems.get_handle(jb_sys_b).is_none());
+
+    // 4. pve_fob_observatory::try_activate_observatory_gate
+    sess.solar_system_id = Some(obs_sys);
+    assert!(ctx.systems.get_handle(obs_sys).is_none());
+    let gate_err = crate::services::pve_fob_observatory::try_activate_observatory_gate(
+        &ctx,
+        &sess,
+        obs_sys,
+        obs_gate_id,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(gate_err.code, "ShipNotInSpace");
+    assert!(ctx.systems.get_handle(obs_sys).is_none());
+
+    // 5. combat_fighters in-space fighter RPC
+    sess.solar_system_id = Some(fighter_sys);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = fighter_sys;
+        }
+    });
+    assert!(ctx.systems.get_handle(fighter_sys).is_none());
+    let fighter_err = crate::services::combat_crimewatch::combat_fighters::handle_fighters(
+        &ctx,
+        &mut sess,
+        "fighterMgr",
+        "LaunchFightersFromTubes",
+        &[PyRep::List(vec![PyRep::Integer(159)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(fighter_err.code, "ShipNotInSpace");
+    assert!(ctx.systems.get_handle(fighter_sys).is_none());
+}
+
+#[tokio::test]
+async fn cold_system_ticks_cleanups_and_tourney_return_do_not_spawn() {
+    use crate::services::pve_exploration::{with_pve_exploration_reg, PveSiteInstance};
+    use crate::services::station_structure::structure_upwell_ops::{
+        load_ext_state, save_ext_state, StructureAccessProfile,
+    };
+    use crate::services::tourney_service::tourney_common::{
+        load_store, save_store, TourneyMatch, TourneyMatchState, TourneyPilot,
+    };
+    use eve_db::UpwellStructureRecord;
+
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+
+    let (home_st_id, home_sys) = ctx
+        .sde
+        .stations
+        .values()
+        .min_by_key(|s| s.station_id)
+        .map(|s| (s.station_id, s.solar_system_id))
+        .expect("SDE station");
+    let def_sys = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| (30_000_000..31_000_000).contains(&sid) && sid != 30_100_000 && sid != home_sys)
+        .expect("defense test system");
+    let hack_sys = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| {
+            (30_000_000..31_000_000).contains(&sid)
+                && sid != 30_100_000
+                && sid != home_sys
+                && sid != def_sys
+        })
+        .expect("hack test system");
+    let arena_sys = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| {
+            (30_000_000..31_000_000).contains(&sid)
+                && sid != 30_100_000
+                && sid != home_sys
+                && sid != def_sys
+                && sid != hack_sys
+        })
+        .expect("arena test system");
+    let wh_step_sys: u32 = 31_000_005;
+    let wh_dt_sys: u32 = 31_000_006;
+
+    // 1. trigger_system_structures_auto_defense
+    let def_sid: i64 = 1_000_000_956_001;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            def_sid,
+            UpwellStructureRecord {
+                structure_id: def_sid,
+                type_id: 35_832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: def_sys,
+                name: "ColdDefCitadel".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                ..Default::default()
+            },
+        );
+        let mut ext = load_ext_state(snap);
+        ext.access_profiles.insert(
+            def_sid,
+            StructureAccessProfile {
+                has_defense_config: true,
+                auto_defense_enabled: true,
+                ..Default::default()
+            },
+        );
+        save_ext_state(snap, &ext);
+    });
+    assert!(ctx.systems.get_handle(def_sys).is_none());
+    crate::services::structure_weapons_ops::trigger_system_structures_auto_defense(&ctx, def_sys).await;
+    assert!(ctx.systems.get_handle(def_sys).is_none());
+
+    // 2. step_wormhole_pve_system
+    assert!(ctx.systems.get_handle(wh_step_sys).is_none());
+    crate::services::wormhole_pve_escalations::step_wormhole_pve_system(&ctx, wh_step_sys, 1.0).await;
+    assert!(ctx.systems.get_handle(wh_step_sys).is_none());
+
+    // 3. process_wormhole_sites_on_downtime
+    assert!(ctx.systems.get_handle(wh_dt_sys).is_none());
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.downtime_counter = 3;
+        reg.sites_by_system.insert(
+            wh_dt_sys,
+            vec![PveSiteInstance {
+                site_id: "WH-COLD-DT".into(),
+                solar_system_id: wh_dt_sys,
+                wormhole_class: Some(3),
+                cleared: true,
+                activated_at_downtime: Some(1),
+                active_npc_ball_ids: vec![777_001],
+                ..Default::default()
+            }],
+        );
+    });
+    let despawned = crate::services::wormhole_pve_escalations::process_wormhole_sites_on_downtime(&ctx);
+    assert_eq!(despawned, 1);
+    assert!(ctx.systems.get_handle(wh_dt_sys).is_none());
+
+    // 4. handle_second_hack_failure_explosion
+    let cont_id: i64 = 956_201;
+    ctx.db.with_mut_snapshot(|snap| {
+        put_item(
+            snap,
+            Some(cont_id),
+            23,
+            90_000_001,
+            i64::from(hack_sys),
+            InventoryFlag::None,
+            1,
+            true,
+        );
+    });
+    assert!(ctx.systems.get_handle(hack_sys).is_none());
+    let (exploded, _, _, _) =
+        crate::services::pve_hacking_board::handle_second_hack_failure_explosion(
+            &ctx,
+            hack_sys,
+            "DATA_COLD_1",
+            cont_id,
+            false,
+        )
+        .await;
+    assert!(exploded);
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&cont_id)));
+    assert!(ctx.systems.get_handle(hack_sys).is_none());
+
+    // 5. tourney_return_ops (ReturnAllPlayers + TeleportRefHome)
+    let p_red: i64 = 956_301;
+    let p_ship: i64 = 956_302;
+    let gm_cid: i64 = 956_303;
+    let gm_ship: i64 = 956_304;
+    let match_id: i64 = 8_801;
+    ctx.db
+        .provision_gm_account("cold_tr_p1", "pw", p_red, "ColdTourneyPilot");
+    ctx.db
+        .provision_gm_account("cold_tr_gm", "pw", gm_cid, "ColdTourneyRef");
+    let gm_uid = ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid) in [(p_red, p_ship), (gm_cid, gm_ship)] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.solar_system_id = arena_sys;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.active_ship_id = sid;
+                ch.home_station_id = home_st_id;
+            }
+            put_item(
+                snap,
+                Some(sid),
+                587,
+                cid,
+                i64::from(arena_sys),
+                InventoryFlag::None,
+                1,
+                true,
+            );
+        }
+        let mut store = load_store(snap);
+        store.matches.insert(
+            match_id,
+            TourneyMatch {
+                match_id,
+                tourney_id: 1,
+                solar_system_id: i64::from(arena_sys),
+                state: TourneyMatchState::Completed,
+                red_players: vec![TourneyPilot {
+                    character_id: p_red,
+                    ship_type_id: 587,
+                    ship_id: p_ship,
+                    points: 2,
+                }],
+                referees: vec![gm_cid],
+                ..Default::default()
+            },
+        );
+        save_store(snap, &store, ctx.now_unix());
+        snap.characters[&gm_cid].user_id
+    });
+
+    let mut gm_sess = make_session(
+        gm_cid,
+        98_000_001,
+        Some(arena_sys),
+        Some(gm_ship),
+        service_roles::ROLE_GMH,
+    );
+    gm_sess.user_id = Some(gm_uid);
+    assert!(ctx.systems.get_handle(arena_sys).is_none());
+    assert!(ctx.systems.get_handle(home_sys).is_none());
+
+    crate::services::tourney_service::handle(
+        &ctx,
+        &mut gm_sess,
+        "tourneyMgr",
+        "ReturnAllPlayers",
+        &[PyRep::Integer(match_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    crate::services::tourney_service::handle(
+        &ctx,
+        &mut gm_sess,
+        "tourneyMgr",
+        "TeleportRefHome",
+        &[PyRep::Integer(match_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert!(ctx.systems.get_handle(arena_sys).is_none());
+    assert!(ctx.systems.get_handle(home_sys).is_none());
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&p_ship].location_id, home_st_id);
+        assert_eq!(snap.items[&gm_ship].location_id, home_st_id);
+    });
+}

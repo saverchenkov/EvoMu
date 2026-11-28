@@ -408,7 +408,9 @@ async fn activate_trace(
         with_abyssal_state(ctx, |st| {
             st.traces.remove(&trace.trace_ball_id);
         });
-        ctx.systems.get_or_spawn(cur_sys).try_remove_ball(trace.trace_ball_id);
+        if let Some(h) = ctx.systems.get_handle(cur_sys) {
+            h.try_remove_ball(trace.trace_ball_id);
+        }
         return Err(BridgeRpcError {
             code: "TraceExpired".into(),
             message: "Abyssal entrance trace has expired and collapsed".into(),
@@ -416,24 +418,30 @@ async fn activate_trace(
         });
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(cur_sys);
-    if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
-        if cs.is_cloaked {
-            return Err(BridgeRpcError {
-                code: "ShipIsCloaked".into(),
-                message: "Cannot activate Abyssal entrance trace while cloaked".into(),
-                client_error: None,
-            });
-        }
-        if cs.is_tethered {
-            return Err(BridgeRpcError {
-                code: "ShipIsTethered".into(),
-                message: "Cannot activate Abyssal entrance trace while tethered".into(),
-                client_error: None,
-            });
+    let sys_handle_opt = ctx.systems.get_handle(cur_sys);
+    if let Some(sys_handle) = sys_handle_opt.as_ref() {
+        if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
+            if cs.is_cloaked {
+                return Err(BridgeRpcError {
+                    code: "ShipIsCloaked".into(),
+                    message: "Cannot activate Abyssal entrance trace while cloaked".into(),
+                    client_error: None,
+                });
+            }
+            if cs.is_tethered {
+                return Err(BridgeRpcError {
+                    code: "ShipIsTethered".into(),
+                    message: "Cannot activate Abyssal entrance trace while tethered".into(),
+                    client_error: None,
+                });
+            }
         }
     }
-    let ship_pos = if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+    let ship_ball_opt = match sys_handle_opt.as_ref() {
+        Some(sys_handle) => sys_handle.get_ball_snapshot(ship_id).await.ok().flatten(),
+        None => None,
+    };
+    let ship_pos = if let Some((_, ball)) = ship_ball_opt {
         ball.position
     } else {
         let p = ctx.db.with_snapshot(|snap| {
@@ -566,11 +574,13 @@ async fn activate_trace(
         }
     };
 
-    if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.item_positions
-                .insert(ship_id, [ball.position.x, ball.position.y, ball.position.z]);
-        });
+    if let Some(sys_handle) = sys_handle_opt.as_ref() {
+        if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.item_positions
+                    .insert(ship_id, [ball.position.x, ball.position.y, ball.position.z]);
+            });
+        }
     }
 
     let entry_now = ctx.now_unix();
@@ -618,7 +628,9 @@ async fn activate_trace(
             .unwrap_or(1_200)
     });
 
-    sys_handle.try_remove_ball(ship_id);
+    if let Some(sys_handle) = sys_handle_opt.as_ref() {
+        sys_handle.try_remove_ball(ship_id);
+    }
     let abyss_handle = ctx
         .systems
         .get_handle(ABYSSAL_SPACE_SYSTEM_ID)
@@ -744,7 +756,7 @@ async fn activate_inventory_filament(
         })?;
 
     let now_unix = ctx.now_unix();
-    let origin_handle = ctx.systems.get_or_spawn(cur_sys);
+    let origin_handle_opt = ctx.systems.get_handle(cur_sys);
     ctx.db.with_mut_snapshot(|snap| {
         snap.item_positions
             .insert(ship_id, [ship_pos.x, ship_pos.y, ship_pos.z]);
@@ -804,14 +816,16 @@ async fn activate_inventory_filament(
         ));
     }
 
-    let _ = origin_handle
-        .spawn_ball(make_site_npc_ball(
-            trace_ball_id,
-            ABYSSAL_TRACE_TYPE_ID,
-            trace_pos,
-        ))
-        .await;
-    origin_handle.try_remove_ball(ship_id);
+    if let Some(origin_handle) = origin_handle_opt {
+        let _ = origin_handle
+            .spawn_ball(make_site_npc_ball(
+                trace_ball_id,
+                ABYSSAL_TRACE_TYPE_ID,
+                trace_pos,
+            ))
+            .await;
+        origin_handle.try_remove_ball(ship_id);
+    }
     let abyss_handle = ctx
         .systems
         .get_handle(ABYSSAL_SPACE_SYSTEM_ID)

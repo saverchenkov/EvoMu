@@ -223,8 +223,9 @@ pub async fn handle(
             let sys_handle = ctx.systems.get_or_spawn(arena_sys as u32);
             if ship_id > 0 && ship_type_id > 0 {
                 if old_sys != arena_sys as u32 && old_sys > 0 {
-                    let old_sys_handle = ctx.systems.get_or_spawn(old_sys);
-                    let _ = old_sys_handle.remove_ball(ship_id).await;
+                    if let Some(old_sys_handle) = ctx.systems.get_handle(old_sys) {
+                        let _ = old_sys_handle.remove_ball(ship_id).await;
+                    }
                 }
                 let ref_pos = DVec3::new(0.0, 10_000.0, 0.0);
                 let (mass, radius, max_vel, inertia) = ctx.sde.types.get(&ship_type_id).map(|t| {
@@ -343,8 +344,9 @@ pub async fn handle(
                         .with_emit_on_session_changed(false),
                     );
                     if ref_ship > 0 {
-                        let sys_handle = ctx.systems.get_or_spawn(old_sys);
-                        let _ = sys_handle.remove_ball(ref_ship).await;
+                        if let Some(sys_handle) = ctx.systems.get_handle(old_sys) {
+                            let _ = sys_handle.remove_ball(ref_ship).await;
+                        }
                     }
                     ctx.invalidate_bound_objects_for_session_transition(
                         caller_cid,

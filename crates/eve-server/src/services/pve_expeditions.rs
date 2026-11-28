@@ -1313,14 +1313,10 @@ pub async fn validate_and_advance_pve_site_room(
 
     if let Some(site_pos) = site_pos_opt {
         let ship_pos = match session.ship_id {
-            Some(sid) => ctx
-                .systems
-                .get_or_spawn(sys_id)
-                .get_ball_snapshot(sid)
-                .await
-                .ok()
-                .flatten()
-                .map(|(_, b)| b.position),
+            Some(sid) => match ctx.systems.get_handle(sys_id) {
+                Some(h) => h.get_ball_snapshot(sid).await.ok().flatten().map(|(_, b)| b.position),
+                None => None,
+            },
             None => None,
         };
         if let Some(ship_pos) = ship_pos {

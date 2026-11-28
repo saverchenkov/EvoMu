@@ -462,7 +462,9 @@ pub async fn trigger_system_structures_auto_defense(ctx: &ServerContext, sys_id:
     if sids.is_empty() {
         return;
     }
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
     let now_unix = ctx.now_unix();
     for sid in sids {
         trigger_structure_auto_defense_on_grid(ctx, &sys_handle, sys_id, sid, None, now_unix).await;

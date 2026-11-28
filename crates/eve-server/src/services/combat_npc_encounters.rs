@@ -279,115 +279,116 @@ async fn handle_npc_destroyed_in_space_inner(
         });
 
     if let Some((enc_id, _wave_num, next_types, base_pos)) = triggered_info {
-        let handle = systems.get_or_spawn(solar_system_id);
-        let mut new_balls = Vec::new();
-        let mut new_entities = Vec::with_capacity(next_types.len());
-        for (i, &tid) in next_types.iter().enumerate() {
-            let offset = DVec3::new(500.0 + (i as f64) * 1_000.0, 0.0, 0.0);
-            let pos = base_pos + offset;
-            let ball_id = db.with_mut_snapshot(|snap| {
-                snap.next_entity_id += 1;
-                snap.next_entity_id
-            });
+        if let Some(handle) = systems.get_handle(solar_system_id) {
+            let mut new_balls = Vec::new();
+            let mut new_entities = Vec::with_capacity(next_types.len());
+            for (i, &tid) in next_types.iter().enumerate() {
+                let offset = DVec3::new(500.0 + (i as f64) * 1_000.0, 0.0, 0.0);
+                let pos = base_pos + offset;
+                let ball_id = db.with_mut_snapshot(|snap| {
+                    snap.next_entity_id += 1;
+                    snap.next_entity_id
+                });
 
-            let sde_type = sde.types.get(&tid);
-            let attr = |aid: u16| -> Option<f64> {
-                sde_type.and_then(|t| t.default_attributes.get(&aid).copied())
-            };
-            let shield = attr(eve_sde::attr_ids::SHIELD_CAPACITY).unwrap_or(500.0);
-            let armor = attr(eve_sde::attr_ids::ARMOR_HP).unwrap_or(500.0);
-            let hull = attr(eve_sde::attr_ids::HP_STRUCT).unwrap_or(500.0);
-            let bounty = attr(481).unwrap_or(0.0);
-            let max_vel = attr(37).unwrap_or(250.0);
-            let opt_range = attr(54).unwrap_or(15_000.0).max(5_000.0);
-            let orb_range = (opt_range * 0.6).clamp(2_500.0, 20_000.0);
-            let dmg_mult = attr(64).unwrap_or(2.0).max(1.0);
-            let raw_em = attr(114).unwrap_or(0.0);
-            let raw_exp = attr(116).unwrap_or(0.0);
-            let raw_kin = attr(117).unwrap_or(0.0);
-            let raw_thm = attr(118).unwrap_or(0.0);
-            let damage_vector = if raw_em + raw_exp + raw_kin + raw_thm > 0.0 {
-                eve_destiny::DamageVector {
-                    em: raw_em * dmg_mult,
-                    explosive: raw_exp * dmg_mult,
-                    kinetic: raw_kin * dmg_mult,
-                    thermal: raw_thm * dmg_mult,
+                let sde_type = sde.types.get(&tid);
+                let attr = |aid: u16| -> Option<f64> {
+                    sde_type.and_then(|t| t.default_attributes.get(&aid).copied())
+                };
+                let shield = attr(eve_sde::attr_ids::SHIELD_CAPACITY).unwrap_or(500.0);
+                let armor = attr(eve_sde::attr_ids::ARMOR_HP).unwrap_or(500.0);
+                let hull = attr(eve_sde::attr_ids::HP_STRUCT).unwrap_or(500.0);
+                let bounty = attr(481).unwrap_or(0.0);
+                let max_vel = attr(37).unwrap_or(250.0);
+                let opt_range = attr(54).unwrap_or(15_000.0).max(5_000.0);
+                let orb_range = (opt_range * 0.6).clamp(2_500.0, 20_000.0);
+                let dmg_mult = attr(64).unwrap_or(2.0).max(1.0);
+                let raw_em = attr(114).unwrap_or(0.0);
+                let raw_exp = attr(116).unwrap_or(0.0);
+                let raw_kin = attr(117).unwrap_or(0.0);
+                let raw_thm = attr(118).unwrap_or(0.0);
+                let damage_vector = if raw_em + raw_exp + raw_kin + raw_thm > 0.0 {
+                    eve_destiny::DamageVector {
+                        em: raw_em * dmg_mult,
+                        explosive: raw_exp * dmg_mult,
+                        kinetic: raw_kin * dmg_mult,
+                        thermal: raw_thm * dmg_mult,
+                    }
+                } else {
+                    eve_destiny::DamageVector::new(25.0, 25.0, 25.0, 25.0)
+                };
+                let faction_id = sde_type.and_then(|t| t.faction_id).unwrap_or(500_010);
+
+                let ball = eve_destiny::Ball {
+                    id: ball_id,
+                    type_id: tid,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: max_vel,
+                    inertia: 2.0,
+                    mass: 500_000.0,
+                    radius: 30.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                };
+
+                let _ = handle.spawn_ball_with_combat(
+                    ball,
+                    eve_destiny::CombatState {
+                        shield_hp: shield,
+                        max_shield_hp: shield,
+                        armor_hp: armor,
+                        max_armor_hp: armor,
+                        structure_hp: hull,
+                        max_structure_hp: hull,
+                        ..Default::default()
+                    },
+                ).await;
+
+                new_entities.push(ExtendedNpcEntity {
+                    ball_id,
+                    type_id: tid,
+                    faction_id,
+                    archetype: "BeltRat".into(),
+                    solar_system_id,
+                    spawn_group_id: enc_id,
+                    target_id: None,
+                    aggression_threat: std::collections::HashMap::new(),
+                    threat_table: std::collections::HashMap::new(),
+                    bounty_isk: bounty,
+                    optimal_range: opt_range,
+                    orbit_range: orb_range,
+                    damage_vector,
+                    entropic_cycles: 0,
+                    drifter_overshield_hp: 0.0,
+                    drifter_doomsday_fired: false,
+                    web_speed_factor: 0.0,
+                    web_range: 0.0,
+                    scram_strength: 0.0,
+                    scram_range: 0.0,
+                    neut_amount: 0.0,
+                    ecm_jammed: false,
+                    remote_shield_rep: 0.0,
+                    remote_armor_rep: 0.0,
+                    remote_rep_range: 0.0,
+                    tag_drop_type_id: None,
+                    spawn_position: pos,
+                    sleeper_wh_class: 0,
+                    custom_cargo_loot: None,
+                });
+
+                new_balls.push(ball_id);
+            }
+
+            with_mut_combat_runtime_with_locks(db, combat_ephemeral, |rt| {
+                for entity in new_entities {
+                    rt.npc_entities.insert(entity.ball_id, entity);
                 }
-            } else {
-                eve_destiny::DamageVector::new(25.0, 25.0, 25.0, 25.0)
-            };
-            let faction_id = sde_type.and_then(|t| t.faction_id).unwrap_or(500_010);
-
-            let ball = eve_destiny::Ball {
-                id: ball_id,
-                type_id: tid,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: max_vel,
-                inertia: 2.0,
-                mass: 500_000.0,
-                radius: 30.0,
-                speed_fraction: 0.0,
-                mode: eve_destiny::MovementMode::Stop,
-            };
-
-            let _ = handle.spawn_ball_with_combat(
-                ball,
-                eve_destiny::CombatState {
-                    shield_hp: shield,
-                    max_shield_hp: shield,
-                    armor_hp: armor,
-                    max_armor_hp: armor,
-                    structure_hp: hull,
-                    max_structure_hp: hull,
-                    ..Default::default()
-                },
-            ).await;
-
-            new_entities.push(ExtendedNpcEntity {
-                ball_id,
-                type_id: tid,
-                faction_id,
-                archetype: "BeltRat".into(),
-                solar_system_id,
-                spawn_group_id: enc_id,
-                target_id: None,
-                aggression_threat: std::collections::HashMap::new(),
-                threat_table: std::collections::HashMap::new(),
-                bounty_isk: bounty,
-                optimal_range: opt_range,
-                orbit_range: orb_range,
-                damage_vector,
-                entropic_cycles: 0,
-                drifter_overshield_hp: 0.0,
-                drifter_doomsday_fired: false,
-                web_speed_factor: 0.0,
-                web_range: 0.0,
-                scram_strength: 0.0,
-                scram_range: 0.0,
-                neut_amount: 0.0,
-                ecm_jammed: false,
-                remote_shield_rep: 0.0,
-                remote_armor_rep: 0.0,
-                remote_rep_range: 0.0,
-                tag_drop_type_id: None,
-                spawn_position: pos,
-                sleeper_wh_class: 0,
-                custom_cargo_loot: None,
+                if let Some(enc) = rt.encounter_waves.get_mut(&enc_id) {
+                    enc.trigger_ball_id = new_balls.first().copied().unwrap_or(0);
+                    enc.active_wave_ball_ids.extend(new_balls);
+                }
             });
-
-            new_balls.push(ball_id);
         }
-
-        with_mut_combat_runtime_with_locks(db, combat_ephemeral, |rt| {
-            for entity in new_entities {
-                rt.npc_entities.insert(entity.ball_id, entity);
-            }
-            if let Some(enc) = rt.encounter_waves.get_mut(&enc_id) {
-                enc.trigger_ball_id = new_balls.first().copied().unwrap_or(0);
-                enc.active_wave_ball_ids.extend(new_balls);
-            }
-        });
     }
 
     // 2. Remove from npc_entities, cache metadata for wreck/loot creation, and award bounty once
@@ -1102,7 +1103,7 @@ pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id:
     if pending.is_empty() {
         return;
     }
-    let handle = ctx.systems.get_or_spawn(solar_system_id);
+    let handle_opt = ctx.systems.get_handle(solar_system_id);
     let now_unix = ctx.now_unix();
     for npc in pending {
         with_mut_combat_runtime(ctx, |rt| {
@@ -1199,35 +1200,37 @@ pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id:
                 .unwrap_or_else(|e| e.into_inner())
                 .get_or_create(killer_char_id)
                 .is_criminal(now_unix);
-        let _ = handle
-            .spawn_ball_with_meta(
-                eve_destiny::Ball {
-                    id: wreck_id,
-                    type_id: wreck_tid,
-                    position: npc.spawn_position,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 1_000.0,
-                    radius: 25.0,
-                    speed_fraction: 0.0,
-                    mode: eve_destiny::MovementMode::Stop,
-                },
-                ctx.build_type_combat_state(wreck_tid),
-                eve_destiny::SlimItemMeta {
-                    group_id: wreck_group_id,
-                    category_id: wreck_category_id,
-                    owner_id: killer_char_id,
-                    char_id: None,
-                    corp_id: -1,
-                    alliance_id: -1,
-                    security_status: 0.0,
-                    is_cloaked: false,
-                    name: wreck_name,
-                    ..Default::default()
-                },
-            )
-            .await;
+        if let Some(ref handle) = handle_opt {
+            let _ = handle
+                .spawn_ball_with_meta(
+                    eve_destiny::Ball {
+                        id: wreck_id,
+                        type_id: wreck_tid,
+                        position: npc.spawn_position,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: 1_000.0,
+                        radius: 25.0,
+                        speed_fraction: 0.0,
+                        mode: eve_destiny::MovementMode::Stop,
+                    },
+                    ctx.build_type_combat_state(wreck_tid),
+                    eve_destiny::SlimItemMeta {
+                        group_id: wreck_group_id,
+                        category_id: wreck_category_id,
+                        owner_id: killer_char_id,
+                        char_id: None,
+                        corp_id: -1,
+                        alliance_id: -1,
+                        security_status: 0.0,
+                        is_cloaked: false,
+                        name: wreck_name,
+                        ..Default::default()
+                    },
+                )
+                .await;
+        }
         crate::services::combat_crimewatch::register_container_lifetime(
             ctx,
             wreck_id,
