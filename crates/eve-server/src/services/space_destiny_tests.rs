@@ -297,6 +297,12 @@ async fn ess_mgr_dispatch_covers_data_thefts_unlink_and_unlock() {
             .insert(null_sys, vec![(9301, 10_000_000.0, now_u)]);
     });
 
+    ctx.systems
+        .wake_for_session_arrival(
+            null_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake null_sys");
     let mut ns_sess = make_session(9301, 98000001, Some(null_sys), Some(88301), 0);
     let data = handle(&ctx, &mut ns_sess, None, "essMgr", "GetDataForClientSolarSystem", &[], &HashMap::new())
         .await
