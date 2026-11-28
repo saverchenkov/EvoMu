@@ -1131,6 +1131,7 @@ fn system_command_all_variants_construct_and_match() {
         },
         SystemCommand::ReleaseInFlightSuperweapon {
             ship_id: 1,
+            token: 1,
             reply: None,
         },
         SystemCommand::RecordModuleCooldown {
@@ -1763,6 +1764,7 @@ fn system_command_may_mutate_system_view_classifies_reads_vs_writes() {
     .may_mutate_system_view());
     assert!(SystemCommand::ReleaseInFlightSuperweapon {
         ship_id: 1,
+        token: 1,
         reply: None,
     }
     .may_mutate_system_view());

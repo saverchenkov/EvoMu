@@ -34,7 +34,8 @@ pub struct ActorEwarState {
     pub projected_ewar_sources: HashMap<i64, i64>,
     pub active_ewar_starts: HashMap<(i64, i64), Vec<(i64, &'static str)>>,
     pub remote_assistance: HashMap<i64, Vec<ProjectedRemoteAssistance>>,
-    pub in_flight_superweapons: HashSet<i64>,
+    pub in_flight_superweapons: HashMap<i64, u64>,
+    pub next_in_flight_superweapon_token: u64,
 }
 
 impl ActorEwarState {
@@ -390,6 +391,59 @@ pub(in crate::system_actor) fn finalize_post_unlock_ops_deactivations_in_actor(
         actor_st.has_tidi_history = true;
     }
     let has_tidi_history = actor_st.has_tidi_history;
+    if let Some(ewar_op) = ops.worker_ewar_sync.take() {
+        let (mutated, ewar_snap) = match ewar_op {
+            super::post_unlock::WorkerEwarSyncOp::FlushModuleEwar {
+                source_ship_id,
+                source_module_id,
+                allow_db_source_fallback,
+            } => {
+                let snap = flush_module_ewar_in_state(
+                    &mut actor_st.ewar_state,
+                    source_ship_id,
+                    source_module_id,
+                    allow_db_source_fallback,
+                );
+                let mutated = !snap.started_targets.is_empty()
+                    || !snap.projected_targets.is_empty()
+                    || !snap.affected_ships.is_empty()
+                    || !snap.remote_assistance_affected_ships.is_empty();
+                (mutated, snap)
+            }
+            super::post_unlock::WorkerEwarSyncOp::RemoveRemoteAssistanceByModule {
+                source_ship_id,
+                source_module_id,
+            } => {
+                let remote_assistance_affected_ships = remove_remote_assistance_by_module_in_state(
+                    &mut actor_st.ewar_state,
+                    source_ship_id,
+                    source_module_id,
+                );
+                let mutated = !remote_assistance_affected_ships.is_empty();
+                (
+                    mutated,
+                    ModuleEwarFlushSnapshot {
+                        remote_assistance_affected_ships,
+                        ..Default::default()
+                    },
+                )
+            }
+        };
+        ops.intents
+            .push(super::post_unlock::PostUnlockIntent::CooldownDeactivation(
+                Box::new(super::post_unlock::DeferredCooldownDeactOp {
+                    solar_system_id,
+                    char_id: 0,
+                    cycle: ActiveModuleCycle::default(),
+                    ewar_snap,
+                    post_hook: Arc::new(|_, _, _, _| {}),
+                    cooldown_payload: None,
+                    cooldown_persist_gate: Arc::clone(cooldown_persist_gate),
+                    cmd_tx_weak: cmd_tx_weak.cloned(),
+                }),
+            ));
+        return mutated;
+    }
     if !ops.has_deactivation_hook() {
         return false;
     }
@@ -566,12 +620,33 @@ pub(in crate::system_actor) fn handle_ewar_and_cooldown_command(
             None
         }
         SystemCommand::TryAcquireInFlightSuperweapon { ship_id, reply } => {
-            let acquired = exec_ctx.actor_st.ewar_state.in_flight_superweapons.insert(ship_id);
-            defer_reply(exec_ctx.deferred_replies, reply, Ok(acquired));
+            let ewar = &mut exec_ctx.actor_st.ewar_state;
+            let token_opt = if ewar.in_flight_superweapons.contains_key(&ship_id) {
+                None
+            } else {
+                ewar.next_in_flight_superweapon_token =
+                    ewar.next_in_flight_superweapon_token.wrapping_add(1).max(1);
+                let token = ewar.next_in_flight_superweapon_token;
+                ewar.in_flight_superweapons.insert(ship_id, token);
+                Some(token)
+            };
+            defer_reply(exec_ctx.deferred_replies, reply, Ok(token_opt));
             None
         }
-        SystemCommand::ReleaseInFlightSuperweapon { ship_id, reply } => {
-            let removed = exec_ctx.actor_st.ewar_state.in_flight_superweapons.remove(&ship_id);
+        SystemCommand::ReleaseInFlightSuperweapon { ship_id, token, reply } => {
+            let removed = exec_ctx
+                .actor_st
+                .ewar_state
+                .in_flight_superweapons
+                .get(&ship_id)
+                .copied()
+                == Some(token)
+                && exec_ctx
+                    .actor_st
+                    .ewar_state
+                    .in_flight_superweapons
+                    .remove(&ship_id)
+                    .is_some();
             if let Some(reply) = reply {
                 defer_reply(exec_ctx.deferred_replies, reply, Ok(removed));
             }
@@ -838,6 +913,28 @@ impl SystemHandle {
             .is_some_and(|&tid| tid == std::thread::current().id())
     }
 
+    fn dispatch_worker_ewar_sync(
+        &self,
+        op: super::post_unlock::WorkerEwarSyncOp,
+    ) -> Result<ModuleEwarFlushSnapshot, String> {
+        if self.cmd_tx.is_closed() {
+            return Err(format!("system {} actor closed", self.solar_system_id));
+        }
+        let mut ops = super::post_unlock::PostUnlockOps::default();
+        ops.worker_ewar_sync = Some(op);
+        let Some(mut hooks) = super::post_unlock::call_actor_callback(&self.worker_cb_tx, |reply| {
+            super::post_unlock::PostUnlockActorCallback::FinalizeDeactivations {
+                ops,
+                raw: None,
+                post_pair: None,
+                reply,
+            }
+        }) else {
+            return Err(format!("system {} actor closed", self.solar_system_id));
+        };
+        Ok(hooks.pop().map(|h| h.ewar_snap).unwrap_or_default())
+    }
+
     /// Synchronously removes active/projected EWAR state for `(source_ship_id, source_module_id)`
     /// and guarantees [`SystemView`] reflects the removal before returning.
     /// Requires no ranked locks held by the caller.
@@ -853,8 +950,8 @@ impl SystemHandle {
                 self.solar_system_id
             ));
         }
-        if self.is_on_actor_flush_thread() || self.is_on_post_unlock_worker_thread() {
-            if self.is_on_actor_flush_thread() && self.cmd_tx.is_closed() {
+        if self.is_on_actor_flush_thread() {
+            if self.cmd_tx.is_closed() {
                 return Err(format!("system {} actor closed", self.solar_system_id));
             }
             return Ok(super::ball_ops::run_direct_ball_op_on_current_thread(
@@ -869,6 +966,15 @@ impl SystemHandle {
                     )
                 },
             ));
+        }
+        if self.is_on_post_unlock_worker_thread() {
+            return self.dispatch_worker_ewar_sync(
+                super::post_unlock::WorkerEwarSyncOp::FlushModuleEwar {
+                    source_ship_id,
+                    source_module_id,
+                    allow_db_source_fallback,
+                },
+            );
         }
         dispatch_actor_sync_with_deadline(
             self, "FlushModuleEwar", ACTOR_CMD_TIMEOUT,
@@ -933,8 +1039,8 @@ impl SystemHandle {
                 self.solar_system_id
             ));
         }
-        if self.is_on_actor_flush_thread() || self.is_on_post_unlock_worker_thread() {
-            if self.is_on_actor_flush_thread() && self.cmd_tx.is_closed() {
+        if self.is_on_actor_flush_thread() {
+            if self.cmd_tx.is_closed() {
                 return Err(format!("system {} actor closed", self.solar_system_id));
             }
             return Ok(super::ball_ops::run_direct_ball_op_on_current_thread(
@@ -948,6 +1054,16 @@ impl SystemHandle {
                     )
                 },
             ));
+        }
+        if self.is_on_post_unlock_worker_thread() {
+            return self
+                .dispatch_worker_ewar_sync(
+                    super::post_unlock::WorkerEwarSyncOp::RemoveRemoteAssistanceByModule {
+                        source_ship_id,
+                        source_module_id,
+                    },
+                )
+                .map(|snap| snap.remote_assistance_affected_ships);
         }
         dispatch_actor_sync_with_deadline(
             self,
@@ -997,7 +1113,10 @@ impl SystemHandle {
         )
     }
 
-    pub async fn try_acquire_in_flight_superweapon(&self, ship_id: i64) -> Result<bool, String> {
+    pub async fn try_acquire_in_flight_superweapon(
+        &self,
+        ship_id: i64,
+    ) -> Result<Option<u64>, String> {
         call_actor_result_with_deadline(
             self,
             "TryAcquireInFlightSuperweapon",
@@ -1007,22 +1126,28 @@ impl SystemHandle {
         .await
     }
 
-    pub async fn release_in_flight_superweapon(&self, ship_id: i64) -> Result<bool, String> {
+    pub async fn release_in_flight_superweapon(
+        &self,
+        ship_id: i64,
+        token: u64,
+    ) -> Result<bool, String> {
         call_actor_result_with_deadline(
             self,
             "ReleaseInFlightSuperweapon",
             ACTOR_CMD_TIMEOUT,
             |reply| SystemCommand::ReleaseInFlightSuperweapon {
                 ship_id,
+                token,
                 reply: Some(reply),
             },
         )
         .await
     }
 
-    pub fn release_in_flight_superweapon_best_effort(&self, ship_id: i64) {
+    pub fn release_in_flight_superweapon_best_effort(&self, ship_id: i64, token: u64) {
         let cmd = SystemCommand::ReleaseInFlightSuperweapon {
             ship_id,
+            token,
             reply: None,
         };
         if let Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) = self.cmd_tx.try_send(cmd) {

@@ -491,15 +491,20 @@ pub fn apply_projected_remote_assistance(
         0.5_f64.powf(((dist_m - optimal) / falloff).powi(2))
     };
 
-    // Enforce full safety level, Criminal/Suspect inheritance, and CONCORD interference for remote assistance
+    // Enforce read-only safety level & resolve live system handle before any stateful mutations.
     let sys_id = precheck_projected_remote_assistance_safety(ctx, char_id, target_id)?;
-    crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_remote_assistance(
-        ctx,
-        char_id,
-        ship_id,
-        sys_id,
-        target_id,
-    )?;
+    let Some(handle) = ctx
+        .systems
+        .find_ship_live_handle(target_id)
+        .or_else(|| ctx.systems.find_ship_live_handle(ship_id))
+        .or_else(|| ctx.systems.get_handle(sys_id))
+    else {
+        return Err(BridgeRpcError::from_client_error(
+            eve_proto::ClientError::Internal(format!(
+                "solar system {sys_id} actor unavailable for projected remote assistance"
+            )),
+        ));
+    };
 
     let entry = if mod_type.group_id == 290 {
         ProjectedRemoteAssistance {
@@ -526,26 +531,29 @@ pub fn apply_projected_remote_assistance(
             tracking_speed_bonus_pct: mod_state.get_attribute(767, &ctx.sde) * falloff_mult,
         }
     };
-    let handle_opt = ctx
-        .systems
-        .find_ship_live_handle(target_id)
-        .or_else(|| ctx.systems.find_ship_live_handle(ship_id))
-        .or_else(|| ctx.systems.get_handle(sys_id));
-    if let Some(handle) = handle_opt {
-        if let Err(err) = handle.upsert_remote_assistance_sync(target_id, entry) {
-            tracing::warn!(
-                target_id,
-                source_ship_id = ship_id,
-                module_id,
-                error = %err,
-                "failed to upsert projected remote assistance in system actor"
-            );
-            return Err(BridgeRpcError::from_client_error(
-                eve_proto::ClientError::Internal(err),
-            ));
-        }
-        ctx.invalidate_and_push_fit(target_id);
+    if let Err(err) = handle.upsert_remote_assistance_sync(target_id, entry) {
+        tracing::warn!(
+            target_id,
+            source_ship_id = ship_id,
+            module_id,
+            error = %err,
+            "failed to upsert projected remote assistance in system actor"
+        );
+        return Err(BridgeRpcError::from_client_error(
+            eve_proto::ClientError::Internal(err),
+        ));
     }
+    if let Err(err) = crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_remote_assistance(
+        ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        target_id,
+    ) {
+        let _ = handle.remove_remote_assistance_by_module_sync(ship_id, module_id);
+        return Err(err);
+    }
+    ctx.invalidate_and_push_fit(target_id);
     Ok(())
 }
 

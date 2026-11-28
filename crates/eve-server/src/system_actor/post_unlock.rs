@@ -224,6 +224,19 @@ impl PostUnlockIntent {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(in crate::system_actor) enum WorkerEwarSyncOp {
+    FlushModuleEwar {
+        source_ship_id: i64,
+        source_module_id: i64,
+        allow_db_source_fallback: bool,
+    },
+    RemoveRemoteAssistanceByModule {
+        source_ship_id: i64,
+        source_module_id: i64,
+    },
+}
+
 /// Ordered queue item collected under actor locks (`RANK_BALLPARK` / `RANK_ACTOR_STATE`) (`#1170`).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PostUnlockOps {
@@ -231,6 +244,7 @@ pub(crate) struct PostUnlockOps {
     pub item_qty_deltas: Vec<(ItemId, i32)>,
     pub crystal_dmg_deltas: Vec<(ItemId, f64)>,
     pub overheat_dmg_deltas: Vec<(ItemId, f64, bool)>,
+    pub(in crate::system_actor) worker_ewar_sync: Option<WorkerEwarSyncOp>,
 }
 
 impl PostUnlockActorShadows {
@@ -266,7 +280,7 @@ impl PostUnlockActorShadows {
 }
 
 impl PostUnlockOps {
-    pub(crate) fn is_empty(&self) -> bool { self.intents.is_empty() }
+    pub(crate) fn is_empty(&self) -> bool { self.intents.is_empty() && self.worker_ewar_sync.is_none() }
     pub(crate) fn has_deactivation_hook(&self) -> bool {
         self.intents.iter().any(|intent| {
             matches!(
@@ -1251,7 +1265,7 @@ pub(in crate::system_actor) enum ActorCallbackSink<'a> {
     InActor(&'a dyn DirectActorCallbackExecutor),
 }
 
-fn call_actor_callback<R>(
+pub(in crate::system_actor) fn call_actor_callback<R>(
     tx: &tokio::sync::mpsc::UnboundedSender<PostUnlockActorCallback>,
     build: impl FnOnce(std::sync::mpsc::SyncSender<R>) -> PostUnlockActorCallback,
 ) -> Option<R> {

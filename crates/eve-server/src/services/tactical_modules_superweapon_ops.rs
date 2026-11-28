@@ -264,12 +264,13 @@ fn deduct_superweapon_fuel_with_diffs(
 struct InFlightSuperweaponGuard {
     sys: crate::system_actor::SystemHandle,
     ship_id: i64,
+    token: u64,
     released: bool,
 }
 
 impl InFlightSuperweaponGuard {
     async fn release(mut self) {
-        if self.sys.release_in_flight_superweapon(self.ship_id).await.is_ok() {
+        if self.sys.release_in_flight_superweapon(self.ship_id, self.token).await.is_ok() {
             self.released = true;
         }
     }
@@ -279,7 +280,7 @@ impl Drop for InFlightSuperweaponGuard {
     fn drop(&mut self) {
         if !self.released {
             self.sys
-                .release_in_flight_superweapon_best_effort(self.ship_id);
+                .release_in_flight_superweapon_best_effort(self.ship_id, self.token);
         }
     }
 }
@@ -936,18 +937,21 @@ async fn activate_superweapon_with_args_inner(
         ]));
     }
 
-    if !sys
+    let Some(token) = sys
         .try_acquire_in_flight_superweapon(ship_id)
         .await
-        .unwrap_or(false)
-    {
+        .map_err(|err| {
+            BridgeRpcError::from_client_error(eve_proto::ClientError::Internal(err))
+        })?
+    else {
         return Err(module_in_reactivation_delay_error(format!(
             "Superweapon module {module_id} on ship {ship_id} is already in reactivation delay"
         )));
-    }
+    };
     let in_flight_guard = InFlightSuperweaponGuard {
         sys: sys.clone(),
         ship_id,
+        token,
         released: false,
     };
     let is_slash = action_method == "ActivateSlashModule";

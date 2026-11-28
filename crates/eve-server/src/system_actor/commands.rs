@@ -808,10 +808,11 @@ pub enum SystemCommand {
     },
     TryAcquireInFlightSuperweapon {
         ship_id: i64,
-        reply: oneshot::Sender<Result<bool, String>>,
+        reply: oneshot::Sender<Result<Option<u64>, String>>,
     },
     ReleaseInFlightSuperweapon {
         ship_id: i64,
+        token: u64,
         reply: Option<oneshot::Sender<Result<bool, String>>>,
     },
     RecordModuleCooldown {

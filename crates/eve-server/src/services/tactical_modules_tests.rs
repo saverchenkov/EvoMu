@@ -758,7 +758,29 @@ async fn wire_module_deactivation_hook_flushes_remote_assistance_on_current_thre
     apply_projected_rtc_to_module_attrs(&ctx, ship_id, &mut mod_attrs);
     assert!((*mod_attrs.get(&54).unwrap() - 10_000.0).abs() < 1e-6);
 
-    // `apply_projected_remote_assistance` must propagate actor failure and skip fit invalidation.
+    // `apply_projected_remote_assistance` must not mutate Crimewatch or DB `limited_engagements`
+    // when actor upsert fails OR when no live system handle exists (`G2B6-R2-P1-02`).
+    let now_unix = ctx.now_unix();
+    let third_party_char_id = 94_001_099_i64;
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        logi_char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_id).suspect_flag_until_unix = now_unix + 900;
+        cw.states.remove(&logi_char_id);
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        crate::services::combat_crimewatch::combat_crimewatch_engagements::add_mutual_limited_engagement_in_snap(
+            snap,
+            char_id,
+            third_party_char_id,
+            now_unix,
+        );
+    });
+
     let rev_before_err = ctx.current_fit_rev(ship_id);
     {
         let lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_NPC_SPAWNS }> =
@@ -782,10 +804,56 @@ async fn wire_module_deactivation_hook_flushes_remote_assistance_on_current_thre
     }
     assert_eq!(ctx.current_fit_rev(ship_id), rev_before_err);
     assert!(sys.view().remote_assistance_for(ship_id).is_none());
+    assert!(
+        ctx.crimewatch.read().unwrap().states.get(&logi_char_id).is_none(),
+        "failed actor upsert must leave helper Crimewatch unmutated"
+    );
+    assert!(
+        ctx.db.with_snapshot(|s| {
+            !s.combat_crimewatch_state
+                .as_inner()
+                .limited_engagements
+                .iter()
+                .any(|(&(a, b), _)| a == logi_char_id || b == logi_char_id)
+        }),
+        "failed actor upsert must leave DB limited_engagements unmutated"
+    );
 
     assert!(
         tokio::time::timeout(std::time::Duration::from_secs(2), ctx.systems.stop_system(sys_id))
             .await
             .expect("stop_system must drain cleanly")
+    );
+
+    // With system stopped (`handle == None`), must fail closed without mutating Crimewatch or DB.
+    let cold_err = apply_projected_remote_assistance(
+        &ctx,
+        logi_char_id,
+        logi_ship_id,
+        rsb_mod_id,
+        &rsb_type,
+        &rsb_state,
+        Some(ship_id),
+        10_000.0,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        cold_err.client_error.as_deref(),
+        Some(eve_proto::ClientError::Internal(_))
+    ));
+    assert_eq!(ctx.current_fit_rev(ship_id), rev_before_err);
+    assert!(
+        ctx.crimewatch.read().unwrap().states.get(&logi_char_id).is_none(),
+        "cold/missing system handle must leave helper Crimewatch unmutated"
+    );
+    assert!(
+        ctx.db.with_snapshot(|s| {
+            !s.combat_crimewatch_state
+                .as_inner()
+                .limited_engagements
+                .iter()
+                .any(|(&(a, b), _)| a == logi_char_id || b == logi_char_id)
+        }),
+        "cold/missing system handle must leave DB limited_engagements unmutated"
     );
 }
