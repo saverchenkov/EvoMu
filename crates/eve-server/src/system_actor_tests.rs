@@ -3214,32 +3214,37 @@ async fn set_tidi_factor_raw_updates_view_without_locking() {
     rel_tx.send(()).unwrap();
     holder.join().unwrap();
     assert!((sys.view().tidi_factor - 0.20).abs() < 1e-12);
+
+    // Concurrent actor view publication (`step_manual` / `publish_view_snapshot`) must never
+    // overwrite a lock-free `set_tidi_factor_raw` update back to an older `tidi_factor` (`BF-02`).
+    let sys_tidi = sys.clone();
+    let tidi_updater = tokio::spawn(async move {
+        for i in 0..32_u32 {
+            let target = if i == 31 { 0.45 } else { 0.20 + 0.01 * f64::from(i % 5) };
+            let _ = sys_tidi.set_tidi_factor_raw(target);
+            tokio::task::yield_now().await;
+        }
+    });
+    for _ in 0..32 {
+        let _ = sys.step_manual(0.1).await.unwrap();
+    }
+    tidi_updater.await.unwrap();
+    let _ = sys.set_tidi_factor_raw(0.45);
+    let _ = sys.step_manual(0.1).await.unwrap();
+    assert!((sys.view().tidi_factor - 0.45).abs() < 1e-12);
+    assert!((sys.tidi_factor() - 0.45).abs() < 1e-12);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_system_and_late_stopping_cooldowns_persist_via_actor_without_external_locks() {
     use eve_db::ServerClock;
-    let (jita, amarr) = (30_000_142_u32, 30_002_187_u32);
+    let jita = 30_000_142_u32;
     let clock = Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_750_500_000));
     let repo = eve_db::WorldRepository::new_empty();
     repo.set_clock(clock.clone());
-    repo.with_mut_snapshot(|snap| {
-        let nid = -(7_500_000_000_000_i64.saturating_add(amarr as i64));
-        snap.owner_notes.insert(
-            nid,
-            eve_db::OwnerNoteRecord {
-                note_id: nid,
-                character_id: 0,
-                item_id: nid,
-                label: "tidi".to_string(),
-                note: "0.5".to_string(),
-                timestamp_unix: 100,
-            },
-        );
-    });
     let db = Arc::new(repo);
     let sde = Arc::new(SdeRegistry::with_canonical_seed());
-    let reg = Arc::new(SystemRegistry::with_sde_and_db(sde, Arc::clone(&db)));
+    let reg = Arc::new(SystemRegistry::with_sde_and_db(Arc::clone(&sde), Arc::clone(&db)));
 
     // 1. Graceful `stop_system` flushes rebased TiDi cooldowns inside the actor task before
     //    `cmd_tx.closed()`, and `finish_stopping_slot` merges late `Stopping` transitions.
@@ -3313,50 +3318,118 @@ async fn stop_system_and_late_stopping_cooldowns_persist_via_actor_without_exter
     assert!((after_rows[&k_late].delay_s - 18.0).abs() < 1e-6);
 
     // 2. Dead-actor exit (`CurrentThread` runtime drop -> `rt_alive_rx` -> actor shutdown guard)
-    //    persists cooldowns using the DB TiDi owner-note fallback and `try_reclaim_dead_live_slot_to_cold`
-    //    reclaims without external `actor_state` lock acquisition.
-    let reg_ct = Arc::clone(&reg);
-    let clock_ct = Arc::clone(&clock);
-    let k2 = (550_002_i64, 650_003_i64, 11_370_u32);
-    let ct_cmd_tx = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async move {
-            let h_amarr = reg_ct.get_or_spawn(amarr);
-            h_amarr
-                .record_module_cooldown(
-                    k2.0,
-                    k2.1,
-                    k2.2,
-                    eve_db::ServerClock::now_unix_secs(clock_ct.as_ref()) as f64,
+    //    must isolate all 3 TiDi fallback paths (`manual_tidi_overrides`, `tidi_history_systems`,
+    //    and DB `owner_notes`) when `tidi_factor_bits == 1.0`, `st.has_tidi_history == false`,
+    //    and `gate.has_tidi_history() == false` at dead-actor drop (`BF-03`).
+    #[derive(Clone, Copy)]
+    enum DeadActorFallbackKind {
+        ManualOverride,
+        TidiHistorySystem,
+        DbOwnerNote,
+    }
+    for (idx, kind, steps, expected_delay) in [
+        (0_i64, DeadActorFallbackKind::ManualOverride, 0_usize, 20.0_f64),
+        (1_i64, DeadActorFallbackKind::TidiHistorySystem, 5_usize, 25.0_f64),
+        (2_i64, DeadActorFallbackKind::DbOwnerNote, 0_usize, 20.0_f64),
+    ] {
+        let c_fb = Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_750_600_000));
+        let r_fb = eve_db::WorldRepository::new_empty();
+        r_fb.set_clock(c_fb.clone());
+        let db_fb = Arc::new(r_fb);
+        let reg_fb = Arc::new(SystemRegistry::with_sde_and_db(
+            Arc::clone(&sde),
+            Arc::clone(&db_fb),
+        ));
+        let k_fb = (550_100 + idx, 650_100 + idx, 11_370_u32);
+        let reg_ct = Arc::clone(&reg_fb);
+        let c_ct = Arc::clone(&c_fb);
+        let db_ct = Arc::clone(&db_fb);
+        let ct_cmd_tx = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let h = reg_ct.get_or_spawn(jita);
+                assert!((h.tidi_factor() - 1.0).abs() < 1e-12);
+                assert!(!h.cooldown_persist_gate.has_tidi_history());
+                h.record_module_cooldown(
+                    k_fb.0,
+                    k_fb.1,
+                    k_fb.2,
+                    eve_db::ServerClock::now_unix_secs(c_ct.as_ref()) as f64,
                     30.0,
-                    0.5,
-                    true,
+                    1.0,
+                    false,
                 )
                 .await
                 .unwrap();
-            for _ in 0..10 {
-                let _ = h_amarr.step_manual(1.0).await.unwrap();
-            }
-            assert!((h_amarr.sim_elapsed_secs() - 5.0).abs() < 1e-6);
-            h_amarr.cmd_tx.clone()
+                for _ in 0..steps {
+                    let _ = h.step_manual(1.0).await.unwrap();
+                }
+                assert!((h.sim_elapsed_secs() - steps as f64).abs() < 1e-6);
+                // Inject each fallback source post-spawn while keeping `tidi_factor_bits == 1.0`,
+                // `st.has_tidi_history == false`, and `gate.has_tidi_history() == false`.
+                match kind {
+                    DeadActorFallbackKind::ManualOverride => {
+                        reg_ct
+                            .cluster_nodes
+                            .write()
+                            .unwrap()
+                            .manual_tidi_overrides
+                            .insert(jita, 0.5);
+                    }
+                    DeadActorFallbackKind::TidiHistorySystem => {
+                        reg_ct
+                            .cluster_nodes
+                            .write()
+                            .unwrap()
+                            .tidi_history_systems
+                            .insert(jita);
+                    }
+                    DeadActorFallbackKind::DbOwnerNote => {
+                        db_ct.with_mut_snapshot(|snap| {
+                            let nid = -(7_500_000_000_000_i64.saturating_add(jita as i64));
+                            snap.owner_notes.insert(
+                                nid,
+                                eve_db::OwnerNoteRecord {
+                                    note_id: nid,
+                                    character_id: 0,
+                                    item_id: nid,
+                                    label: "tidi".to_string(),
+                                    note: "0.5".to_string(),
+                                    timestamp_unix: 100,
+                                },
+                            );
+                        });
+                    }
+                }
+                assert!((h.tidi_factor() - 1.0).abs() < 1e-12);
+                assert!(!h.cooldown_persist_gate.has_tidi_history());
+                c_ct.advance_secs(20);
+                h.cmd_tx.clone()
+            })
         })
-    })
-    .join()
-    .unwrap();
-    for _ in 0..100 {
-        if ct_cmd_tx.is_closed() {
-            break;
+        .join()
+        .unwrap();
+        for _ in 0..100 {
+            if ct_cmd_tx.is_closed() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(ct_cmd_tx.is_closed());
+        assert!(reg_fb.try_reclaim_dead_live_slot_to_cold(jita));
+        let rows = load_cold_system_module_cooldowns_from_db(&db_fb, jita);
+        let entry = rows.get(&k_fb).copied().expect("dead actor flush persisted k_fb");
+        assert!(
+            (entry.delay_s - expected_delay).abs() < 1e-6 && entry.recorded_sys_sim_s.abs() < 1e-6,
+            "unexpected delay_s={} (expected {}) for fallback case {}",
+            entry.delay_s,
+            expected_delay,
+            idx
+        );
     }
-    assert!(ct_cmd_tx.is_closed());
-    assert!(reg.try_reclaim_dead_live_slot_to_cold(amarr));
-    let amarr_rows = load_cold_system_module_cooldowns_from_db(&db, amarr);
-    let amarr_k2 = amarr_rows.get(&k2).copied().expect("dead actor flush persisted k2");
-    assert!((amarr_k2.delay_s - 25.0).abs() < 1e-6 && amarr_k2.recorded_sys_sim_s.abs() < 1e-6);
 
     // 3. Verify `module_cooldowns.rs` and `celestials.rs` contain zero external `ballpark`/`actor_state` locks.
     let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/system_actor");
@@ -3382,6 +3455,319 @@ async fn stop_system_and_late_stopping_cooldowns_persist_via_actor_without_exter
             }
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aborted_loading_does_not_steal_gate_or_resurrect_deleted_cooldown() {
+    use crate::system_actor::module_cooldowns::CooldownGatePhase;
+    use eve_db::ServerClock;
+
+    let jita = 30_000_142_u32;
+    let clock = Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_750_700_000));
+    let repo = eve_db::WorldRepository::new_empty();
+    repo.set_clock(clock.clone());
+    let db = Arc::new(repo);
+    let sde = Arc::new(SdeRegistry::with_canonical_seed());
+    let reg = Arc::new(SystemRegistry::with_sde_and_db(sde, Arc::clone(&db)));
+    let now = clock.now_unix_secs() as f64;
+    let k = (560_001_i64, 660_001_i64, 11_370_u32);
+    let k_next = (560_002_i64, 660_002_i64, 11_370_u32);
+
+    // Seed an active cold cooldown in SQLite so the Loading actor boots with `k` in `actor_st`.
+    reg.record_cold_system_module_cooldown_in_db(&db, jita, k.0, k.1, k.2, now, 30.0, 1.0, false);
+    assert!(load_cold_system_module_cooldowns_from_db(&db, jita).contains_key(&k));
+
+    // Pause before publishing Loading -> Live: delete `k` in-flight, force `WouldBlock`, and let
+    // the unpublished handle shut down and exit its `ActorShutdownCooldownGuard`.
+    let (r_pub, db_pub) = (Arc::clone(&reg), Arc::clone(&db));
+    reg.set_before_publish_hook_for_test(Some(Arc::new(move |sid, _| {
+        if sid == jita {
+            assert!(r_pub.remove_cooldown_key_across_non_live_systems(&db_pub, None, &[], k));
+            r_pub.set_force_publish_wouldblock_for_test(true);
+        }
+    })));
+    assert!(reg
+        .wake_for_session_arrival_async(jita, SessionArrivalWakeReason::Undock)
+        .await
+        .is_err());
+    reg.set_before_publish_hook_for_test(None);
+    reg.set_force_publish_wouldblock_for_test(false);
+
+    // Next Loading wave queues `k_next` before gen-1 might still be winding down; gen-1's
+    // unpublished `ActorShutdownCooldownGuard` must neither resurrect `k` nor steal `k_next`.
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert!(!load_cold_system_module_cooldowns_from_db(&db, jita).contains_key(&k));
+
+    let gate = reg.cooldown_persist_gate(jita);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let entered_tx = std::sync::Mutex::new(Some(entered_tx));
+    let release_rx = std::sync::Mutex::new(Some(release_rx));
+    let (r_pub2, db_pub2) = (Arc::clone(&reg), Arc::clone(&db));
+    reg.set_before_publish_hook_for_test(Some(Arc::new(move |sid, _| {
+        if sid == jita {
+            r_pub2.record_cold_system_module_cooldown_in_db(
+                &db_pub2, jita, k_next.0, k_next.1, k_next.2, now, 30.0, 1.0, false,
+            );
+            if let Some(tx) = entered_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            if let Some(rx) = release_rx.lock().unwrap().take() {
+                let _ = tokio::task::block_in_place(|| {
+                    rx.recv_timeout(std::time::Duration::from_secs(5))
+                });
+            }
+        }
+    })));
+    let reg_w2 = Arc::clone(&reg);
+    let wake2 = tokio::spawn(async move {
+        reg_w2
+            .wake_for_session_arrival_async(jita, SessionArrivalWakeReason::Undock)
+            .await
+    });
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+    reg.set_before_publish_hook_for_test(None);
+    assert!(gate.has_pending_transitions());
+    let _ = release_tx.send(());
+    let h2 = wake2.await.unwrap().expect("gen-2 publishes Live");
+    drop(h2);
+    assert!(reg.stop_system(jita).await);
+
+    let cold = load_cold_system_module_cooldowns_from_db(&db, jita);
+    assert!(!cold.contains_key(&k), "aborted loading must not resurrect deleted k");
+    assert!(cold.contains_key(&k_next), "gen-2 k_next must survive intact");
+    let cg = gate.inner.lock().unwrap();
+    assert_eq!(cg.phase, CooldownGatePhase::Cold);
+    assert!(cg.in_flight_loading_transitions.is_empty() && cg.pending_transitions.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_gen1_actor_exit_does_not_steal_gen2_transitions_or_tidi_mode() {
+    use crate::system_actor::module_cooldowns::CooldownGatePhase;
+    use eve_db::ServerClock;
+
+    let jita = 30_000_142_u32;
+    let clock = Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_750_800_000));
+    let repo = eve_db::WorldRepository::new_empty();
+    repo.set_clock(clock.clone());
+    let db = Arc::new(repo);
+    let sde = Arc::new(SdeRegistry::with_canonical_seed());
+    let reg = Arc::new(SystemRegistry::with_sde_and_db(sde, Arc::clone(&db)));
+    let now = clock.now_unix_secs() as f64;
+    let k1 = (570_001_i64, 670_001_i64, 11_370_u32);
+    let k2 = (570_002_i64, 670_002_i64, 11_370_u32);
+
+    let h1 = reg
+        .wake_for_session_arrival_async(jita, SessionArrivalWakeReason::Undock)
+        .await
+        .expect("gen 1 live");
+    h1.record_module_cooldown(k1.0, k1.1, k1.2, now, 30.0, 1.0, false)
+        .await
+        .unwrap();
+
+    // Pause gen-1 actor before `ShutdownActor` can run.
+    let (step_entered_tx, step_entered_rx) = std::sync::mpsc::channel();
+    let (step_release_tx, step_release_rx) = std::sync::mpsc::channel();
+    let step_entered_tx = std::sync::Mutex::new(Some(step_entered_tx));
+    let step_release_rx = std::sync::Mutex::new(Some(step_release_rx));
+    *h1.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        if let Some(tx) = step_entered_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        if let Some(rx) = step_release_rx.lock().unwrap().take() {
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+        }
+    }));
+    let (tx_step, _rx_step) = tokio::sync::oneshot::channel();
+    assert!(h1
+        .cmd_tx
+        .try_send(SystemCommand::StepManual { dt: 0.5, reply: tx_step })
+        .is_ok());
+    tokio::task::spawn_blocking(move || step_entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+    let cmd_tx1 = h1.cmd_tx.clone();
+    drop(h1);
+
+    // Start `stop_system` so `shutdown_tidi_mode` is recorded, then abort the stop task to trigger
+    // `StopTaskCleanupGuard::drop` -> `Cold` while gen-1 actor is still parked.
+    let reg_stop1 = Arc::clone(&reg);
+    let stop1 = tokio::spawn(async move { reg_stop1.stop_system(jita).await });
+    let gate = reg.cooldown_persist_gate(jita);
+    for _ in 0..200 {
+        let recorded = gate.inner.lock().unwrap().shutdown_tidi_mode.is_some();
+        if recorded {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(gate.inner.lock().unwrap().shutdown_tidi_mode.is_some());
+    stop1.abort();
+    assert!(stop1.await.unwrap_err().is_cancelled());
+    for _ in 0..200 {
+        if gate.inner.lock().unwrap().phase == CooldownGatePhase::Cold {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(gate.inner.lock().unwrap().phase, CooldownGatePhase::Cold);
+
+    // Start gen-2 paused in `Loading`, queue `k2`, and record `shutdown_tidi_mode`-equivalent
+    // state on gen-2's epoch. Release gen-1 and confirm gen-1 exit steals nothing.
+    let (pub_entered_tx, pub_entered_rx) = std::sync::mpsc::channel();
+    let (pub_release_tx, pub_release_rx) = std::sync::mpsc::channel();
+    let pub_entered_tx = std::sync::Mutex::new(Some(pub_entered_tx));
+    let pub_release_rx = std::sync::Mutex::new(Some(pub_release_rx));
+    let (r_pub, db_pub) = (Arc::clone(&reg), Arc::clone(&db));
+    reg.set_before_publish_hook_for_test(Some(Arc::new(move |sid, _| {
+        if sid == jita {
+            r_pub.record_cold_system_module_cooldown_in_db(
+                &db_pub, jita, k2.0, k2.1, k2.2, now, 30.0, 1.0, false,
+            );
+            if let Some(tx) = pub_entered_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            if let Some(rx) = pub_release_rx.lock().unwrap().take() {
+                let _ = tokio::task::block_in_place(|| {
+                    rx.recv_timeout(std::time::Duration::from_secs(5))
+                });
+            }
+        }
+    })));
+    let reg_w2 = Arc::clone(&reg);
+    let wake2 = tokio::spawn(async move {
+        reg_w2
+            .wake_for_session_arrival_async(jita, SessionArrivalWakeReason::Undock)
+            .await
+    });
+    tokio::task::spawn_blocking(move || pub_entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+    reg.set_before_publish_hook_for_test(None);
+    assert!(gate.has_pending_transitions());
+    assert!(reg.overlay_transition_cooldown_for_system(jita, k2, None).is_some());
+
+    // Release gen-1 actor so its `ActorShutdownCooldownGuard` executes while gen-2 owns the gate.
+    step_release_tx.send(()).unwrap();
+    for _ in 0..200 {
+        if cmd_tx1.is_closed() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(cmd_tx1.is_closed());
+    assert!(gate.has_pending_transitions());
+    assert!(reg.overlay_transition_cooldown_for_system(jita, k2, None).is_some());
+
+    // Publish gen-2 and confirm `k2` reaches `Live`, then verify stale `gen-2` exit during
+    // `gen-3 Stopping` cannot steal `gen-3`'s `shutdown_tidi_mode` or `Stopping` transitions
+    // when `gate.phase == Stopping` and only `epoch` differs.
+    pub_release_tx.send(()).unwrap();
+    let h2 = wake2.await.unwrap().expect("gen 2 publishes Live");
+    let (g2_entered_tx, g2_entered_rx) = std::sync::mpsc::channel();
+    let (g2_release_tx, g2_release_rx) = std::sync::mpsc::channel();
+    let g2_entered_tx = std::sync::Mutex::new(Some(g2_entered_tx));
+    let g2_release_rx = std::sync::Mutex::new(Some(g2_release_rx));
+    *h2.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        if let Some(tx) = g2_entered_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        if let Some(rx) = g2_release_rx.lock().unwrap().take() {
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+        }
+    }));
+    let (tx_step2, _rx_step2) = tokio::sync::oneshot::channel();
+    assert!(h2
+        .cmd_tx
+        .try_send(SystemCommand::StepManual { dt: 0.5, reply: tx_step2 })
+        .is_ok());
+    tokio::task::spawn_blocking(move || g2_entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+    let cmd_tx2 = h2.cmd_tx.clone();
+    drop(h2);
+
+    let reg_stop2 = Arc::clone(&reg);
+    let stop2 = tokio::spawn(async move { reg_stop2.stop_system(jita).await });
+    for _ in 0..200 {
+        if gate.inner.lock().unwrap().shutdown_tidi_mode.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    stop2.abort();
+    assert!(stop2.await.unwrap_err().is_cancelled());
+    for _ in 0..200 {
+        if gate.inner.lock().unwrap().phase == CooldownGatePhase::Cold {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let h3 = reg
+        .wake_for_session_arrival_async(jita, SessionArrivalWakeReason::Undock)
+        .await
+        .expect("gen 3 live");
+    let _ = h3.set_tidi_factor_raw(0.25);
+    let (g3_entered_tx, g3_entered_rx) = std::sync::mpsc::channel();
+    let (g3_release_tx, g3_release_rx) = std::sync::mpsc::channel();
+    let g3_entered_tx = std::sync::Mutex::new(Some(g3_entered_tx));
+    let g3_release_rx = std::sync::Mutex::new(Some(g3_release_rx));
+    *h3.before_step_reply_hook_for_test.lock().unwrap() = Some(Box::new(move || {
+        if let Some(tx) = g3_entered_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        if let Some(rx) = g3_release_rx.lock().unwrap().take() {
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+        }
+    }));
+    let (tx_step3, _rx_step3) = tokio::sync::oneshot::channel();
+    assert!(h3
+        .cmd_tx
+        .try_send(SystemCommand::StepManual { dt: 0.5, reply: tx_step3 })
+        .is_ok());
+    tokio::task::spawn_blocking(move || g3_entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+    drop(h3);
+
+    let reg_stop3 = Arc::clone(&reg);
+    let stop3 = tokio::spawn(async move { reg_stop3.stop_system(jita).await });
+    for _ in 0..200 {
+        if gate.inner.lock().unwrap().shutdown_tidi_mode.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let k3_late = (570_003_i64, 670_003_i64, 11_370_u32);
+    reg.record_cold_system_module_cooldown_in_db(
+        &db, jita, k3_late.0, k3_late.1, k3_late.2, now, 18.0, 0.25, true,
+    );
+
+    // Release stale gen-2 while gen-3 owns `Stopping`; `epoch` mismatch must preserve both
+    // gen-3's `shutdown_tidi_mode` and `k3_late`.
+    g2_release_tx.send(()).unwrap();
+    for _ in 0..200 {
+        if cmd_tx2.is_closed() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(cmd_tx2.is_closed());
+    {
+        let cg = gate.inner.lock().unwrap();
+        assert_eq!(cg.phase, CooldownGatePhase::Stopping);
+        assert!(cg.shutdown_tidi_mode.is_some_and(|(t, h)| (t - 0.25).abs() < 1e-12 && h));
+        assert!(!cg.pending_transitions.is_empty());
+    }
+
+    g3_release_tx.send(()).unwrap();
+    assert!(stop3.await.unwrap());
+    let cold = load_cold_system_module_cooldowns_from_db(&db, jita);
+    assert!(cold.contains_key(&k2), "gen-2 transition k2 must survive through gen-3");
+    assert!(cold.contains_key(&k3_late), "gen-3 stopping transition k3_late must survive");
 }
 
 fn strip_comments_strings_and_cfg_test(src: &str) -> String {

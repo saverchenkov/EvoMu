@@ -1700,6 +1700,9 @@ impl SystemRegistry {
             cg.in_flight_loading_transitions.clear();
             handle.cooldown_persist_gate.clear_pending_transitions_flag();
             cg.phase = CooldownGatePhase::Live;
+            handle
+                .published_live
+                .store(true, std::sync::atomic::Ordering::Release);
             drop(cg);
 
             let handle_arc = Arc::new(handle);
@@ -2333,6 +2336,9 @@ impl SystemRegistry {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             cg.phase = CooldownGatePhase::Live;
+            handle
+                .published_live
+                .store(true, std::sync::atomic::Ordering::Release);
         }
         guard.insert(
             solar_system_id,

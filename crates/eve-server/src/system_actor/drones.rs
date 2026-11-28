@@ -529,9 +529,8 @@ fn refresh_view_and_hibernation(
 ) {
     super::celestials::update_system_hibernation_flag(st, bp, active_subscribers);
     let tidi = super::celestials::clamp_tidi_factor_bits(tidi_factor_bits);
-    let prev = view_tx.borrow().clone();
-    let next = super::SystemView::from_ballpark(bp, Some(st), tidi, Some(prev.as_ref()));
-    let _ = view_tx.send(Arc::new(next));
+    let next = super::SystemView::from_ballpark(bp, Some(st), tidi, None);
+    super::celestials::send_view_preserving_atomic_tidi(view_tx, tidi_factor_bits, next);
 }
 
 #[inline]

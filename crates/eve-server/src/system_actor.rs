@@ -299,17 +299,10 @@ fn flush_post_unlock_actions_on_actor(
 fn build_next_system_view(
     ballpark: &Ballpark,
     actor_st: &SystemActorState,
-    view_tx: &tokio::sync::watch::Sender<Arc<SystemView>>,
     tidi_factor_bits: &std::sync::atomic::AtomicU64,
-) -> Arc<SystemView> {
+) -> SystemView {
     let cur_tidi = celestials::clamp_tidi_factor_bits(tidi_factor_bits);
-    let prev_view = { view_tx.borrow().clone() };
-    Arc::new(SystemView::from_ballpark(
-        ballpark,
-        Some(actor_st),
-        cur_tidi,
-        Some(prev_view.as_ref()),
-    ))
+    SystemView::from_ballpark(ballpark, Some(actor_st), cur_tidi, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -323,9 +316,8 @@ fn finalize_reader_facing_end_of_command(
     cooldown_persist_gate: &Arc<CooldownPersistGate>,
     cmd_tx_weak: &tokio::sync::mpsc::WeakSender<SystemCommand>,
     tidi_factor_bits: &std::sync::atomic::AtomicU64,
-    view_tx: &tokio::sync::watch::Sender<Arc<SystemView>>,
     always_build_view: bool,
-) -> (bool, Option<Arc<SystemView>>) {
+) -> (bool, Option<SystemView>) {
     let post_tidi_cmd = celestials::clamp_tidi_factor_bits(tidi_factor_bits);
     let had_deact_hook = cmd_post_unlock_ops.has_deactivation_hook();
     let mut_flag = ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
@@ -339,7 +331,7 @@ fn finalize_reader_facing_end_of_command(
         post_tidi_cmd,
     );
     let view_opt = (always_build_view || mut_flag || had_deact_hook)
-        .then(|| build_next_system_view(ballpark, actor_st, view_tx, tidi_factor_bits));
+        .then(|| build_next_system_view(ballpark, actor_st, tidi_factor_bits));
     (mut_flag, view_opt)
 }
 
@@ -389,13 +381,12 @@ fn recover_reader_facing_state_after_panic(
             cooldown_persist_gate,
             cmd_tx_weak,
             tidi_factor_bits,
-            view_tx,
             true,
         )
         .1
         .expect("always_build_view=true must produce a SystemView")
     };
-    let _ = view_tx.send(next_view);
+    celestials::send_view_preserving_atomic_tidi(view_tx, tidi_factor_bits, next_view);
 }
 
 #[derive(Clone, Debug)]
@@ -475,7 +466,7 @@ pub struct SystemRegistry {
     pub tactical_state: Arc<RankedRwLock<crate::services::tactical_modules::TacticalModulesState, RANK_LEAF>>,
     pending_notifications_opt: Option<Arc<RankedRwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>, RANK_LEAF>>>,
     notify_tx_opt: Option<broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
-    pub cluster_nodes: RankedRwLock<ClusterNodeRegistry, RANK_SERVICE_STATE>,
+    pub cluster_nodes: Arc<RankedRwLock<ClusterNodeRegistry, RANK_SERVICE_STATE>>,
     pub(in crate::system_actor) fighter_persist: Arc<fighters_persistence::FighterPersistCoord>,
     /// When true, stargates whose destination solar system is not yet loaded start as `CLOSED (0)`
     /// (`#1080`) and transition `CLOSED -> ACTIVATING -> OPEN` once destination loads.
@@ -762,12 +753,7 @@ impl<'a> post_unlock::DirectActorCallbackExecutor for ActorCallbackState<'a> {
                     cur_tidi,
                 );
                 let next_view_opt = mutated.then(|| {
-                    build_next_system_view(
-                        bp,
-                        actor_st,
-                        self.view_tx_actor,
-                        self.tidi_factor_bits_actor,
-                    )
+                    build_next_system_view(bp, actor_st, self.tidi_factor_bits_actor)
                 });
                 let cooldown_hooks = ops
                     .intents
@@ -781,7 +767,11 @@ impl<'a> post_unlock::DirectActorCallbackExecutor for ActorCallbackState<'a> {
             })?;
         if mutated {
             if let Some(next_view) = next_view_opt {
-                let _ = self.view_tx_actor.send(next_view);
+                celestials::send_view_preserving_atomic_tidi(
+                    self.view_tx_actor,
+                    self.tidi_factor_bits_actor,
+                    next_view,
+                );
             }
         }
         Some(cooldown_hooks)
@@ -817,14 +807,13 @@ impl<'a> post_unlock::DirectActorCallbackExecutor for ActorCallbackState<'a> {
                 bp,
                 self.event_tx_actor.receiver_count(),
             );
-            build_next_system_view(
-                bp,
-                actor_st,
-                self.view_tx_actor,
-                self.tidi_factor_bits_actor,
-            )
+            build_next_system_view(bp, actor_st, self.tidi_factor_bits_actor)
         })?;
-        let _ = self.view_tx_actor.send(next_view);
+        celestials::send_view_preserving_atomic_tidi(
+            self.view_tx_actor,
+            self.tidi_factor_bits_actor,
+            next_view,
+        );
         Some(())
     }
 
@@ -874,15 +863,14 @@ impl<'a> post_unlock::DirectActorCallbackExecutor for ActorCallbackState<'a> {
                 bp,
                 self.event_tx_actor.receiver_count(),
             );
-            let next_view = build_next_system_view(
-                bp,
-                actor_st,
-                self.view_tx_actor,
-                self.tidi_factor_bits_actor,
-            );
+            let next_view = build_next_system_view(bp, actor_st, self.tidi_factor_bits_actor);
             (cleanup_ops, next_view)
         })?;
-        let _ = self.view_tx_actor.send(next_view);
+        celestials::send_view_preserving_atomic_tidi(
+            self.view_tx_actor,
+            self.tidi_factor_bits_actor,
+            next_view,
+        );
         Some(cleanup_ops)
     }
 
@@ -933,7 +921,7 @@ impl SystemRegistry {
             tactical_state: Arc::new(RankedRwLock::new(Default::default())),
             pending_notifications_opt: None,
             notify_tx_opt: None,
-            cluster_nodes: RankedRwLock::new(ClusterNodeRegistry::default()),
+            cluster_nodes: Arc::new(RankedRwLock::new(ClusterNodeRegistry::default())),
             fighter_persist: Arc::new(fighters_persistence::FighterPersistCoord::default()),
             lazy_stargate_activation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unrebased_clock_offset_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1841,6 +1829,9 @@ impl SystemRegistry {
         let actor_flush_thread_actor = Arc::clone(&actor_flush_thread);
         let cooldown_persist_gate_actor = self.cooldown_persist_gate(solar_system_id);
         let post_unlock_actions_for_handle = Arc::clone(&post_unlock_actions_actor);
+        let published_live = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let published_live_actor = Arc::clone(&published_live);
+        let cluster_nodes_actor = Arc::clone(&self.cluster_nodes);
         let cooldown_persist_gate_for_handle = Arc::clone(&cooldown_persist_gate_actor);
         let ball_positions_actor = ball_positions.clone();
         let scrambled_balls_actor = scrambled_balls.clone();
@@ -1944,10 +1935,11 @@ impl SystemRegistry {
         };
         struct ActorShutdownCooldownInner {
             solar_system_id: SolarSystemId,
+            published_live: Arc<std::sync::atomic::AtomicBool>,
             actor_state_actor: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
             tidi_factor_bits_actor: Arc<std::sync::atomic::AtomicU64>,
             cooldown_persist_gate_actor: Arc<CooldownPersistGate>,
-            db_opt_actor: Option<Arc<eve_db::WorldRepository>>,
+            cluster_nodes_actor: Arc<RankedRwLock<ClusterNodeRegistry, RANK_SERVICE_STATE>>,
         }
 
         struct ActorShutdownCooldownGuard(Option<ActorShutdownCooldownInner>);
@@ -1958,6 +1950,7 @@ impl SystemRegistry {
                     return;
                 };
                 if inner.solar_system_id == 0
+                    || !inner.published_live.load(std::sync::atomic::Ordering::Acquire)
                     || !module_cooldowns::can_write_sqlite_safely()
                     || held_lock_ranks().iter().any(|&r| r >= RANK_ACTOR_STATE)
                 {
@@ -1965,39 +1958,6 @@ impl SystemRegistry {
                 }
                 let captured_tidi =
                     celestials::clamp_tidi_factor_bits(&inner.tidi_factor_bits_actor);
-                let (reg_tidi, reg_has_tidi_history) = inner
-                    .cooldown_persist_gate_actor
-                    .take_shutdown_tidi_mode()
-                    .unwrap_or_else(|| {
-                        let db_tidi = if !held_lock_ranks()
-                            .iter()
-                            .any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER)
-                        {
-                            inner
-                                .db_opt_actor
-                                .as_ref()
-                                .and_then(|db| {
-                                    db.with_snapshot(|snap| {
-                                        let nid = -(7_500_000_000_000_i64
-                                            .saturating_add(inner.solar_system_id as i64));
-                                        snap.owner_notes
-                                            .get(&nid)
-                                            .and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
-                                    })
-                                })
-                                .filter(|v| v.is_finite())
-                                .unwrap_or(1.0)
-                                .clamp(0.10, 1.0)
-                        } else {
-                            1.0
-                        };
-                        (db_tidi, db_tidi < 0.999_999)
-                    });
-                let eff_tidi = if captured_tidi.is_finite() && captured_tidi < 0.999_999 {
-                    captured_tidi.clamp(0.10, 1.0)
-                } else {
-                    reg_tidi
-                };
                 let payload_opt = {
                     let mut st = inner
                         .actor_state_actor
@@ -2007,8 +1967,8 @@ impl SystemRegistry {
                         &mut st,
                         inner.solar_system_id,
                         &inner.cooldown_persist_gate_actor,
-                        eff_tidi,
-                        reg_has_tidi_history,
+                        &inner.cluster_nodes_actor,
+                        captured_tidi,
                     )
                 };
                 if let Some(payload) = payload_opt {
@@ -2029,10 +1989,11 @@ impl SystemRegistry {
 
         let shutdown_cooldown_guard = ActorShutdownCooldownGuard(Some(ActorShutdownCooldownInner {
             solar_system_id,
+            published_live: published_live_actor,
             actor_state_actor: Arc::clone(&actor_state_actor),
             tidi_factor_bits_actor: Arc::clone(&tidi_factor_bits_actor),
             cooldown_persist_gate_actor: Arc::clone(&cooldown_persist_gate_actor),
-            db_opt_actor: db_opt_actor.clone(),
+            cluster_nodes_actor,
         }));
         let drone_hydration_actor = ballpark_shared.drone_hydration_shared().cloned().unwrap_or_default();
         actor_rt_handle.spawn(async move {
@@ -2935,11 +2896,14 @@ impl SystemRegistry {
                         &cooldown_persist_gate_actor,
                         &cmd_tx_weak_actor,
                         &tidi_factor_bits_actor,
-                        &view_tx_actor,
                         false,
                     );
                     if let Some(next_view) = next_view_opt {
-                        let _ = view_tx_actor.send(next_view);
+                        celestials::send_view_preserving_atomic_tidi(
+                            &view_tx_actor,
+                            &tidi_factor_bits_actor,
+                            next_view,
+                        );
                     }
                     mut_flag
                 };
@@ -3020,14 +2984,13 @@ impl SystemRegistry {
                     let next_view = {
                         let ballpark = ballpark_actor.read().unwrap_or_else(|e| e.into_inner());
                         let actor_st = actor_state_actor.read().unwrap_or_else(|e| e.into_inner());
-                        build_next_system_view(
-                            &ballpark,
-                            &actor_st,
-                            &view_tx_actor,
-                            &tidi_factor_bits_actor,
-                        )
+                        build_next_system_view(&ballpark, &actor_st, &tidi_factor_bits_actor)
                     };
-                    let _ = view_tx_actor.send(next_view);
+                    celestials::send_view_preserving_atomic_tidi(
+                        &view_tx_actor,
+                        &tidi_factor_bits_actor,
+                        next_view,
+                    );
                 }
                 weapon_effects::flush_actor_weapon_effects(
                     solar_system_id, &ballpark_actor, &actor_state_actor, &view_tx_actor,
@@ -3261,6 +3224,7 @@ impl SystemRegistry {
             system_step_hook: Arc::clone(&self.system_step_hook),
             post_unlock_actions: post_unlock_actions_for_handle,
             actor_flush_thread,
+            published_live,
             cooldown_persist_gate: cooldown_persist_gate_for_handle,
         };
         (handle, lazy_gates)

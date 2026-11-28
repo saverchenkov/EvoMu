@@ -2234,6 +2234,7 @@ mod tests {
             system_step_hook: Arc::new(RankedRwLock::new(None)),
             post_unlock_actions: Arc::new(RankedMutex::new(Vec::new())),
             actor_flush_thread: Arc::new(std::sync::Mutex::new(None)),
+            published_live: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cooldown_persist_gate: Arc::new(crate::system_actor::CooldownPersistGate::default()),
         };
         handle.ballpark.attach_actor_state(&handle.actor_state);

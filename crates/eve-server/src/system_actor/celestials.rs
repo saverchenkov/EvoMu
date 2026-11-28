@@ -212,12 +212,22 @@ impl Drop for BallparkWriteGuard<'_> {
         drop(actor_st_guard);
         // Release RANK_BALLPARK and pop its thread-local held rank before sending on the watch channel.
         drop(guard);
-        let mut next = next;
-        self.view_tx.send_modify(|v| {
-            next.tidi_factor = clamp_tidi_factor_bits(self.tidi_factor_bits);
-            *v = Arc::new(next);
-        });
+        send_view_preserving_atomic_tidi(&self.view_tx, &self.tidi_factor_bits, next);
     }
+}
+
+/// Publishes a [`super::SystemView`] snapshot while ensuring `tidi_factor` reflects the latest
+/// lock-free `tidi_factor_bits` inside the watch lock so concurrent `set_tidi_factor_raw` updates
+/// cannot be overwritten by an older snapshot.
+pub(in crate::system_actor) fn send_view_preserving_atomic_tidi(
+    view_tx: &tokio::sync::watch::Sender<Arc<super::SystemView>>,
+    tidi_factor_bits: &std::sync::atomic::AtomicU64,
+    mut next: super::SystemView,
+) {
+    view_tx.send_modify(|v| {
+        next.tidi_factor = clamp_tidi_factor_bits(tidi_factor_bits);
+        *v = Arc::new(next);
+    });
 }
 
 /// Rank-checked `Ballpark` lock wrapper that automatically refreshes the published
@@ -349,17 +359,8 @@ impl SystemHandle {
         actor_state: &super::SystemActorState,
     ) {
         let tidi = self.tidi_factor();
-        let prev = { self.view_rx.borrow().clone() };
-        let mut next = super::SystemView::from_ballpark(
-            ballpark,
-            Some(actor_state),
-            tidi,
-            Some(prev.as_ref()),
-        );
-        self.view_tx.send_modify(|v| {
-            next.tidi_factor = self.tidi_factor();
-            *v = Arc::new(next);
-        });
+        let next = super::SystemView::from_ballpark(ballpark, Some(actor_state), tidi, None);
+        send_view_preserving_atomic_tidi(&self.view_tx, &self.tidi_factor_bits, next);
     }
 
     #[track_caller]
@@ -2306,6 +2307,7 @@ pub struct SystemHandle {
     pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<super::PostUnlockHookAction>, RANK_LEAF>>,
     pub(in crate::system_actor) actor_flush_thread:
         Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
+    pub(in crate::system_actor) published_live: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) cooldown_persist_gate: Arc<super::CooldownPersistGate>,
 }
 
