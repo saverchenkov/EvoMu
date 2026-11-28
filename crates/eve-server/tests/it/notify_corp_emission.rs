@@ -313,7 +313,7 @@ async fn test_corporation_lifecycle_recruitment_and_aggression_notifications() {
     assert_eq!(events(&ctx, P2, "OnCorporationWelcomeMailChanged"), vec![expected_welcome]);
     assert!(events(&ctx, p3, "OnCorporationWelcomeMailChanged").is_empty());
 
-    // CreateRecruitmentAd & DeleteRecruitmentAd -> OnCorporationRecruitmentAdChanged(corpID, adID) to P1 & P2 only.
+    // CreateRecruitmentAd & DeleteRecruitmentAd -> OnCorporationRecruitmentAdChanged() to P1 & P2 only.
     ctx.db.with_mut_snapshot(|s| {
         s.corporations
             .get_mut(&corp_id)
@@ -336,7 +336,7 @@ async fn test_corporation_lifecycle_recruitment_and_aggression_notifications() {
         .await
         .expect("CreateRecruitmentAd");
     let ad_id = ad.dict_get("adID").and_then(PyRep::as_i64).expect("ad_id");
-    let expected_ad = vec![PyRep::Integer(corp_id), PyRep::Integer(ad_id)];
+    let expected_ad: Vec<PyRep> = Vec::new();
     let p1_ad_notifs = ctx.drain_notifications_for_char(P1);
     assert_eq!(
         p1_ad_notifs

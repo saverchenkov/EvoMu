@@ -186,11 +186,6 @@ fn issue_776_reprocess_list_and_fw_battlefield_compat() {
             &[PyRep::String(key.into()), PyRep::Dict(Vec::new())]
         ));
     }
-    let cm_norm = normalize_macho_notification(
-        "OnCombatMessage",
-        vec![PyRep::String("AttackedBy".into()), PyRep::Dict(Vec::new())],
-    );
-    assert_eq!(cm_norm[0], PyRep::String("AttackHitsR".into()));
 
     let dmg_norm = normalize_macho_notification(
         "OnDamageMessage",

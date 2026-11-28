@@ -3377,22 +3377,49 @@ async fn test_wallet_bills_lp_trade_market_and_industry_notifications() {
     assert_ne!(init_bid as u64, oid2);
 
     call(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(trade_item_id)]).await;
+    let n_to1 = ctx.drain_notifications_for_char(P1);
     let n_to2 = ctx.drain_notifications_for_char(P2);
-    assert_eq!(events_from(&n_to2, "OnTradeOffer"), vec![vec![PyRep::Integer(trade_id), PyRep::Bool(false), PyRep::Bool(false),]]);
-    assert_eq!(events_from(&n_to2, "OnTradeOfferReset"), vec![vec![PyRep::Integer(trade_id), PyRep::Bool(false)]]);
-    ctx.drain_notifications_for_char(P1);
+    let expected_add_offer = vec![vec![
+        PyRep::Integer(trade_id),
+        PyRep::List(vec![PyRep::Bool(false), PyRep::Bool(false)]),
+    ]];
+    let expected_reset_ok = vec![vec![PyRep::Integer(trade_id), PyRep::Bool(false)]];
+    assert_eq!(events_from(&n_to1, "OnTradeOffer"), expected_add_offer);
+    assert_eq!(events_from(&n_to2, "OnTradeOffer"), expected_add_offer);
+    assert_eq!(events_from(&n_to1, "OnTradeOfferReset"), expected_reset_ok);
+    assert_eq!(events_from(&n_to2, "OnTradeOfferReset"), expected_reset_ok);
 
     call(&ctx, &mut s2, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id), PyRep::Real(5_000.0)]).await;
     let n_tm1 = ctx.drain_notifications_for_char(P1);
-    assert_eq!(events_from(&n_tm1, "OnTradeMoneyOffer"), vec![vec![PyRep::Integer(trade_id), PyRep::Real(0.0), PyRep::Real(5_000.0),]]);
-    ctx.drain_notifications_for_char(P2);
+    let n_tm2 = ctx.drain_notifications_for_char(P2);
+    let expected_money_offer = vec![vec![
+        PyRep::Integer(trade_id),
+        PyRep::List(vec![PyRep::Real(0.0), PyRep::Real(5_000.0)]),
+    ]];
+    assert_eq!(events_from(&n_tm1, "OnTradeMoneyOffer"), expected_money_offer);
+    assert_eq!(events_from(&n_tm2, "OnTradeMoneyOffer"), expected_money_offer);
+    assert_eq!(events_from(&n_tm1, "OnTradeOfferReset"), expected_reset_ok);
+    assert_eq!(events_from(&n_tm2, "OnTradeOfferReset"), expected_reset_ok);
 
     call(&ctx, &mut s1, "trademgr", "MakeOffer", &[PyRep::Integer(trade_id), PyRep::Bool(true)]).await;
-    ctx.drain_notifications_for_char(P1);
-    ctx.drain_notifications_for_char(P2);
+    let n_mo1 = ctx.drain_notifications_for_char(P1);
+    let n_mo2 = ctx.drain_notifications_for_char(P2);
+    let expected_partial_offer = vec![vec![
+        PyRep::Integer(trade_id),
+        PyRep::List(vec![PyRep::Bool(true), PyRep::Bool(false)]),
+    ]];
+    assert_eq!(events_from(&n_mo1, "OnTradeOffer"), expected_partial_offer);
+    assert_eq!(events_from(&n_mo2, "OnTradeOffer"), expected_partial_offer);
+
     call(&ctx, &mut s2, "trademgr", "MakeOffer", &[PyRep::Integer(trade_id), PyRep::Bool(true)]).await;
     let n_tc1 = ctx.drain_notifications_for_char(P1);
     let n_tc2 = ctx.drain_notifications_for_char(P2);
+    let expected_final_offer = vec![vec![
+        PyRep::Integer(trade_id),
+        PyRep::List(vec![PyRep::Bool(true), PyRep::Bool(true)]),
+    ]];
+    assert_eq!(events_from(&n_tc1, "OnTradeOffer"), expected_final_offer);
+    assert_eq!(events_from(&n_tc2, "OnTradeOffer"), expected_final_offer);
     let tc1 = events_from(&n_tc1, "OnTradeComplete");
     let tc2 = events_from(&n_tc2, "OnTradeComplete");
     assert_eq!(tc1.len(), 1);

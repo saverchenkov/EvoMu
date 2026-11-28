@@ -19,22 +19,17 @@ const MAX_SUMMARY_ITEMS: usize = 6;
 
 /// Registered notification events whose `sample_payloads` intentionally rely on a documented
 /// pre-`client_compat` legacy encoding (Track 7+) that conflicts with strict `client_contract`
-/// sample checks (vacuous-collection or legacy arity truncated by `client_compat`). Checked strictly
-/// for registered arity (`min_arity..=max_arity`) and top-level `PyRep` discriminants; monotonically
-/// shrink-only toward `0`.
+/// sample checks (for example legacy `FolderChanged` bookmark scalars). Monotonically shrink-only
+/// toward `0`.
 pub const INCOMPLETE_SAMPLE_EVENTS: &[&str] = &[
     "OnSharedBookmarksFolderUpdated",
-    "OnTradeMoneyOffer",
-    "OnTradeOffer",
 ];
 
-/// Explicit top-level `PyRep` discriminants for allowlisted trailing arguments beyond the base
-/// sample length (indexed from `base_sample_len`), so every positional slot `0..args.len()` is
-/// strictly checked even when pre-`client_compat` trailing args extend past the V24 sample.
+/// Explicit top-level `PyRep` discriminants paired 1:1 with [`INCOMPLETE_SAMPLE_EVENTS`]
+/// (`notify_registry_tests::incomplete_sample_events_allowlist_ratchet`), retained alongside
+/// [`check_incomplete_allowlist_top_level`] until `INCOMPLETE_SAMPLE_EVENTS` shrinks to `0`.
 pub(crate) const INCOMPLETE_TRAILING_SLOT_DISCRIMINANTS: &[(&str, &[&[&str]])] = &[
     ("OnSharedBookmarksFolderUpdated", &[]),
-    ("OnTradeMoneyOffer", &[&["Real"]]),
-    ("OnTradeOffer", &[&["Bool"]]),
 ];
 
 /// Registered notification events whose `sample_payloads()` hold canonical V24 shapes while an
@@ -1505,53 +1500,97 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_allowlist_validates_trailing_slots_strictly() {
-        let trade_offer_samples = vec![vec![PyRep::Integer(1), PyRep::Bool(true)]];
-        assert!(check_event_shape_against_samples(
-            "OnTradeOffer",
-            2,
-            3,
-            &trade_offer_samples,
-            &[PyRep::Integer(1), PyRep::Bool(false), PyRep::Bool(true)],
+    fn trade_offer_and_money_offer_enforce_strict_two_arg_shape() {
+        let entries = all_registered_notifications();
+        let on_trade_offer = entries
+            .iter()
+            .find(|e| e.event == "OnTradeOffer")
+            .expect("OnTradeOffer entry");
+        assert_eq!((on_trade_offer.min_arity, on_trade_offer.max_arity), (2, 2));
+        assert!(check_notification_shape(
+            on_trade_offer,
+            &[
+                PyRep::Integer(1),
+                PyRep::List(vec![PyRep::Bool(false), PyRep::Bool(true)]),
+            ],
         )
         .is_ok());
-        let err_offer = check_event_shape_against_samples(
-            "OnTradeOffer",
-            2,
-            3,
-            &trade_offer_samples,
-            &[PyRep::Integer(1), PyRep::Bool(false), PyRep::Integer(999)],
+        let err_scalar_offer = check_notification_shape(
+            on_trade_offer,
+            &[PyRep::Integer(1), PyRep::Bool(false)],
         )
         .unwrap_err();
         assert!(
-            err_offer.contains("OnTradeOffer") && err_offer.contains("arg[2]"),
-            "{err_offer}"
+            err_scalar_offer.contains("OnTradeOffer") && err_scalar_offer.contains("arg[1]"),
+            "{err_scalar_offer}"
         );
-
-        let money_offer_samples = vec![vec![PyRep::Integer(1), PyRep::Real(5_000.0)]];
-        assert!(check_event_shape_against_samples(
-            "OnTradeMoneyOffer",
-            2,
-            3,
-            &money_offer_samples,
-            &[PyRep::Integer(1), PyRep::Real(0.0), PyRep::Real(5_000.0)],
+        let err_arity_offer = check_notification_shape(
+            on_trade_offer,
+            &[PyRep::Integer(1), PyRep::Bool(false), PyRep::Bool(true)],
         )
-        .is_ok());
-        let err_money = check_event_shape_against_samples(
-            "OnTradeMoneyOffer",
-            2,
-            3,
-            &money_offer_samples,
+        .unwrap_err();
+        assert!(
+            err_arity_offer.contains("OnTradeOffer") && err_arity_offer.contains("arity"),
+            "{err_arity_offer}"
+        );
+        let err_inner_offer = check_notification_shape(
+            on_trade_offer,
             &[
                 PyRep::Integer(1),
-                PyRep::Real(0.0),
-                PyRep::String("bad".into()),
+                PyRep::List(vec![PyRep::Integer(999), PyRep::Integer(0)]),
             ],
         )
         .unwrap_err();
         assert!(
-            err_money.contains("OnTradeMoneyOffer") && err_money.contains("arg[2]"),
-            "{err_money}"
+            err_inner_offer.contains("OnTradeOffer") && err_inner_offer.contains("arg[1]"),
+            "{err_inner_offer}"
+        );
+
+        let on_trade_money_offer = entries
+            .iter()
+            .find(|e| e.event == "OnTradeMoneyOffer")
+            .expect("OnTradeMoneyOffer entry");
+        assert_eq!(
+            (on_trade_money_offer.min_arity, on_trade_money_offer.max_arity),
+            (2, 2)
+        );
+        assert!(check_notification_shape(
+            on_trade_money_offer,
+            &[
+                PyRep::Integer(1),
+                PyRep::List(vec![PyRep::Real(0.0), PyRep::Real(5_000.0)]),
+            ],
+        )
+        .is_ok());
+        let err_scalar_money = check_notification_shape(
+            on_trade_money_offer,
+            &[PyRep::Integer(1), PyRep::Real(5_000.0)],
+        )
+        .unwrap_err();
+        assert!(
+            err_scalar_money.contains("OnTradeMoneyOffer") && err_scalar_money.contains("arg[1]"),
+            "{err_scalar_money}"
+        );
+        let err_arity_money = check_notification_shape(
+            on_trade_money_offer,
+            &[PyRep::Integer(1), PyRep::Real(0.0), PyRep::Real(5_000.0)],
+        )
+        .unwrap_err();
+        assert!(
+            err_arity_money.contains("OnTradeMoneyOffer") && err_arity_money.contains("arity"),
+            "{err_arity_money}"
+        );
+        let err_inner_money = check_notification_shape(
+            on_trade_money_offer,
+            &[
+                PyRep::Integer(1),
+                PyRep::List(vec![PyRep::String("bad".into()), PyRep::Real(0.0)]),
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            err_inner_money.contains("OnTradeMoneyOffer") && err_inner_money.contains("arg[1]"),
+            "{err_inner_money}"
         );
     }
 

@@ -1178,10 +1178,10 @@ pub(super) fn handle_corp_contacts_and_labels(
                         standing: st,
                     },
                 );
-                updates_rep.push(PyRep::keyval([
-                    ("contactID", PyRep::Integer(cid)),
-                    ("standing", PyRep::Real(st)),
-                    ("labelMask", PyRep::Integer(mask)),
+                updates_rep.push(PyRep::Tuple(vec![
+                    PyRep::Integer(cid),
+                    PyRep::Real(st),
+                    PyRep::Integer(mask),
                 ]));
             }
             ctx.emit_typed(
@@ -1293,10 +1293,10 @@ pub(super) fn handle_corp_contacts_and_labels(
             let updates_rep: Vec<PyRep> = updated
                 .into_iter()
                 .map(|(cid, st, mask)| {
-                    PyRep::keyval([
-                        ("contactID", PyRep::Integer(cid)),
-                        ("standing", PyRep::Real(st)),
-                        ("labelMask", PyRep::Integer(mask)),
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(cid),
+                        PyRep::Real(st),
+                        PyRep::Integer(mask),
                     ])
                 })
                 .collect();

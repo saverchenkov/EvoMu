@@ -240,7 +240,14 @@ async fn test_standings_and_contacts_notifications() {
     let org_contacts_ev = events_from(&n5, "OnOrganizationContactsUpdated");
     assert_eq!(org_contacts_ev.len(), 1, "Must emit exactly one OnOrganizationContactsUpdated");
     assert_eq!(org_contacts_ev[0][0], PyRep::Integer(corp_id));
-    assert!(matches!(&org_contacts_ev[0][1], PyRep::List(list) if !list.is_empty()), "Updates payload must be non-empty list");
+    assert_eq!(
+        org_contacts_ev[0][1],
+        PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(P2),
+            PyRep::Real(7.5),
+            PyRep::Integer(1),
+        ])])
+    );
 
     // 6. OnSetAllianceStanding & OnOrganizationContactsUpdated: via allianceRegistry.AddAllianceContact
     call(
@@ -257,7 +264,14 @@ async fn test_standings_and_contacts_notifications() {
     let org_contacts_ally_ev = events_from(&n6, "OnOrganizationContactsUpdated");
     assert_eq!(org_contacts_ally_ev.len(), 1, "Must emit exactly one OnOrganizationContactsUpdated");
     assert_eq!(org_contacts_ally_ev[0][0], PyRep::Integer(ally_id));
-    assert!(matches!(&org_contacts_ally_ev[0][1], PyRep::List(list) if !list.is_empty()), "Updates payload must be non-empty list");
+    assert_eq!(
+        org_contacts_ally_ev[0][1],
+        PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(P2),
+            PyRep::Real(8.5),
+            PyRep::Integer(2),
+        ])])
+    );
 }
 
 #[tokio::test]

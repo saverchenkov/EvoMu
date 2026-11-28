@@ -1387,8 +1387,10 @@ fn handle_trade_action(
                             NotificationTarget::Character(party),
                             crate::router::notify_registry::OnTradeMoneyOffer {
                                 container_id: tr.trade_id,
-                                arg1: PyRep::Real(IskCents(tr.money_a_cents).to_wire_f64()),
-                                arg2: Some(PyRep::Real(IskCents(tr.money_b_cents).to_wire_f64())),
+                                money: [
+                                    IskCents(tr.money_a_cents).to_wire_f64(),
+                                    IskCents(tr.money_b_cents).to_wire_f64(),
+                                ],
                             },
                         );
                     }
@@ -1404,8 +1406,7 @@ fn handle_trade_action(
                             NotificationTarget::Character(party),
                             crate::router::notify_registry::OnTradeOffer {
                                 container_id: tr.trade_id,
-                                arg1: PyRep::Bool(tr.accept_a),
-                                arg2: Some(PyRep::Bool(tr.accept_b)),
+                                state: [tr.accept_a, tr.accept_b],
                             },
                         );
                         if party != char_id && !added_item_ids.is_empty() {
@@ -1430,8 +1431,7 @@ fn handle_trade_action(
                             NotificationTarget::Character(party),
                             crate::router::notify_registry::OnTradeOffer {
                                 container_id: tr.trade_id,
-                                arg1: PyRep::Bool(tr.accept_a),
-                                arg2: Some(PyRep::Bool(tr.accept_b)),
+                                state: [tr.accept_a, tr.accept_b],
                             },
                         );
                         if tr.completed {

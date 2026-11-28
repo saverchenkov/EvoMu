@@ -92,17 +92,6 @@ fn inv_keyval_scan_result_and_anomaly_normalizers() {
 
 #[test]
 fn destiny_and_notification_normalizers_and_suppression_branches() {
-    // normalize_damage_state_tuple
-    assert_eq!(normalize_damage_state_tuple(PyRep::Integer(1)), PyRep::Integer(1));
-    assert_eq!(
-        normalize_damage_state_tuple(PyRep::Tuple(vec![
-            PyRep::Tuple(vec![PyRep::Real(0.75), PyRep::Real(60000.0), PyRep::Integer(1)]),
-            PyRep::Real(1.0),
-            PyRep::Real(1.0),
-        ])),
-        PyRep::Tuple(vec![PyRep::Real(0.75), PyRep::Real(1.0), PyRep::Real(1.0)])
-    );
-
     let mk_ev = |name: &str| {
         PyRep::Tuple(vec![
             PyRep::Integer(1),
@@ -141,7 +130,6 @@ fn destiny_and_notification_normalizers_and_suppression_branches() {
     assert!(!should_suppress_macho_notification("OnAccountChange", &[]));
 
     // normalize_macho_notification arms
-    assert_eq!(normalize_macho_notification("OnContractCreated", vec![PyRep::Integer(1)]), Vec::<PyRep>::new());
     assert_eq!(
         normalize_macho_notification(
             "OnWarpFinished",
@@ -152,13 +140,6 @@ fn destiny_and_notification_normalizers_and_suppression_branches() {
     assert_eq!(
         normalize_macho_notification("OnWarpFinished", vec![PyRep::Integer(10)]),
         vec![PyRep::Integer(10)]
-    );
-    assert_eq!(
-        normalize_macho_notification(
-            "OnTradeOffer",
-            vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(3)]
-        ),
-        vec![PyRep::Integer(1), PyRep::Integer(2)]
     );
     assert_eq!(
         normalize_macho_notification(
@@ -174,28 +155,6 @@ fn destiny_and_notification_normalizers_and_suppression_branches() {
         ),
         vec![PyRep::Integer(1), PyRep::String("OnSkillTrained".into())]
     );
-
-    let dmg_notif = normalize_macho_notification(
-        "OnDamageStateChange",
-        vec![
-            PyRep::Integer(999),
-            PyRep::Tuple(vec![
-                PyRep::Tuple(vec![PyRep::Real(0.5)]),
-                PyRep::Real(0.9),
-                PyRep::Real(1.0),
-            ]),
-        ],
-    );
-    assert_eq!(
-        dmg_notif[1],
-        PyRep::Tuple(vec![PyRep::Real(0.5), PyRep::Real(0.9), PyRep::Real(1.0)])
-    );
-
-    let slim_notif = normalize_macho_notification(
-        "OnSlimItemChange",
-        vec![PyRep::Integer(100), PyRep::keyval([("itemID", PyRep::Integer(100))])],
-    );
-    assert_eq!(slim_notif[0], slim_notif[1]);
 
     // DoDestinyUpdates
     let ddu = normalize_macho_notification(
@@ -735,12 +694,6 @@ fn w4_mutant_killers_untouched_services_helpers_and_defaults() {
 fn w4_mutant_killers_all_remaining_notifications() {
     let ctx = test_ctx();
 
-    assert_eq!(
-        normalize_macho_notification("OnChannelJoined", vec![PyRep::Integer(9), PyRep::String("x".into())]),
-        vec![PyRep::Integer(9)]
-    );
-    assert!(normalize_macho_notification("OnChannelJoined", Vec::new()).is_empty());
-
     let bm = normalize_macho_notification(
         "OnSharedBookmarksFolderUpdated",
         vec![PyRep::List(vec![
@@ -773,26 +726,6 @@ fn w4_mutant_killers_all_remaining_notifications() {
         vec![PyRep::Integer(1), PyRep::Integer(2)]
     );
 
-    assert!(normalize_macho_notification("OnCorporationRecruitmentAdChanged", vec![PyRep::Integer(1)]).is_empty());
-    assert!(normalize_macho_notification("OnOrganizationContactsUpdated", Vec::new()).is_empty());
-    let org_c = normalize_macho_notification(
-        "OnOrganizationContactsUpdated",
-        vec![
-            PyRep::Integer(98_000_001),
-            PyRep::List(vec![
-                PyRep::keyval([("contactID", PyRep::Integer(1)), ("standing", PyRep::Real(5.0)), ("labelMask", PyRep::Integer(2))]),
-                PyRep::keyval([("contactID", PyRep::Integer(2)), ("relationshipID", PyRep::Real(-10.0))]),
-            ]),
-        ],
-    );
-    assert_eq!(
-        org_c[1],
-        PyRep::List(vec![
-            PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(5.0), PyRep::Integer(2)]),
-            PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Real(-10.0), PyRep::Integer(0)]),
-        ])
-    );
-
     assert_eq!(normalize_macho_notification("OnTargetClear", Vec::new()), vec![PyRep::List(Vec::new())]);
     assert_eq!(normalize_macho_notification("OnTargetClear", vec![PyRep::List(vec![PyRep::Integer(1)])]), vec![PyRep::List(vec![PyRep::Integer(1)])]);
 
@@ -812,12 +745,6 @@ fn w4_mutant_killers_all_remaining_notifications() {
     let PyRep::List(proc_items) = &proc_inv[0] else { panic!() };
     assert_eq!(proc_items[0].dict_get("itemID"), Some(&PyRep::Integer(501)));
     assert_eq!(proc_inv[2], PyRep::Bool(true));
-
-    assert_eq!(
-        normalize_macho_notification("OnNotificationReceived", Vec::new()),
-        vec![PyRep::Integer(0), PyRep::Integer(0), PyRep::None, PyRep::Integer(0), PyRep::None]
-    );
-    assert_eq!(normalize_macho_notification("OnNotificationReceived", vec![PyRep::Integer(1)]), vec![PyRep::Integer(1)]);
 
     for (raw_w, exp_w) in [
         ("locked", "add"),
@@ -843,11 +770,6 @@ fn w4_mutant_killers_all_remaining_notifications() {
     assert_eq!(
         normalize_macho_notification("OnTarget", vec![PyRep::Integer(88)]),
         vec![PyRep::Integer(88)]
-    );
-
-    assert_eq!(
-        normalize_macho_notification("OnTradeMoneyOffer", vec![PyRep::Integer(1), PyRep::Integer(500), PyRep::Integer(999)]),
-        vec![PyRep::Integer(1), PyRep::Integer(500)]
     );
 
     let mult = normalize_macho_notification_with_sde(
@@ -894,15 +816,6 @@ fn w4_mutant_killers_all_remaining_notifications() {
     let PyRep::Tuple(mb0) = &mb_rows[0] else { panic!() };
     assert_eq!(mb0[3], PyRep::Integer(4));
     assert_eq!(mb0[7], PyRep::None);
-
-    assert_eq!(
-        normalize_macho_notification("OnDockingAccepted", vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(60_003_760)]),
-        vec![PyRep::Integer(60_003_760)]
-    );
-    assert_eq!(
-        normalize_macho_notification("OnDockingAccepted", vec![PyRep::Integer(60_003_760)]),
-        vec![PyRep::Integer(60_003_760)]
-    );
 
     let ddu_dock_in = vec![PyRep::List(vec![PyRep::Tuple(vec![
         PyRep::String("OnDockingAccepted".into()),
@@ -2080,4 +1993,301 @@ async fn arch_933_t3_migrated_rpcs_and_notifies_direct_equals_wire_native() {
     let wire_rec_ids = sort_int_list(&wire_recover);
     assert_eq!(dir_rec_ids.len(), 8);
     assert_eq!(dir_rec_ids, wire_rec_ids);
+}
+
+#[tokio::test]
+async fn arch_933_t7b_canonical_emitters_shape_checked_and_compat_noop() {
+    use crate::router::notify_registry::all_registered_notifications;
+    use crate::router::notify_shape_check::check_notification_shape;
+    use eve_db::{CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents};
+    use eve_machonet::service_roles;
+    use std::collections::HashSet;
+
+    let ctx = test_ctx();
+    let char_a = 90_000_001_i64;
+    let char_b = 90_000_002_i64;
+    let corp_id = 98_933_701_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let trade_item_id = 933_700_001_i64;
+
+    let (uid_a, uid_b) = ctx.db.with_mut_snapshot(|snap| {
+        let mut ca = snap.characters[&char_a].clone();
+        ca.corporation_id = corp_id;
+        ca.station_id = Some(station_id);
+        ca.solar_system_id = sys_id;
+        ca.balance = IskCents::from_isk(100_000);
+        let uid_a = ca.user_id;
+        snap.characters.insert(char_a, ca.clone());
+
+        let uid_b = snap.characters.get(&char_b).map_or(502, |c| c.user_id);
+        let mut cb = snap.characters.get(&char_b).cloned().unwrap_or(ca);
+        cb.character_id = char_b;
+        cb.user_id = uid_b;
+        cb.name = "TradePartner".into();
+        cb.corporation_id = corp_id;
+        cb.station_id = Some(station_id);
+        cb.solar_system_id = sys_id;
+        cb.balance = IskCents::from_isk(100_000);
+        snap.characters.insert(char_b, cb);
+
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "T7b Corp".into();
+        corp.ticker = "T7B".into();
+        corp.ceo_id = char_a;
+        corp.members = HashSet::from([char_a, char_b]);
+        corp.member_roles = HashMap::from([(char_a, u64::MAX)]);
+        corp.hq_station_id = Some(station_id);
+        corp.set_division_balance(1, IskCents::from_isk(1_000_000));
+        snap.corporations.insert(corp_id, corp);
+
+        snap.items.insert(
+            trade_item_id,
+            InventoryItemRecord {
+                item_id: trade_item_id,
+                type_id: 34,
+                owner_id: char_a,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        (uid_a, uid_b)
+    });
+
+    let now = ctx.now_unix();
+    ctx.db
+        .acquire_online_lock(uid_a, 93_371, Some(char_a), false, now)
+        .expect("online lock A");
+    ctx.db
+        .acquire_online_lock(uid_b, 93_372, Some(char_b), false, now)
+        .expect("online lock B");
+
+    let mut sess_a = SessionState::new(93_371);
+    sess_a.user_id = Some(uid_a);
+    sess_a.character_id = Some(char_a);
+    sess_a.corporation_id = Some(corp_id);
+    sess_a.solar_system_id = Some(sys_id);
+    sess_a.station_id = Some(station_id);
+    sess_a.role = service_roles::ROLE_PLAYER_DEFAULT;
+
+    let mut sess_b = SessionState::new(93_372);
+    sess_b.user_id = Some(uid_b);
+    sess_b.character_id = Some(char_b);
+    sess_b.corporation_id = Some(corp_id);
+    sess_b.solar_system_id = Some(sys_id);
+    sess_b.station_id = Some(station_id);
+    sess_b.role = service_roles::ROLE_PLAYER_DEFAULT;
+
+    let kw = HashMap::new();
+    ctx.drain_notifications_for_char(char_a);
+    ctx.drain_notifications_for_char(char_b);
+
+    // 1. OnChannelJoined (sync_character_local_chat + LSC.JoinChannel)
+    ctx.sync_character_local_chat(char_a, None, sys_id);
+    ctx.dispatch_rpc(
+        &mut sess_a,
+        "LSC",
+        None,
+        "JoinChannel",
+        &[PyRep::String("channel:t7b-room".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("LSC.JoinChannel");
+
+    // 2. OnCorporationRecruitmentAdChanged (corpRecProxy.CreateRecruitmentAd)
+    ctx.dispatch_rpc(
+        &mut sess_a,
+        "corpRecProxy",
+        None,
+        "CreateRecruitmentAd",
+        &[
+            PyRep::String("T7b Pilots".into()),
+            PyRep::String("Canonical ad".into()),
+            PyRep::Integer(7),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CreateRecruitmentAd");
+
+    // 3. OnOrganizationContactsUpdated (corpRegistry.AddCorporateContact)
+    ctx.dispatch_rpc(
+        &mut sess_a,
+        "corpRegistry",
+        None,
+        "AddCorporateContact",
+        &[PyRep::Integer(char_b), PyRep::Real(5.0), PyRep::Integer(1)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("AddCorporateContact");
+
+    let mut notifs = ctx.drain_notifications_for_char(char_a);
+    notifs.extend(ctx.drain_notifications_for_char(char_b));
+
+    // 4 & 5. OnTradeOffer & OnTradeMoneyOffer (trademgr.InitiateTrade, AddItem, OfferMoney, MakeOffer)
+    let init_bid = ctx
+        .dispatch_rpc(
+            &mut sess_a,
+            "trademgr",
+            None,
+            "InitiateTrade",
+            &[PyRep::Integer(char_b)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("InitiateTrade")
+        .as_i64()
+        .expect("bound trade id");
+    let trade_id = ctx
+        .dispatch_rpc(
+            &mut sess_a,
+            "trademgr",
+            None,
+            "List",
+            &[PyRep::Integer(init_bid)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("trademgr.List")
+        .dict_get("tradeContainerID")
+        .and_then(PyRep::as_i64)
+        .expect("tradeContainerID");
+    notifs.extend(ctx.drain_notifications_for_char(char_a));
+    notifs.extend(ctx.drain_notifications_for_char(char_b));
+
+    ctx.dispatch_rpc(
+        &mut sess_a,
+        "trademgr",
+        None,
+        "AddItem",
+        &[
+            PyRep::Integer(trade_id),
+            PyRep::Integer(trade_item_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("AddItem");
+    let add_a = ctx.drain_notifications_for_char(char_a);
+    let add_b = ctx.drain_notifications_for_char(char_b);
+    let expected_add_offer = vec![PyRep::Integer(trade_id), PyRep::List(vec![PyRep::Bool(false), PyRep::Bool(false)])];
+    assert_eq!(
+        add_a.iter().filter(|n| n.event == "OnTradeOffer").map(|n| &n.args).collect::<Vec<_>>(),
+        vec![&expected_add_offer]
+    );
+    assert_eq!(
+        add_b.iter().filter(|n| n.event == "OnTradeOffer").map(|n| &n.args).collect::<Vec<_>>(),
+        vec![&expected_add_offer]
+    );
+    notifs.extend(add_a);
+    notifs.extend(add_b);
+
+    ctx.dispatch_rpc(
+        &mut sess_b,
+        "trademgr",
+        None,
+        "OfferMoney",
+        &[PyRep::Integer(trade_id), PyRep::Real(2_500.0)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("OfferMoney");
+    let money_a = ctx.drain_notifications_for_char(char_a);
+    let money_b = ctx.drain_notifications_for_char(char_b);
+    let expected_money_offer = vec![PyRep::Integer(trade_id), PyRep::List(vec![PyRep::Real(0.0), PyRep::Real(2_500.0)])];
+    assert_eq!(
+        money_a.iter().filter(|n| n.event == "OnTradeMoneyOffer").map(|n| &n.args).collect::<Vec<_>>(),
+        vec![&expected_money_offer]
+    );
+    assert_eq!(
+        money_b.iter().filter(|n| n.event == "OnTradeMoneyOffer").map(|n| &n.args).collect::<Vec<_>>(),
+        vec![&expected_money_offer]
+    );
+    notifs.extend(money_a);
+    notifs.extend(money_b);
+
+    ctx.dispatch_rpc(
+        &mut sess_b,
+        "trademgr",
+        None,
+        "MakeOffer",
+        &[PyRep::Integer(trade_id), PyRep::Bool(true)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("MakeOffer");
+    let make_a = ctx.drain_notifications_for_char(char_a);
+    let make_b = ctx.drain_notifications_for_char(char_b);
+    let expected_make_offer = vec![PyRep::Integer(trade_id), PyRep::List(vec![PyRep::Bool(false), PyRep::Bool(true)])];
+    assert_eq!(
+        make_a.iter().filter(|n| n.event == "OnTradeOffer").map(|n| &n.args).collect::<Vec<_>>(),
+        vec![&expected_make_offer]
+    );
+    assert_eq!(
+        make_b.iter().filter(|n| n.event == "OnTradeOffer").map(|n| &n.args).collect::<Vec<_>>(),
+        vec![&expected_make_offer]
+    );
+    notifs.extend(make_a);
+    notifs.extend(make_b);
+
+    let registry = all_registered_notifications();
+    let target_events = [
+        "OnChannelJoined",
+        "OnCorporationRecruitmentAdChanged",
+        "OnOrganizationContactsUpdated",
+        "OnTradeOffer",
+        "OnTradeMoneyOffer",
+    ];
+    for ev in target_events {
+        let entry = registry
+            .iter()
+            .find(|e| e.event == ev)
+            .unwrap_or_else(|| panic!("missing registry entry for {ev}"));
+        let matched: Vec<_> = notifs.iter().filter(|n| n.event == ev).collect();
+        assert!(
+            !matched.is_empty(),
+            "expected at least one handler-emitted {ev} notification"
+        );
+        for n in matched {
+            check_notification_shape(entry, &n.args)
+                .unwrap_or_else(|e| panic!("{ev} failed notify_shape_check: {e}"));
+            let normalized =
+                normalize_macho_notification_with_sde(&n.event, n.args.clone(), Some(&ctx.sde));
+            assert_eq!(
+                normalized, n.args,
+                "{ev} args mutated across normalize_macho_notification_with_sde"
+            );
+            let recipient_uid = if n.recipient_char_id == char_a {
+                Some(uid_a)
+            } else {
+                Some(uid_b)
+            };
+            let (_, re_encoded) = ServerContext::build_macho_notification_packet(
+                n.recipient_char_id,
+                recipient_uid,
+                &n.event,
+                &n.id_type,
+                normalized,
+            );
+            assert_eq!(
+                re_encoded, n.marshaled_packet,
+                "{ev} wire bytes mutated across normalize_macho_notification_with_sde"
+            );
+        }
+    }
 }

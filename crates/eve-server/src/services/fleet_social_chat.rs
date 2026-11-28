@@ -223,7 +223,6 @@ fn handle_chat_rpc(
                             NotificationTarget::All,
                             crate::router::notify_registry::OnChannelJoined {
                                 channel: chan_key.clone(),
-                                character_id: Some(target_char),
                             },
                         );
                     }
@@ -803,7 +802,6 @@ fn handle_chat_rpc(
                             NotificationTarget::All,
                             crate::router::notify_registry::OnChannelJoined {
                                 channel: chan_key.clone(),
-                                character_id: Some(char_id),
                             },
                         );
                     }
@@ -1101,14 +1099,12 @@ fn handle_chat_rpc(
                 NotificationTarget::Character(char_id),
                 crate::router::notify_registry::OnChannelJoined {
                     channel: chan_id.clone(),
-                    character_id: Some(char_id),
                 },
             );
             ctx.emit_typed(
                 NotificationTarget::Character(recipient_id),
                 crate::router::notify_registry::OnChannelJoined {
                     channel: chan_id.clone(),
-                    character_id: Some(recipient_id),
                 },
             );
 

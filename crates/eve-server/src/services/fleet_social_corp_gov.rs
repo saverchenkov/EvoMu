@@ -2174,10 +2174,7 @@ pub(super) fn handle_corp_gov(
             };
             ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
-                crate::router::notify_registry::OnCorporationRecruitmentAdChanged {
-                    corp_id: Some(corp_id),
-                    ad_id: Some(ad_id),
-                },
+                crate::router::notify_registry::OnCorporationRecruitmentAdChanged,
             );
             Some(Ok(PyRep::keyval([
                 ("adID", PyRep::Integer(ad_id)),
@@ -2231,10 +2228,7 @@ pub(super) fn handle_corp_gov(
             }
             ctx.emit_typed(
                 NotificationTarget::Corporation(corp_id),
-                crate::router::notify_registry::OnCorporationRecruitmentAdChanged {
-                    corp_id: Some(corp_id),
-                    ad_id: Some(ad_id),
-                },
+                crate::router::notify_registry::OnCorporationRecruitmentAdChanged,
             );
             Some(Ok(PyRep::keyval([("adID", PyRep::Integer(ad_id)), ("deleted", PyRep::Bool(true))])))
         }

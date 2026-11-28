@@ -1414,9 +1414,9 @@ fn count_notify_registry_pyrep_fields(src: &str) -> (usize, usize) {
 
 #[test]
 fn notify_registry_pyrep_field_count_respects_monotonic_ratchet() {
-    // Track 6b monotonic tightening: eliminated fake optional `arg2`/`arg3` & typed `key`
-    // on `OnClientNodeGraphUpdate`/`OnClientNodeGraphMessage` (194 PyRep + 23 Option<PyRep> = 217 <= 220 <= 237).
-    const PYREP_FIELD_BASELINE: usize = 217;
+    // Track 7b monotonic tightening: eliminated `arg1: PyRep` and `optional: arg2: Option<PyRep>`
+    // on `OnTradeOffer`/`OnTradeMoneyOffer` (191 PyRep + 22 Option<PyRep> = 213 <= 217 <= 237).
+    const PYREP_FIELD_BASELINE: usize = 213;
     const _: () = assert!(PYREP_FIELD_BASELINE <= 237);
 
     let src = include_str!("notify_registry.rs");
@@ -1497,7 +1497,7 @@ fn incomplete_sample_events_allowlist_ratchet() {
     let allowlist = super::notify_shape_check::INCOMPLETE_SAMPLE_EVENTS;
     assert_eq!(
         allowlist.len(),
-        3,
+        1,
         "INCOMPLETE_SAMPLE_EVENTS may only shrink cleanly; observed: {allowlist:?}"
     );
     let registered: HashSet<&'static str> = all_registered_notifications()

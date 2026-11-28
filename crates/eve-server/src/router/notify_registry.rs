@@ -137,6 +137,13 @@ impl<T: ToNotifyArg> ToNotifyArg for Vec<T> {
     }
 }
 
+impl<T: ToNotifyArg> ToNotifyArg for [T; 2] {
+    fn into_notify_arg(self) -> PyRep {
+        let [a, b] = self;
+        PyRep::List(vec![a.into_notify_arg(), b.into_notify_arg()])
+    }
+}
+
 impl<A: ToNotifyArg, B: ToNotifyArg> ToNotifyArg for (A, B) {
     fn into_notify_arg(self) -> PyRep {
         PyRep::Tuple(vec![self.0.into_notify_arg(), self.1.into_notify_arg()])
@@ -1789,8 +1796,8 @@ define_notifications! {
     },
     OnChannelLeft => "OnChannelLeft" ("channelid") {
         fields: { channel: PyRep },
-        // `XmppChatChannels.OnChannelLeft(channel)` (`services/fleet_social_notify.rs:396`)
-        // emits bare string channel IDs; legacy tuple form still normalized by `client_compat`.
+        // `XmppChatChannels.OnChannelLeft(channel)` (`services/fleet_social_chat.rs:856`,
+        // `services/fleet_social_notify.rs:396`) emits bare string channel IDs; V24 also accepts tuple IDs.
         samples: || vec![
             vec![PyRep::Tuple(vec![PyRep::String("fleet".into()), PyRep::Integer(1)])],
             vec![PyRep::String("fleet_1".into())],
@@ -2868,10 +2875,10 @@ define_notifications! {
         fields: { owner_id: i64, updates: PyRep },
         samples: || vec![vec![
             PyRep::Integer(98_000_001),
-            PyRep::List(vec![PyRep::keyval([
-                ("contactID", PyRep::Integer(90_000_002)),
-                ("standing", PyRep::Real(5.0)),
-                ("labelMask", PyRep::Integer(0)),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(90_000_002),
+                PyRep::Real(5.0),
+                PyRep::Integer(0),
             ])]),
         ]],
     },
@@ -3621,11 +3628,7 @@ define_notifications! {
     },
     OnChannelJoined => "OnChannelJoined" ("channelid") {
         fields: { channel: String },
-        optional: { character_id: Option<i64> },
-        samples: || vec![
-            vec![PyRep::String("solarsystemid2:30000142".into())],
-            vec![PyRep::String("solarsystemid2:30000142".into()), PyRep::Integer(90_000_001)],
-        ],
+        samples: || vec![vec![PyRep::String("solarsystemid2:30000142".into())]],
     },
     OnClientEventChatMessageSent => "OnClientEvent_ChatMessageSent" ("channelid") {
         samples: || vec![vec![]],
@@ -4062,11 +4065,7 @@ define_notifications! {
         ],
     },
     OnCorporationRecruitmentAdChanged => "OnCorporationRecruitmentAdChanged" ("corpid") {
-        optional: { corp_id: Option<i64>, ad_id: Option<i64> },
-        samples: || vec![
-            vec![],
-            vec![PyRep::Integer(98_000_001), PyRep::Integer(1)],
-        ],
+        samples: || vec![vec![]],
     },
     OnCorporationStructuresUpdated => "OnCorporationStructuresUpdated" ("corpid") {
         samples: || vec![vec![]],
@@ -4728,7 +4727,7 @@ define_notifications! {
     },
     OnSharedBookmarksFolderUpdated => "OnSharedBookmarksFolderUpdated" ("corpid") {
         fields: { updates: PyRep },
-        // Accepts V24 tuple payloads plus pre-`client_compat` `List[Integer]` (`client_compat.rs:800`);
+        // Accepts V24 tuple payloads plus pre-`client_compat` `List[Integer]` (`client_compat.rs:481`);
         // scalar `Integer`/`Bool` updates (`FolderChanged`) are allowlisted in `INCOMPLETE_SAMPLE_EVENTS`.
         samples: || vec![
             vec![PyRep::List(vec![PyRep::Tuple(vec![
@@ -5163,7 +5162,7 @@ define_notifications! {
         fields: { arg0: PyRep, arg1: PyRep },
         optional: { reason: Option<PyRep> },
         // V24 `(what, tid[, reason])` plus pre-`client_compat` `(tid, what[, reason])`
-        // emitted by `system_actor/cycles.rs:2281` & `fitting_dogma_*` (`client_compat.rs:913`).
+        // emitted by `system_actor/cycles.rs:2281` & `fitting_dogma_*` (`client_compat.rs:556`).
         samples: || vec![
             vec![PyRep::String("add".into()), PyRep::Integer(100_000_001)],
             vec![PyRep::String("add".into()), PyRep::Integer(100_000_001), PyRep::None],
@@ -6213,14 +6212,24 @@ define_notifications! {
         ]],
     },
     OnTradeMoneyOffer => "OnTradeMoneyOffer" ("charid") {
-        fields: { container_id: i64, arg1: PyRep },
-        optional: { arg2: Option<PyRep> },
-        samples: || vec![vec![PyRep::Integer(1), PyRep::Real(5_000.0)]],
+        fields: { container_id: i64, money: [f64; 2] },
+        // V24 `PVPTradeSvc.OnTradeMoneyOffer(containerID, money)` forwards `money` to
+        // `PVPTrade.OnMoneyOffer(money)` (`pvptradesvc.pyj`, `pvptradewnd.pyj`), which
+        // subscripts `money[self.sr.myIx]` and `money[self.sr.herIx]` in `[char_a, char_b]` order.
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::List(vec![PyRep::Real(0.0), PyRep::Real(5_000.0)]),
+        ]],
     },
     OnTradeOffer => "OnTradeOffer" ("charid") {
-        fields: { container_id: i64, arg1: PyRep },
-        optional: { arg2: Option<PyRep> },
-        samples: || vec![vec![PyRep::Integer(1), PyRep::Bool(true)]],
+        fields: { container_id: i64, state: [bool; 2] },
+        // V24 `PVPTradeSvc.OnTradeOffer(containerID, state)` forwards `state` to
+        // `PVPTrade.OnStateToggle(states)` (`pvptradesvc.pyj`, `pvptradewnd.pyj`), which
+        // subscripts `states[self.sr.myIx]`, `states[self.sr.herIx]`, and `states[0] and states[1]`.
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::List(vec![PyRep::Bool(false), PyRep::Bool(true)]),
+        ]],
     },
     OnTradeOfferReset => "OnTradeOfferReset" ("charid") {
         fields: { container_id: i64, manifest_error: bool },
@@ -6282,7 +6291,7 @@ define_notifications! {
     DoDestinyUpdates => "DoDestinyUpdates" ("charid") {
         fields: { updates: Vec<PyRep> },
         // Accepts V24 `(updates_list, wait_for_bubble)` pairs plus pre-`client_compat`
-        // `(stamp, (action, args))` tuples (`space_nav_travel.rs:974`, `client_compat.rs:989`).
+        // `(stamp, (action, args))` tuples (`space_nav_travel.rs:974`, `client_compat.rs:596`).
         samples: || vec![
             vec![PyRep::List(vec![PyRep::Tuple(vec![
                 PyRep::List(vec![

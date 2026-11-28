@@ -892,10 +892,10 @@ pub async fn handle(
                 "allianceid",
                 OnOrganizationContactsUpdated {
                     owner_id: aid,
-                    updates: PyRep::List(vec![PyRep::keyval([
-                        ("contactID", PyRep::Integer(contact_id)),
-                        ("standing", PyRep::Real(standing)),
-                        ("labelMask", PyRep::Integer(label_mask as i64)),
+                    updates: PyRep::List(vec![PyRep::Tuple(vec![
+                        PyRep::Integer(contact_id),
+                        PyRep::Real(standing),
+                        PyRep::Integer(label_mask as i64),
                     ])]),
                 },
             );

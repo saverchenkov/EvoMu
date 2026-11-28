@@ -1825,9 +1825,11 @@ impl ServerContext {
         }
 
         if !crate::services::quasar_social_chat::is_delayed_local_system(new_sys) {
-            self.notify(
-                NotificationTarget::SolarSystem(new_sys), "OnChannelJoined", "channelid",
-                vec![PyRep::String(format!("solarsystemid2:{}", new_sys)), PyRep::String("Join".into()), PyRep::Integer(char_id)],
+            self.emit_typed(
+                NotificationTarget::SolarSystem(new_sys),
+                crate::router::notify_registry::OnChannelJoined {
+                    channel: format!("solarsystemid2:{new_sys}"),
+                },
             );
         }
         if old_sys != Some(new_sys) {
