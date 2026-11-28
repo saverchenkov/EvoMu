@@ -2131,8 +2131,8 @@ fn slash_registry_matches_advertised_commands_and_roles() {
             entry.name
         );
         assert!(
-            !entry.usage.is_empty() && !entry.summary.is_empty(),
-            "slash command '{}' must declare non-empty usage and summary",
+            !entry.usage.is_empty() && !entry.description.is_empty(),
+            "slash command '{}' must declare non-empty usage and description",
             entry.name
         );
         let cmd_with_arg = format!("/{} 1", entry.name);

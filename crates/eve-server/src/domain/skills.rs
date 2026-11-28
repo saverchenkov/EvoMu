@@ -498,6 +498,19 @@ pub fn apply_free_skill_points_to_skill(
     }
     emit_server_skills_changed(ctx, char_id, &[skill_type_id], None);
     ctx.push_brain_update(char_id);
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        crate::router::notify_registry::OnFreeSkillPointsChanged {
+            new_free_skill_points: outcome.remaining_free_skill_points,
+        },
+    );
+
+    Ok(ApplyFreeSkillPointsResult {
+        new_skill_sp,
+        remaining_free_sp: outcome.remaining_free_skill_points,
+    })
+}
+
 /// Result metadata returned by [`reset_character_skills_to_race_starter`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResetSkillsToStarterOutcome {
@@ -610,19 +623,6 @@ pub fn reset_character_skills_to_race_starter(
     Ok(outcome)
 }
 
-    ctx.emit_typed(
-        NotificationTarget::Character(char_id),
-        crate::router::notify_registry::OnFreeSkillPointsChanged {
-            new_free_skill_points: outcome.remaining_free_skill_points,
-        },
-    );
-
-    Ok(ApplyFreeSkillPointsResult {
-        new_skill_sp,
-        remaining_free_sp: outcome.remaining_free_skill_points,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,7 +639,12 @@ mod tests {
             .map(|t| t.type_id)
             .unwrap_or(3300);
 
-        let race_id = ctx.db.with_snapshot(|snap| snap.characters[&cid].race_id);
+        let (race_id, uid) = ctx
+            .db
+            .with_snapshot(|snap| (snap.characters[&cid].race_id, snap.characters[&cid].user_id));
+        ctx.db
+            .acquire_online_lock(uid, 401, Some(cid), true, ctx.now_unix())
+            .expect("online lock");
         let (expected_starter, expected_sp) =
             WorldRepository::starter_skills_for_race(race_id, &ctx.sde);
         assert!(
@@ -668,7 +673,7 @@ mod tests {
                     started_at_unix: Some(1_000),
                 }],
             );
-            snap.paused_skill_queues.insert(cid, Vec::new());
+            snap.paused_skill_queues.insert(cid);
             if let Some(ch) = snap.characters.get_mut(&cid) {
                 ch.free_skill_points = 50_000.0;
             }
@@ -691,7 +696,7 @@ mod tests {
                 assert_eq!(got.level, exp_rec.level);
             }
             assert!(!snap.skill_queues.contains_key(&cid));
-            assert!(!snap.paused_skill_queues.contains_key(&cid));
+            assert!(!snap.paused_skill_queues.contains(&cid));
             assert_eq!(snap.characters[&cid].free_skill_points, 0.0);
         });
 
