@@ -253,3 +253,33 @@ async fn ice_heist_step_guard_combat_and_tanker_steering() {
         assert_eq!(inst.pirate_tankers_saved, 1);
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn step_ice_heist_system_stays_cold_below_corruption_stage_3_and_when_system_unloaded() {
+    let ctx = test_ctx();
+    let cold_sys = 30_045_330_u32;
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    init_insurgency_campaign(&ctx, 542, 500_010, 500_003, cold_sys, vec![cold_sys]);
+    let (_pts, stage) = add_system_corruption(&ctx, 542, cold_sys, 1);
+    assert!(stage < 3);
+
+    step_ice_heist_system(&ctx, cold_sys).await;
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    read_insurgency_runtime(&ctx, |rt| {
+        assert!(rt.ice_heist_instances.is_empty());
+    });
+
+    // Even with a persisted active Ice Heist instance, cold system stepping does not spawn an actor.
+    with_insurgency_runtime(&ctx, |rt| {
+        rt.ice_heist_instances.push(eve_db::PersistedIceHeistRecord {
+            instance_id: 99_542,
+            solar_system_id: cold_sys,
+            pirate_tankers_saved: 0,
+            empire_tankers_saved: 0,
+            completed: false,
+        });
+    });
+    step_ice_heist_system(&ctx, cold_sys).await;
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+}

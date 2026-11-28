@@ -1071,9 +1071,10 @@ fn execute_due_self_destruct_sync(
     let sys_id = due.entry.solar_system_id;
     let char_id = due.entry.char_id;
     let ship_id = due.entry.ship_id;
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let pos = sys_handle
-        .get_ball_position_sync(ship_id)
+    let pos = ctx
+        .systems
+        .get_handle(sys_id)
+        .and_then(|h| h.get_ball_position_sync(ship_id))
         .or_else(|| {
             ctx.db.with_snapshot(|snap| {
                 snap.item_positions
@@ -1678,8 +1679,11 @@ pub fn on_advance_secs_internal(
             entry.ship_id,
             entry.solar_system_id,
         );
-        let handle = ctx.systems.get_or_spawn(entry.solar_system_id);
-        if let Some(pos) = handle.get_ball_position_sync(entry.ship_id) {
+        let handle_opt = ctx.systems.get_handle(entry.solar_system_id);
+        if let Some(pos) = handle_opt
+            .as_ref()
+            .and_then(|h| h.get_ball_position_sync(entry.ship_id))
+        {
             let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
                 snap.item_positions
                     .insert(entry.ship_id, [pos.x, pos.y, pos.z]);
@@ -1700,7 +1704,9 @@ pub fn on_advance_secs_internal(
             ctx,
             entry.char_id,
             |emit_activation| {
-                handle.try_remove_ball(entry.ship_id);
+                if let Some(ref handle) = handle_opt {
+                    handle.try_remove_ball(entry.ship_id);
+                }
                 if emit_activation {
                     crate::router::notify_registry::emit_typed_char_with_db(
                         &ctx.db,
@@ -1951,8 +1957,9 @@ pub fn on_advance_secs_internal(
         }
     }
     for (sys_id, iid, pos, radius) in bubbles_to_activate {
-        let handle = ctx.systems.get_or_spawn(sys_id);
-        handle.try_add_mobile_warp_disruptor(iid, pos, radius);
+        if let Some(handle) = ctx.systems.get_handle(sys_id) {
+            handle.try_add_mobile_warp_disruptor(iid, pos, radius);
+        }
     }
 }
 

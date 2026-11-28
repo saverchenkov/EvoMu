@@ -582,9 +582,10 @@ pub(crate) fn try_cleanup_npe_pocket_and_restore_ui(
             }
             balls
         });
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        for bid in balls_to_remove {
-            sys_handle.try_remove_ball(bid);
+        if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+            for bid in balls_to_remove {
+                sys_handle.try_remove_ball(bid);
+            }
         }
         ctx.emit_typed(
             NotificationTarget::Character(char_id),
@@ -608,7 +609,9 @@ pub(crate) fn try_cleanup_npe_pocket_and_restore_ui(
         reg_id,
     )) = restore_station
     {
-        ctx.systems.get_or_spawn(old_sys_id).try_remove_ball(ship_id);
+        if let Some(h) = ctx.systems.get_handle(old_sys_id) {
+            h.try_remove_ball(ship_id);
+        }
         if let Some(sess) = session.as_deref_mut() {
             let _ = ctx.execute_session_transition_sync(
                 Some(sess),

@@ -1121,3 +1121,67 @@ async fn disconnect_hold_immobilize_module_blocks_emergency_warp_via_system_view
     assert!((rec_pos - start_pos).length() < 1.0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_system_filament_ready_and_safe_logoff_do_not_spawn_actor() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 890_999_i64;
+    let cold_sys = 30_000_144_u32;
+    let now = ctx.now_unix();
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = cold_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, 606, char_id, cold_sys as i64, InventoryFlag::None, 1),
+        );
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 9001, Some(char_id), true, now);
+
+    // 1. Weapons timer rejection runs BEFORE get_handle without waking cold_sys.
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_id).weapon_timer_until_unix = now + 60;
+    }
+    let weapons_err = require_ship_ready_for_filament_jump(&ctx, char_id, ship_id, cold_sys)
+        .expect_err("weapons timer must fail before space check");
+    assert_eq!(weapons_err.code, "WeaponsTimerActive");
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    // 2. Clean character/ship on cold system fails closed with ShipNotInSpace.
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_id).weapon_timer_until_unix = 0;
+    }
+    let cold_err = require_ship_ready_for_filament_jump(&ctx, char_id, ship_id, cold_sys)
+        .expect_err("cold system must fail closed with ShipNotInSpace");
+    assert_eq!(cold_err.code, "ShipNotInSpace");
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    // 3. Safe logoff checks & countdown start stay cold without spawning an actor.
+    assert!(safe_logoff_blocking_space_conditions(&ctx, char_id, ship_id, cold_sys).is_empty());
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    let mut sess = SessionState::new(901_542);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(cold_sys);
+    sess.ship_id = Some(ship_id);
+    let safe_res = handle_safe_logoff(&ctx, &mut sess)
+        .await
+        .expect("clean safe logoff on cold system must succeed");
+    assert_eq!(safe_res, PyRep::List(vec![]));
+    assert!(with_sp6_state(&ctx.db, |st| st.safe_logoffs.contains_key(&char_id)));
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+}
+
+

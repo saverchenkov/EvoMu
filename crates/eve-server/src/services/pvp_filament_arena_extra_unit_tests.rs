@@ -845,3 +845,57 @@ async fn arena_hazards_timer_ramp_ejection_end_gate_distances_and_cleanup_branch
     assert!(arena_sys.get_ball_snapshot(gate_id).await.unwrap().is_none());
     assert!(ctx.db.with_snapshot(|snap| !load_pvp_store(snap).match_arena_offsets.contains_key(&mid)));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pvp_end_gate_activation_on_cold_arena_fails_without_spawning() {
+    let ctx = test_ctx();
+    let cold_arena_sys = 32_000_001_u32;
+    let c1 = 90_000_001_i64;
+    let c2 = 90_000_002_i64;
+    let ship_id = 100_000_001_i64;
+    let mid = 81_542_i64;
+    let gate_id = 70_542_i64;
+
+    assert!(ctx.systems.get_handle(cold_arena_sys).is_none());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&c1) {
+            ch.solar_system_id = cold_arena_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        let mut store = load_pvp_store(snap);
+        store.active_matches.clear();
+        store.active_matches.insert(
+            mid,
+            PvpArenaMatchInstance {
+                match_id: mid,
+                event_id: 171,
+                arena_solar_system_id: cold_arena_sys,
+                team_a: vec![c1],
+                team_b: vec![c2],
+                origin_systems: HashMap::from([(c1, 30_000_142), (c2, 30_000_142)]),
+                started_unix: 1_000,
+                active: false,
+                winner_char_id: Some(c1),
+                exited_pilots: HashSet::new(),
+                end_gate_id: gate_id,
+            },
+        );
+        store.match_teams.insert(mid, vec![vec![c1], vec![c2]]);
+        store.match_eliminated.insert(mid, HashSet::new());
+        store.match_arena_offsets.insert(mid, [1_000_000.0, 0.0, 0.0]);
+        save_pvp_store(snap, &store);
+    });
+
+    let mut sess = auth_session(1, c1, 98_000_001, cold_arena_sys);
+    sess.solar_system_id = Some(cold_arena_sys);
+    sess.ship_id = Some(ship_id);
+
+    let err = handle_pvp_end_gate_activation(&ctx, &mut sess, c1, &[PyRep::Integer(gate_id)], 1_950)
+        .await
+        .expect_err("cold arena end gate must fail with TooFarFromGate");
+    assert_eq!(err.code, "TooFarFromGate");
+    assert!(ctx.systems.get_handle(cold_arena_sys).is_none());
+}

@@ -695,6 +695,7 @@ async fn sim_clock_rebase_never_advances_session_change_timer_and_skips_docked_p
     let mut space_next_session_change = ctx.now_machonet_wallclock_filetime_ticks() + 100_000_000;
 
     // 1. Autoscaler detects latency spike and engages TiDi after 2s advance notice.
+    let _ = ctx.systems.get_or_spawn(jita);
     let _ = evaluate_system_tidi_autoscaler_window(&ctx, jita, 520.0, None, 10.0, 10);
     clock.advance_secs(2);
     let eng = evaluate_system_tidi_autoscaler_window(&ctx, jita, 520.0, None, 12.0, 12);
@@ -751,4 +752,32 @@ async fn sim_clock_rebase_never_advances_session_change_timer_and_skips_docked_p
         space_next_session_change <= now_ft,
         "in-space pilot sessionChange timer must not be pushed into future after 97s"
     );
+}
+
+#[test]
+fn apply_system_tidi_from_autoscaler_clamps_without_waking_cold_system() {
+    let (ctx, _clock) = make_ctx(1_775_000_000);
+    let cold_sys = 30_000_144_u32;
+    let char_id = 90_000_001_i64;
+
+    ctx.db
+        .acquire_online_lock(1, 709, Some(char_id), true, 1_775_000_000)
+        .expect("online lock");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = cold_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    assert_eq!(apply_system_tidi_from_autoscaler(&ctx, cold_sys, 0.50), 0.50);
+    assert_eq!(apply_system_tidi_from_autoscaler(&ctx, cold_sys, 0.01), 0.10);
+    assert_eq!(apply_system_tidi_from_autoscaler(&ctx, cold_sys, 2.00), 1.0);
+    assert_eq!(apply_system_tidi_from_autoscaler(&ctx, cold_sys, f64::NAN), 1.0);
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 }

@@ -12,7 +12,9 @@ pub(crate) async fn check_superweapon_tether_guard(
     sys_id: u32,
     ship_id: i64,
 ) -> Result<(), BridgeRpcError> {
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        return Ok(());
+    };
     if sys
         .get_combat_state(ship_id)
         .await
@@ -677,8 +679,6 @@ async fn activate_superweapon_with_args_inner(
         });
     }
 
-    let sys = ctx.systems.get_or_spawn(sys_id);
-
     if is_lancer {
         if !has_active_siege {
             return Err(BridgeRpcError {
@@ -701,6 +701,15 @@ async fn activate_superweapon_with_args_inner(
                 client_error: None,
             });
         }
+        let Some(sys) = ctx.systems.get_handle(sys_id) else {
+            return Err(BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "ActivateDisruptiveLance",
+                "Disruptive Lance can only be activated while ship is in space",
+            ));
+        };
         if sys.get_ball_snapshot(ship_id).await.ok().flatten().is_none() {
             return Err(BridgeRpcError::ship_not_in_space(
                 ship_id,
@@ -937,6 +946,15 @@ async fn activate_superweapon_with_args_inner(
         ]));
     }
 
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "ActivateSuperweapon",
+            "Superweapon can only be activated while ship is in space",
+        ));
+    };
     let Some(token) = sys
         .try_acquire_in_flight_superweapon(ship_id)
         .await

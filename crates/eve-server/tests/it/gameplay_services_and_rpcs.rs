@@ -821,6 +821,7 @@ async fn test_rpc_pvp_filament_mgr_batch() {
     sess.structure_id = None;
     sess.solar_system_id = Some(30_000_142);
     sess.ship_id = Some(100_000_001);
+    let _ = ctx.systems.get_or_spawn(30_000_142);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
             ch.station_id = None;

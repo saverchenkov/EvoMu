@@ -989,3 +989,37 @@ fn cosmetics_live_runtime_and_revoked_logo_gen_are_isolated_per_repository() {
         Some(&2u8)
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn broadcast_ship_skin_cosmetic_change_preserves_notifications_when_system_is_cold() {
+    let mut ctx = crate::router::ServerContext::with_repository(Arc::new(
+        WorldRepository::with_demo_seed(),
+    ));
+    ctx.sde = shared_sde();
+    let cold_sys = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+    let now = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = cold_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 9542, Some(char_id), true, now);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    broadcast_ship_skin_cosmetic_change(&ctx, char_id, ship_id, 587, None, Some(100)).await;
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnShipCosmeticsChanged"),
+        "OnShipCosmeticsChanged must still be emitted on cold system"
+    );
+}

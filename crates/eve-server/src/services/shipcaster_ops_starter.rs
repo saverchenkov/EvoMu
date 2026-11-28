@@ -196,7 +196,9 @@ pub async fn on_landing_pad_ball_destroyed_core(
         return;
     };
     crate::services::cluster_macho_misc_services::persist_misc_state_arc(misc, sde, db);
-    let _ = systems.get_or_spawn(pad_sys).remove_ball(ball_id).await;
+    if let Some(h) = systems.get_handle(pad_sys) {
+        let _ = h.remove_ball(ball_id).await;
+    }
     super::emit_shipcaster_target_state_changed_core(db, pending_notifications, notify_tx, pad_sys, ball_id);
     if let Some((war_hq_sys, launcher_id)) = launcher_opt {
         super::emit_shipcaster_target_state_changed_core(db, pending_notifications, notify_tx, war_hq_sys, launcher_id);
@@ -359,7 +361,15 @@ pub async fn prevalidate_shipcaster_jump(
     origin_sys: u32,
 ) -> Result<(u64, eve_destiny::Ball, Option<eve_destiny::CombatState>), BridgeRpcError> {
     let now_unix = ctx.now_unix();
-    let old_handle = ctx.systems.get_or_spawn(origin_sys);
+    let Some(old_handle) = ctx.systems.get_handle(origin_sys) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(origin_sys),
+            "shipcaster_jump",
+            "Active ship ball not in space in origin solar system",
+        ));
+    };
     let Some((cur_tick, ship_ball)) = old_handle
         .get_ball_snapshot(ship_id)
         .await

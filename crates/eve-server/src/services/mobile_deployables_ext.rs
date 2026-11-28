@@ -500,7 +500,15 @@ pub async fn handle_mmju_activate(
         ));
     }
 
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "ActivateMMJU",
+            "Active ship is not spawned in space",
+        ));
+    };
     let (_, ship_ball) = handle
         .get_ball_snapshot(ship_id)
         .await
@@ -1478,18 +1486,19 @@ pub fn step_system_deployables_sync(ctx: &ServerContext, solar_system_id: u32) {
             }
         });
     }
-    let handle = ctx.systems.get_or_spawn(solar_system_id);
-    if let Err(err) = handle.step_ext_deployables_sync(
-        std::sync::Arc::clone(&ctx.sde),
-        std::sync::Arc::clone(&ctx.db),
-        std::sync::Arc::clone(&ctx.mechanic_rng),
-        now_unix,
-    ) {
-        tracing::warn!(
-            solar_system_id,
-            error = %err,
-            "step_system_deployables_sync actor command failed"
-        );
+    if let Some(handle) = ctx.systems.get_handle(solar_system_id) {
+        if let Err(err) = handle.step_ext_deployables_sync(
+            std::sync::Arc::clone(&ctx.sde),
+            std::sync::Arc::clone(&ctx.db),
+            std::sync::Arc::clone(&ctx.mechanic_rng),
+            now_unix,
+        ) {
+            tracing::warn!(
+                solar_system_id,
+                error = %err,
+                "step_system_deployables_sync actor command failed"
+            );
+        }
     }
     flush_deployable_side_effects(ctx);
 }
@@ -1525,8 +1534,9 @@ pub async fn sync_system_deployables(ctx: &ServerContext, solar_system_id: u32) 
         due_spool || due_obs || due_expiry
     };
     if needs_actor_step {
-        let handle = ctx.systems.get_or_spawn(solar_system_id);
-        let _ = handle.step_manual(0.0).await;
+        if let Some(handle) = ctx.systems.get_handle(solar_system_id) {
+            let _ = handle.step_manual(0.0).await;
+        }
     }
     flush_deployable_side_effects(ctx);
 }

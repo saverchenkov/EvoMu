@@ -236,7 +236,9 @@ pub async fn collect_aligned_pilots_on_grid(
             })
             .collect()
     });
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for (cid, shid, wf, grp, has_wcs) in candidates {
         if sys_handle.get_combat_state(shid).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {

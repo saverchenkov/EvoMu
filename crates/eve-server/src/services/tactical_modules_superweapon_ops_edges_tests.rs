@@ -2735,3 +2735,205 @@ async fn survey_probe_launcher_reload_enforces_stackable_commodity_and_rejects_b
     });
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tether_guard_lancer_and_titan_stay_cold_and_preserve_error_precedence() {
+    let mut ctx = test_ctx();
+    let null_sys = find_nullsec_sys(&ctx.sde);
+    let low_sys = find_lowsec_sys(&ctx.sde);
+    assert_ne!(null_sys, low_sys);
+    let char_id = 90_000_001_i64;
+    let titan_id = 100_990_001_i64;
+    let dd_mod = 100_990_002_i64;
+    let tgt_id = 100_990_050_i64;
+    let lancer_id = 100_990_101_i64;
+    let lance_mod = 100_990_102_i64;
+    let siege_mod = 100_990_103_i64;
+
+    let titan_tid = find_titan_type_id(&ctx.sde);
+    let dd_tid = find_doomsday_type_id(&ctx.sde);
+    let dread_tid = find_dread_type_id(&ctx.sde);
+    let (lancer_tid, lance_tid, siege_tid) = (77_281_u32, 77_398_u32, 4_292_u32);
+    {
+        let sde = Arc::make_mut(&mut ctx.sde);
+        if let Some(m) = sde.types.get_mut(&dd_tid) {
+            configure_test_superweapon_attrs(m, 100.0, 250_000.0);
+        }
+        for (tid, grp, is_lancer_hull) in [
+            (lancer_tid, 4594_u32, true),
+            (lance_tid, 588_u32, false),
+            (siege_tid, 515_u32, false),
+        ] {
+            let mut t = sde.types[&587].clone();
+            t.type_id = tid;
+            t.group_id = grp;
+            if is_lancer_hull {
+                t.default_attributes.insert(5418, 20.0);
+                t.default_attributes.insert(5417, 10.0);
+            }
+            if grp == 588 {
+                configure_test_superweapon_attrs(&mut t, 100.0, 150_000.0);
+            }
+            sde.types.insert(tid, t);
+        }
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = lancer_id;
+            ch.solar_system_id = low_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        for (iid, tid, owner, loc, flag) in [
+            (lancer_id, lancer_tid, char_id, i64::from(low_sys), InventoryFlag::None),
+            (lance_mod, lance_tid, char_id, lancer_id, InventoryFlag::HiSlot0),
+            (siege_mod, siege_tid, char_id, lancer_id, InventoryFlag::HiSlot1),
+            (titan_id, titan_tid, char_id, i64::from(null_sys), InventoryFlag::None),
+            (dd_mod, dd_tid, char_id, titan_id, InventoryFlag::HiSlot0),
+            (tgt_id, dread_tid, 90_000_002, i64::from(null_sys), InventoryFlag::None),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: owner,
+                    location_id: loc,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.remove(&77738);
+        sk.remove(&77739);
+        if let Some(m) = ctx.sde.types.get(&dd_tid) {
+            for aid in [182_u16, 183, 184] {
+                if let Some(&sid) = m.default_attributes.get(&aid) {
+                    sk.insert(
+                        sid as u32,
+                        eve_db::TrainedSkillRecord {
+                            type_id: sid as u32,
+                            level: 5,
+                            skill_points: 256_000.0,
+                        },
+                    );
+                }
+            }
+        }
+        for sid in [3439_u32, 76079, 76080] {
+            sk.insert(
+                sid,
+                eve_db::TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+    crate::services::combat_crimewatch::set_char_safety_level(
+        &ctx,
+        char_id,
+        crate::services::combat_crimewatch::SafetyLevel::Red,
+    );
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
+
+    assert!(ctx.systems.get_handle(low_sys).is_none());
+    assert!(ctx.systems.get_handle(null_sys).is_none());
+
+    // 1. check_superweapon_tether_guard returns Ok(()) on cold systems.
+    check_superweapon_tether_guard(&ctx, null_sys, titan_id)
+        .await
+        .expect("cold tether guard must succeed");
+    assert!(ctx.systems.get_handle(null_sys).is_none());
+
+    // 2. Lancer: SiegeRequiredForLance -> SkillMissing -> ShipNotInSpace without waking low_sys.
+    let err_siege = activate_superweapon_with_args(
+        &ctx,
+        char_id,
+        lancer_id,
+        low_sys,
+        lance_mod,
+        "Activate",
+        None,
+        &[],
+    )
+    .await
+    .expect_err("missing siege must fire before cold ShipNotInSpace");
+    assert_eq!(err_siege.code, "SiegeRequiredForLance");
+    assert!(ctx.systems.get_handle(low_sys).is_none());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(siege_mod);
+    });
+    let err_skill = activate_superweapon_with_args(
+        &ctx,
+        char_id,
+        lancer_id,
+        low_sys,
+        lance_mod,
+        "Activate",
+        None,
+        &[],
+    )
+    .await
+    .expect_err("missing lancer skill must fire before cold ShipNotInSpace");
+    assert_eq!(err_skill.code, "SkillMissing");
+    assert!(ctx.systems.get_handle(low_sys).is_none());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        for sid in [77738_u32, 77739] {
+            sk.insert(
+                sid,
+                eve_db::TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+    let err_lancer_cold = activate_superweapon_with_args(
+        &ctx,
+        char_id,
+        lancer_id,
+        low_sys,
+        lance_mod,
+        "Activate",
+        None,
+        &[],
+    )
+    .await
+    .expect_err("cold lancer must fail closed with ShipNotInSpace");
+    assert_eq!(err_lancer_cold.code, "ShipNotInSpace");
+    assert!(ctx.systems.get_handle(low_sys).is_none());
+
+    // 3. Titan Doomsday: cold nullsec returns ShipNotInSpace without spawning null_sys.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = titan_id;
+            ch.solar_system_id = null_sys;
+        }
+    });
+    let err_titan_cold = activate_superweapon_with_args(
+        &ctx,
+        char_id,
+        titan_id,
+        null_sys,
+        dd_mod,
+        "Activate",
+        Some(tgt_id),
+        &[],
+    )
+    .await
+    .expect_err("cold titan must fail closed with ShipNotInSpace");
+    assert_eq!(err_titan_cold.code, "ShipNotInSpace");
+    assert!(ctx.systems.get_handle(null_sys).is_none());
+}
+

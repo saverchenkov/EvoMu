@@ -924,7 +924,21 @@ pub async fn handle_use_warp_vector(
         });
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    crate::services::space_nav_movement_guard::validate_pre_movement_locks(
+        ctx,
+        ship_id,
+        &crate::services::space_nav_movement_guard::MovementIntent::Warp { sys_id },
+    )?;
+
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "UseWarpVector",
+            format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
+        ));
+    };
     validate_pre_warp_common(ctx, char_id, ship_id, sys_id, &sys_handle).await?;
     let validated = ctx
         .validate_ship_movement(

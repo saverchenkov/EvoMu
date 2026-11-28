@@ -778,18 +778,19 @@ pub async fn verify_in_space_container_proximity(
             client_error: None,
         });
     }
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    if let (Ok(Some((_, ship_ball))), Ok(Some((_, cont_ball)))) = (
-        sys_handle.get_ball_snapshot(ship_id).await,
-        sys_handle.get_ball_snapshot(container_id).await,
-    ) {
-        let edge_dist = ((ship_ball.position - cont_ball.position).length() - ship_ball.radius - cont_ball.radius).max(0.0);
-        if edge_dist > 2_500.0 {
-            return Err(BridgeRpcError {
-                code: "OutOfRange".into(),
-                message: format!("Container {container_id} is out of 2,500m range ({edge_dist:.1}m)"),
-                client_error: None,
-            });
+    if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+        if let (Ok(Some((_, ship_ball))), Ok(Some((_, cont_ball)))) = (
+            sys_handle.get_ball_snapshot(ship_id).await,
+            sys_handle.get_ball_snapshot(container_id).await,
+        ) {
+            let edge_dist = ((ship_ball.position - cont_ball.position).length() - ship_ball.radius - cont_ball.radius).max(0.0);
+            if edge_dist > 2_500.0 {
+                return Err(BridgeRpcError {
+                    code: "OutOfRange".into(),
+                    message: format!("Container {container_id} is out of 2,500m range ({edge_dist:.1}m)"),
+                    client_error: None,
+                });
+            }
         }
     }
     Ok(())

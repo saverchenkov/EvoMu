@@ -137,6 +137,7 @@ async fn r7_tc_p1_445_proving_grounds_ticket_id_collision_and_partial_stack_leav
         }
     });
 
+    let _ = ctx.systems.get_or_spawn(sys_id);
     let mut sess_a = SessionState {
         session_id: 4451,
         user_id: Some(11),

@@ -601,13 +601,15 @@ pub fn clear_manual_system_tidi_override(ctx: &ServerContext, solar_system_id: u
 
 /// Applies an autoscaler-driven TiDi change for `solar_system_id` without setting a manual pin,
 /// emitting `DoSimClockRebase` **once** only if the factor actually changed (`#1081`).
-fn apply_system_tidi_from_autoscaler(
+pub(super) fn apply_system_tidi_from_autoscaler(
     ctx: &ServerContext,
     solar_system_id: u32,
     new_factor: f64,
 ) -> f64 {
     let factor = crate::system_actor::tidi_autoscaler::clamp_tidi_factor(new_factor);
-    let handle = ctx.systems.get_or_spawn(solar_system_id);
+    let Some(handle) = ctx.systems.get_handle(solar_system_id) else {
+        return factor;
+    };
     let old_factor = handle.set_tidi_factor_raw(factor);
     if (factor - old_factor).abs() >= crate::system_actor::tidi_autoscaler::TIDI_MIN_CHANGE_DELTA {
         tracing::info!(

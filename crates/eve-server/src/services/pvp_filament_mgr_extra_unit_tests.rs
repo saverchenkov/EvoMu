@@ -287,6 +287,7 @@ async fn join_pvp_queue_validation_errors_and_full_1v1_matchmaking_and_end_gate(
     sess_a.character_id = Some(pilot_a);
     sess_a.ship_id = Some(ship_a);
     sess_a.solar_system_id = Some(30_000_142);
+    let _ = ctx.systems.get_or_spawn(30_000_142);
 
     // 1. Missing args -> InvalidArgument
     assert_eq!(

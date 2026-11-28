@@ -1343,3 +1343,47 @@ async fn in_space_cold_handlers_fail_closed_with_ship_not_in_space_and_preserve_
     );
     assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn use_warp_vector_cold_kspace_and_abyssal_preserve_error_precedence_and_stay_cold() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let cold_kspace = 30_000_142_u32;
+    let cold_abyssal = 32_000_005_u32;
+
+    assert!(ctx.systems.get_handle(cold_kspace).is_none());
+    assert!(ctx.systems.get_handle(cold_abyssal).is_none());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = cold_kspace;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+    });
+
+    // 1. Cold k-space -> ShipNotInSpace without waking system actor.
+    let mut k_sess = auth_session(1, char_id, 98_000_001, cold_kspace);
+    k_sess.ship_id = Some(ship_id);
+    let k_err = handle_use_warp_vector(&ctx, &mut k_sess, &[PyRep::Integer(999_001)])
+        .await
+        .expect_err("cold k-space UseVector must fail closed with ShipNotInSpace");
+    assert_eq!(k_err.code, "ShipNotInSpace");
+    assert!(ctx.systems.get_handle(cold_kspace).is_none());
+
+    // 2. Cold Abyssal -> CannotWarpInAbyssalSpace runs before cold ShipNotInSpace check.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = cold_abyssal;
+        }
+    });
+    let mut ab_sess = auth_session(1, char_id, 98_000_001, cold_abyssal);
+    ab_sess.ship_id = Some(ship_id);
+    let ab_err = handle_use_warp_vector(&ctx, &mut ab_sess, &[PyRep::Integer(999_001)])
+        .await
+        .expect_err("cold abyssal UseVector must fail with CannotWarpInAbyssalSpace");
+    assert_eq!(ab_err.code, "CannotWarpInAbyssalSpace");
+    assert!(ctx.systems.get_handle(cold_abyssal).is_none());
+}

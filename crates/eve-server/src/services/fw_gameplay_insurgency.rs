@@ -415,12 +415,13 @@ pub async fn apply_pirate_fob_structure_damage(
             attacker_fac,
             contrib_pts,
         } => {
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            if let Ok(Some(mut cs)) = sys_handle.get_combat_state(structure_id).await {
-                cs.shield_hp = shield_hp;
-                cs.armor_hp = armor_hp;
-                cs.structure_hp = hull_hp;
-                let _ = sys_handle.set_combat_state(structure_id, cs).await;
+            if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+                if let Ok(Some(mut cs)) = sys_handle.get_combat_state(structure_id).await {
+                    cs.shield_hp = shield_hp;
+                    cs.armor_hp = armor_hp;
+                    cs.structure_hp = hull_hp;
+                    let _ = sys_handle.set_combat_state(structure_id, cs).await;
+                }
             }
             if state == "ArmorReinforced" && reinf_until > 0 {
                 let _ = crate::services::cluster_macho_misc_services::schedule_zarzakh_horizon_siege(
@@ -447,22 +448,23 @@ pub async fn apply_pirate_fob_structure_damage(
             wreck_id,
             pos,
         } => {
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let _ = sys_handle.remove_ball(structure_id).await;
-            let _ = sys_handle
-                .spawn_ball(eve_destiny::Ball {
-                    id: wreck_id,
-                    type_id: PIRATE_STRONGHOLD_WRECK_TYPE,
-                    position: DVec3::from_array(pos),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 1.0,
-                    mass: 10_000_000.0,
-                    radius: 500.0,
-                    speed_fraction: 0.0,
-                    mode: eve_destiny::MovementMode::Stop,
-                })
-                .await;
+            if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+                let _ = sys_handle.remove_ball(structure_id).await;
+                let _ = sys_handle
+                    .spawn_ball(eve_destiny::Ball {
+                        id: wreck_id,
+                        type_id: PIRATE_STRONGHOLD_WRECK_TYPE,
+                        position: DVec3::from_array(pos),
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: 10_000_000.0,
+                        radius: 500.0,
+                        speed_fraction: 0.0,
+                        mode: eve_destiny::MovementMode::Stop,
+                    })
+                    .await;
+            }
             record_insurgency_contribution(ctx, camp_id, attacker_char_id, attacker_fac, contrib_pts);
             for s in &systems {
                 let _ = add_system_suppression(ctx, camp_id, *s, 200);
@@ -1101,7 +1103,9 @@ async fn cleanup_ended_campaign_sites_and_roamers(
         out
     });
     for (sys_id, bid) in to_remove {
-        let _ = ctx.systems.get_or_spawn(sys_id).remove_ball(bid).await;
+        if let Some(h) = ctx.systems.get_handle(sys_id) {
+            let _ = h.remove_ball(bid).await;
+        }
     }
     crate::services::insurgency_complex_ops::cleanup_orphan_insurgency_complex_ops(ctx, &orphan_systems).await;
 }
