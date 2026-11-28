@@ -613,6 +613,7 @@ fn make_dummy_system_handle(cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>) ->
         post_unlock_tx: tokio::sync::mpsc::unbounded_channel().0,
         worker_cb_tx: tokio::sync::mpsc::unbounded_channel().0,
         ct_driver: None,
+        actor_rt_handle: None,
         post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
         post_unlock_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         completed_post_unlock_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),

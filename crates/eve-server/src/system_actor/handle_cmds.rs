@@ -1022,46 +1022,64 @@ pub(in crate::system_actor) enum TryQueuedReply<T> {
     FullOrClosed,
 }
 
+fn dispatch_try_queued_via_runtime<P, T: Send + 'static>(
+    handle: &SystemHandle,
+    target_rt: &tokio::runtime::Handle,
+    timeout_dur: Duration,
+    payload: P,
+    make_cmd: impl FnOnce(P, oneshot::Sender<T>) -> SystemCommand,
+    use_block_in_place: bool,
+) -> TryQueuedReply<T> {
+    let Ok(permit) = handle.cmd_sender().try_reserve() else {
+        return TryQueuedReply::FullOrClosed;
+    };
+    let (reply_tx, reply_rx) = oneshot::channel::<T>();
+    permit.send(make_cmd(payload, reply_tx));
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<TryQueuedReply<T>>(1);
+    target_rt.spawn(async move {
+        let res = match tokio::time::timeout(timeout_dur, reply_rx).await {
+            Ok(Ok(val)) => TryQueuedReply::Ready(val),
+            Ok(Err(_)) => TryQueuedReply::FullOrClosed,
+            Err(_) => TryQueuedReply::QueuedTimedOut,
+        };
+        let _ = done_tx.send(res);
+    });
+    let wait_dur = timeout_dur.saturating_add(Duration::from_millis(50));
+    let recv_res = if use_block_in_place {
+        tokio::task::block_in_place(|| done_rx.recv_timeout(wait_dur))
+    } else {
+        done_rx.recv_timeout(wait_dur)
+    };
+    match recv_res {
+        Ok(reply) => reply,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => TryQueuedReply::QueuedTimedOut,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => TryQueuedReply::FullOrClosed,
+    }
+}
+
 pub(in crate::system_actor) fn dispatch_actor_sync_try_queued_with_timeout<P, T: Send + 'static>(
     handle: &SystemHandle,
     timeout_dur: Duration,
     payload: P,
     make_cmd: impl FnOnce(P, oneshot::Sender<T>) -> SystemCommand,
-    direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
+    _direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
 ) -> TryQueuedReply<T> {
     if handle.cmd_tx.is_closed() || handle.is_on_actor_flush_thread() {
         return TryQueuedReply::FullOrClosed;
     }
     match tokio::runtime::Handle::try_current() {
         Ok(rt_handle) => match rt_handle.runtime_flavor() {
-            tokio::runtime::RuntimeFlavor::CurrentThread => TryQueuedReply::Ready(
-                ball_ops::run_direct_ball_op_on_current_thread(handle, false, |ctx| direct_fn(ctx, payload)),
-            ),
-            _ => {
-                let Ok(permit) = handle.cmd_sender().try_reserve() else {
+            tokio::runtime::RuntimeFlavor::CurrentThread => {
+                let Some(actor_rt) = handle
+                    .actor_rt_handle
+                    .as_ref()
+                    .filter(|r| r.id() != rt_handle.id())
+                else {
                     return TryQueuedReply::FullOrClosed;
                 };
-                let (reply_tx, reply_rx) = oneshot::channel::<T>();
-                permit.send(make_cmd(payload, reply_tx));
-                let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<TryQueuedReply<T>>(1);
-                rt_handle.spawn(async move {
-                    let res = match tokio::time::timeout(timeout_dur, reply_rx).await {
-                        Ok(Ok(val)) => TryQueuedReply::Ready(val),
-                        Ok(Err(_)) => TryQueuedReply::FullOrClosed,
-                        Err(_) => TryQueuedReply::QueuedTimedOut,
-                    };
-                    let _ = done_tx.send(res);
-                });
-                match tokio::task::block_in_place(|| done_rx.recv_timeout(timeout_dur.saturating_add(Duration::from_millis(50)))) {
-                    Ok(reply) => reply,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        TryQueuedReply::QueuedTimedOut
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        TryQueuedReply::FullOrClosed
-                    }
-                }
+                dispatch_try_queued_via_runtime(handle, actor_rt, timeout_dur, payload, make_cmd, false)
             }
+            _ => dispatch_try_queued_via_runtime(handle, &rt_handle, timeout_dur, payload, make_cmd, true),
         },
         Err(_) => {
             let Ok(permit) = handle.cmd_sender().try_reserve() else {

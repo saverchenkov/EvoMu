@@ -3211,7 +3211,7 @@ impl SystemRegistry {
         let handle = SystemHandle {
             solar_system_id, cmd_tx,
             post_unlock_tx: post_unlock_tx_handle, worker_cb_tx: worker_cb_tx_handle,
-            ct_driver, post_unlock_worker_thread_id,
+            ct_driver, actor_rt_handle: Some(actor_rt_handle), post_unlock_worker_thread_id,
             post_unlock_in_flight, completed_post_unlock_seq,
             fighters_needs_hydration, fighter_ctx, event_tx,
             ball_positions, scrambled_balls, tethered_balls, committed_warp_balls, warp_stopped_at, active_module_ships,

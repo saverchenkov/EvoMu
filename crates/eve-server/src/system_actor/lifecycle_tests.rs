@@ -28,6 +28,7 @@ fn dummy_system_handle(solar_system_id: SolarSystemId) -> SystemHandle {
         post_unlock_tx: mpsc::unbounded_channel().0,
         worker_cb_tx: mpsc::unbounded_channel().0,
         ct_driver: None,
+        actor_rt_handle: None,
         post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
         post_unlock_in_flight: Arc::new(AtomicUsize::new(0)),
         completed_post_unlock_seq: Arc::new(AtomicU64::new(0)),

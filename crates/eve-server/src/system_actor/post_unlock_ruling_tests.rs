@@ -1807,7 +1807,7 @@ async fn track_1d_bf05_current_thread_mmju_prune() {
     release_writer(held);
     let _ = sys.wait_for_post_unlock_barrier().await;
 
-    // Part B: exercise `run_direct_ball_op_on_current_thread` directly on `CurrentThread` runtime -> jumps ship_id2 and prunes committed shadows.
+    // Part B: exercise `step_ext_deployables_sync` via `CtActorDriver` mailbox dispatch on `CurrentThread` runtime -> jumps ship_id2 and prunes committed shadows.
     write_deployable_state(&ctx, |st| {
         st.mmju_spools.insert(ship_id2, MmjuSpoolEntry {
             ship_id: ship_id2, char_id: char_id2, unit_id: mmju_id2, solar_system_id: SYS_ID,
