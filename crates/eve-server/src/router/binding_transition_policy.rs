@@ -5,12 +5,11 @@
 //! late-call allowlisting, and declarative `LateCallPolicy` evaluation (`Benign`,
 //! `RebindToCurrentScene`, `StaleObjectGone`) into one table-driven module.
 
-use crate::router::context::{BoundObjectEntry, ServerContext, NEXT_BOUND_ID};
+use crate::router::context::{BoundObjectEntry, ServerContext};
 pub(crate) use eve_db::lock_rank::RANK_TRANSITION_GRACE;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 
 /// Retention window (`30s`, matching V24 `basesession.pyj::ObjectConnection.__del__ ->
 /// DisconnectObject(30)`) for in-flight late calls arriving during/right after a
@@ -1405,7 +1404,7 @@ impl ServerContext {
                         })
                         .map(|departed| (departed.scene_epoch, departed.departed_ticks))
                 })?;
-            let bound_id = NEXT_BOUND_ID.fetch_add(1, Ordering::Relaxed);
+            let bound_id = self.allocate_bound_id();
             let entry = Self::make_bound_object_entry_at(
                 session.session_id,
                 bound_id,

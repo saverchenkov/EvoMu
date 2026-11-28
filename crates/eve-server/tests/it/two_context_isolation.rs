@@ -691,3 +691,66 @@ async fn two_server_contexts_isolate_scanners_superweapons_and_system_effects() 
     assert!(!is_ship_cyno_active(left, CYNO_SHIP_ID));
     assert!(is_ship_cyno_active(right, CYNO_SHIP_ID));
 }
+
+#[tokio::test]
+async fn two_server_contexts_isolate_bound_ids_and_random_instance_ids() {
+    use eve_machonet::SessionState;
+    use eve_proto::PyRep;
+    use std::collections::HashMap;
+
+    let pair = TwoServerContexts::new();
+    let (left, right) = pair.both();
+
+    assert!(left.instance_id > 0);
+    assert!(right.instance_id > 0);
+    assert_ne!(left.instance_id, right.instance_id);
+    assert!(left.db.instance_id() > 0);
+    assert!(right.db.instance_id() > 0);
+    assert_ne!(left.db.instance_id(), right.db.instance_id());
+    assert_ne!(left.instance_id as usize, Arc::as_ptr(&left.db) as usize);
+    assert_ne!(right.instance_id as usize, Arc::as_ptr(&right.db) as usize);
+
+    const CHAR_ID: i64 = 90_000_001;
+    const JITA_STATION_ID: i64 = 60_003_760;
+    let kw: HashMap<String, PyRep> = HashMap::new();
+
+    let mut left_sess = SessionState::new(92_001);
+    crate::common::login_pilot(left, &mut left_sess, "demo", "demo-secret").await;
+    let left_sel = crate::common::borrow_wire_harness(left, &mut left_sess)
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(CHAR_ID)], &kw)
+        .await;
+    assert_eq!(left_sel.dict_get("characterID").and_then(|v| v.as_i64()), Some(CHAR_ID));
+    assert_eq!(left_sess.station_id, Some(JITA_STATION_ID));
+
+    let mut right_sess = SessionState::new(92_002);
+    crate::common::login_pilot(right, &mut right_sess, "demo", "demo-secret").await;
+    let right_sel = crate::common::borrow_wire_harness(right, &mut right_sess)
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(CHAR_ID)], &kw)
+        .await;
+    assert_eq!(right_sel.dict_get("characterID").and_then(|v| v.as_i64()), Some(CHAR_ID));
+    assert_eq!(right_sess.station_id, Some(JITA_STATION_ID));
+
+    let left_b0 = left
+        .bind_object(&left_sess, "station", JITA_STATION_ID)
+        .expect("left bind station");
+    let left_b1 = left
+        .bind_verified_sub_object(&left_sess, "invbroker", JITA_STATION_ID)
+        .expect("left bind first invbroker sub-object");
+    let left_b2 = left
+        .bind_verified_sub_object(&left_sess, "invbroker", JITA_STATION_ID)
+        .expect("left bind second invbroker sub-object");
+    assert_eq!(left_b0, 10_000);
+    assert_eq!(left_b1, 10_001);
+    assert_eq!(left_b2, 10_002);
+
+    let right_b0 = right
+        .bind_object(&right_sess, "station", JITA_STATION_ID)
+        .expect("right bind station");
+    let right_b1 = right
+        .bind_verified_sub_object(&right_sess, "invbroker", JITA_STATION_ID)
+        .expect("right bind invbroker sub-object");
+    assert_eq!(right_b0, 10_000);
+    assert_eq!(right_b1, 10_001);
+
+    pair.assert_teardown_invariants();
+}

@@ -258,9 +258,6 @@ pub(crate) fn with_matching_dispatch_transitioned_chars<R>(
         .flatten()
 }
 
-static NEXT_STAGING_SCOPE_ID: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
-
 tokio::task_local! {
     static DISPATCH_STAGED_NOTIFICATIONS: std::cell::RefCell<DispatchNotificationStage>;
 }
@@ -299,7 +296,7 @@ where
     F: std::future::Future<Output = R>,
 {
     let stage = DispatchNotificationStage {
-        scope_id: NEXT_STAGING_SCOPE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        scope_id: eve_db::generate_non_zero_u64_id(),
         scope_liveness: std::sync::Arc::new(()),
         target_pend_ptr: pending_notifications_ptr(pend),
         target_notify_tx: notify_tx.clone(),

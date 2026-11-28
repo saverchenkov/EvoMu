@@ -20,7 +20,7 @@
     },
     "C_counters": {
       "zero_required": false,
-      "max_count": 9,
+      "max_count": 4,
       "rationale_required": false,
       "description": "Process-global monotonic ID/sequence counters whose values reach game state or wire messages (#1583 Group C)."
     },
@@ -166,14 +166,6 @@
       "group": "G_process_wide_allowlist",
       "max_count": 1,
       "rationale": "Thread-local re-entrancy depth guard forbidding nested WorldRepository::tx write locks."
-    },
-    {
-      "crate_name": "eve-db",
-      "rel_file": "persistence.rs",
-      "symbol": "NEXT_REPO_INSTANCE_ID",
-      "kind": "static_sync",
-      "group": "C_counters",
-      "max_count": 1
     },
     {
       "crate_name": "eve-db",
@@ -372,36 +364,12 @@
     },
     {
       "crate_name": "eve-server",
-      "rel_file": "router/cache_notifications.rs",
-      "symbol": "NEXT_STAGING_SCOPE_ID",
-      "kind": "static_sync",
-      "group": "C_counters",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
       "rel_file": "router/context.rs",
       "symbol": "CATALOGED_SERVICES",
       "kind": "static_sync",
       "group": "set_once_infra",
       "max_count": 1,
       "rationale": "Immutable OnceLock set of embedded cataloged Macho service names."
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "router/context.rs",
-      "symbol": "NEXT_BOUND_ID",
-      "kind": "static_sync",
-      "group": "C_counters",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "router/context.rs",
-      "symbol": "NEXT_CTX_INSTANCE_ID",
-      "kind": "static_sync",
-      "group": "C_counters",
-      "max_count": 1
     },
     {
       "crate_name": "eve-server",
@@ -445,14 +413,6 @@
       "group": "set_once_infra",
       "max_count": 1,
       "rationale": "Immutable OnceLock empty HashMap returned when an RPC omits trailing kwargs."
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/combat_fighters.rs",
-      "symbol": "NEXT_FIGHTER_RES_ID",
-      "kind": "static_sync",
-      "group": "C_counters",
-      "max_count": 1
     },
     {
       "crate_name": "eve-server",

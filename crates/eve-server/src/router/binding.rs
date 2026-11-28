@@ -4,7 +4,7 @@ pub(crate) use super::binding_transition_policy::{
     AtomicSceneTransitionRecord, LateCallResolution, ReconnectHoldGuard,
 };
 
-use crate::router::context::{BoundObjectEntry, ServerContext, NEXT_BOUND_ID};
+use crate::router::context::{BoundObjectEntry, ServerContext};
 use crate::router::notify_registry::{
     emit_typed_target_to_char_capped, GodmaEffectStartOrTime, OnChargeBeingLoadedToModule,
     OnGodmaShipEffect, OnMachoObjectDisconnect, OnMultiEvent, OnNewSkillQueueSaved,
@@ -449,7 +449,7 @@ impl ServerContext {
             });
         }
 
-        let bound_id = NEXT_BOUND_ID.fetch_add(1, Ordering::Relaxed);
+        let bound_id = self.allocate_bound_id();
         self.insert_bound_entry(session, bound_id, user_id, char_id, service, object_id);
         Ok(bound_id)
     }
@@ -464,7 +464,7 @@ impl ServerContext {
         object_id: i64,
     ) -> Result<u64, BridgeRpcError> {
         let (user_id, char_id) = Self::require_character(session)?;
-        let bound_id = NEXT_BOUND_ID.fetch_add(1, Ordering::Relaxed);
+        let bound_id = self.allocate_bound_id();
         self.insert_bound_entry(session, bound_id, user_id, char_id, service, object_id);
         Ok(bound_id)
     }
@@ -695,7 +695,7 @@ impl ServerContext {
                 });
             }
         };
-        let bound_id = NEXT_BOUND_ID.fetch_add(1, Ordering::Relaxed);
+        let bound_id = self.allocate_bound_id();
         let entry = self.make_bound_object_entry(
             session_id,
             bound_id,
