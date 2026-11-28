@@ -113,12 +113,13 @@ pub fn sweep_expired_cyno_beacons(ctx: &ServerContext) {
     drop(st);
     cleanup_expired_beacons_and_cycles(ctx, expired_beacons, expired_cycles);
     for (sys_id, bridger_ship_id, portal_mod_id, ball_id) in expired_bridges {
-        let sys = ctx.systems.get_or_spawn(sys_id);
-        if ball_id != 0 {
-            sys.try_remove_ball(ball_id);
-        }
-        if portal_mod_id != 0 {
-            sys.try_remove_module_cycle(bridger_ship_id, portal_mod_id);
+        if let Some(sys) = ctx.systems.get_handle(sys_id) {
+            if ball_id != 0 {
+                sys.try_remove_ball(ball_id);
+            }
+            if portal_mod_id != 0 {
+                sys.try_remove_module_cycle(bridger_ship_id, portal_mod_id);
+            }
         }
     }
 }
@@ -316,7 +317,15 @@ pub(crate) async fn bridge_to_resolved_beacon(
         type_attr(ctx, portal_type, ATTR_JUMP_PORTAL_DURATION)
     };
     let duration_s = dur_ms / 1000.0;
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "JumpPortal",
+            "Active ship is not in space",
+        ));
+    };
     if act_type != 0 && act_qty > 0 {
         ctx.db
             .with_snapshot(|snap| has_ship_fuel(snap, ship_id, act_type, act_qty))
@@ -649,19 +658,20 @@ pub(crate) async fn group_jump_to_resolved_beacon(
     } else {
         base_cap_need.max(0.0)
     };
-    let origin_handle = ctx.systems.get_or_spawn(sys_id);
     let mut post_jump_cap = None;
-    if let Ok(Some(cs)) = origin_handle.get_combat_state(ship_id).await {
-        let cap_needed = cs.max_capacitor * cap_frac;
-        if cs.capacitor + 1e-4 < cap_needed {
-            return Err(BridgeRpcError::jump_not_enough_capacitor(
-                Some(ship_id),
-                cap_needed,
-                cs.capacitor,
-                format!("Conduit jump requires {cap_needed:.1} GJ capacitor, ship has {:.1} GJ", cs.capacitor),
-            ));
+    if let Some(origin_handle) = ctx.systems.get_handle(sys_id) {
+        if let Ok(Some(cs)) = origin_handle.get_combat_state(ship_id).await {
+            let cap_needed = cs.max_capacitor * cap_frac;
+            if cs.capacitor + 1e-4 < cap_needed {
+                return Err(BridgeRpcError::jump_not_enough_capacitor(
+                    Some(ship_id),
+                    cap_needed,
+                    cs.capacitor,
+                    format!("Conduit jump requires {cap_needed:.1} GJ capacitor, ship has {:.1} GJ", cs.capacitor),
+                ));
+            }
+            post_jump_cap = Some((cs.capacitor - cap_needed).max(0.0));
         }
-        post_jump_cap = Some((cs.capacitor - cap_needed).max(0.0));
     }
     if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, ctx.now_unix(), None).is_some() {
         return Err(err("SessionChangeTimerActive", "Session change timer is active"));
@@ -880,10 +890,11 @@ pub(crate) async fn group_jump_to_resolved_beacon(
     )
     .await?;
     if let Some(rem_cap) = post_jump_cap {
-        let dest_sys = ctx.systems.get_or_spawn(beacon.solar_system_id);
-        if let Ok(Some(mut dcs)) = dest_sys.get_combat_state(ship_id).await {
-            dcs.capacitor = rem_cap;
-            let _ = dest_sys.set_combat_state(ship_id, dcs).await;
+        if let Some(dest_sys) = ctx.systems.get_handle(beacon.solar_system_id) {
+            if let Ok(Some(mut dcs)) = dest_sys.get_combat_state(ship_id).await {
+                dcs.capacitor = rem_cap;
+                let _ = dest_sys.set_combat_state(ship_id, dcs).await;
+            }
         }
     }
     let total_jumped = 1 + jumped_passengers.len();
@@ -944,7 +955,15 @@ pub(super) async fn jump_through_fleet(
     if bridge.origin_system_id != sys_id {
         return Err(err("NoActiveBridge", "Jump portal is in a different solar system"));
     }
-    let origin_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(origin_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "JumpPortal",
+            "Active ship is not in space",
+        ));
+    };
     if origin_handle
         .get_combat_state(ship_id)
         .await

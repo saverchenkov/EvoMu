@@ -1260,3 +1260,81 @@ async fn cmd_stargate_jump_allows_arriving_warp_at_gate_and_rejects_non_arriving
     .unwrap_err();
     assert_eq!(far_cruise_err.code, "ShipInWarp");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_system_warp_and_dock_settle_do_not_wake_system_actor() {
+    let ctx = test_ctx();
+    let cold_sys = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 896_999_i64;
+    let bm_id = 770_999_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = cold_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 606,
+                owner_id: char_id,
+                location_id: i64::from(cold_sys),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.bookmarks.insert(
+            bm_id,
+            BookmarkRecord {
+                bookmark_id: bm_id,
+                owner_id: char_id,
+                solar_system_id: cold_sys,
+                label: "Cold Safe".into(),
+                x: 50_000_000.0,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+    });
+
+    let mut sess = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(cold_sys),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+
+    let err = warp_to_bookmark_id(&ctx, &mut sess, bm_id)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "ShipNotInSpace");
+
+    assert!(
+        prepare_dock_warp_settle(&ctx, &sess, "beyonce", "CmdDock", &[PyRep::Integer(60_003_760)])
+            .await
+            .is_none()
+    );
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+}

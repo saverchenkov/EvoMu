@@ -268,7 +268,8 @@ async fn deactivate_stop_overload_overload_rack_nanite_repair_and_mining_scan() 
         "expected OnHeatRemoved([1176, mod_id]), got: {stop_notes:?}"
     );
 
-    // 3. RepairModule (in space, deducts 1 initial paste) & StopRepairModule
+    // 3. Spawn live system actor, then RepairModule (in space, deducts 1 initial paste) & StopRepairModule
+    let sys = ctx.systems.get_or_spawn(sys_id);
     let rep_start = handle_mining_and_deactivate(
         &ctx,
         &mut sess,
@@ -298,7 +299,6 @@ async fn deactivate_stop_overload_overload_rack_nanite_repair_and_mining_scan() 
     assert_eq!(rep_stop.dict_get("stopped").and_then(|v| v.as_bool()), Some(true));
 
     // 4. Spawn in-space ship ball so miningScanMgr.perform_scan reveals nearby asteroid
-    let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
         .spawn_ball_with_meta(
             eve_destiny::Ball {

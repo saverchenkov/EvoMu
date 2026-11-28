@@ -103,15 +103,18 @@ async fn emit_beacon_slim_item_change(ctx: &ServerContext, old_pad: &LandingPadR
         );
     }
     let (group_id, category_id) = ctx.sde.types.get(&new_pad.type_id).map(|t| (t.group_id, t.category_id)).unwrap_or((4547, 2));
-    let sys = ctx.systems.get_or_spawn(new_pad.solar_system_id);
-    let _ = sys.change_slim_item(new_pad.item_id, SlimItemMeta {
-        group_id, category_id, owner_id: i64::from(new_pad.faction_id), char_id: None,
-        corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false, ..Default::default()
-    }).await;
+    if let Some(sys) = ctx.systems.get_handle(new_pad.solar_system_id) {
+        let _ = sys.change_slim_item(new_pad.item_id, SlimItemMeta {
+            group_id, category_id, owner_id: i64::from(new_pad.faction_id), char_id: None,
+            corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false, ..Default::default()
+        }).await;
+    }
 }
 
 async fn spawn_or_replace_pad_ball(ctx: &ServerContext, pad: &LandingPadRecord) {
-    let sys = ctx.systems.get_or_spawn(pad.solar_system_id);
+    let Some(sys) = ctx.systems.get_handle(pad.solar_system_id) else {
+        return;
+    };
     let _ = sys.remove_ball(pad.item_id).await;
     let (group_id, category_id) = ctx
         .sde
@@ -419,7 +422,15 @@ async fn contribute_fw_beacon_material_inner(
         Ok::<f64, BridgeRpcError>(spec.interaction_range_m)
     })?;
 
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            None,
+            Some(sys_id),
+            "contribute_beacon_material",
+            "Active ship ball is not in space in this solar system",
+        ));
+    };
     check_proximity(&sys, ship_id, pad_item_id, interaction_range_m, "beacon constructor").await?;
 
     let mut rollback_pad: Option<(i64, LandingPadRecord)> = None;
@@ -705,8 +716,9 @@ pub async fn disrupt_or_destroy_fw_landing_pad(
     })?;
     persist_misc_state(ctx);
     if destroy {
-        let sys = ctx.systems.get_or_spawn(pad.solar_system_id);
-        let _ = sys.remove_ball(pad.item_id).await;
+        if let Some(sys) = ctx.systems.get_handle(pad.solar_system_id) {
+            let _ = sys.remove_ball(pad.item_id).await;
+        }
     }
     emit_shipcaster_target_state_changed(ctx, pad.solar_system_id, pad.item_id);
     if let Some((war_hq_sys, launcher_id)) = launcher_opt {
@@ -845,7 +857,15 @@ pub async fn handle(
                 return Some(Err(e));
             }
 
-            let sys = ctx.systems.get_or_spawn(sys_id);
+            let Some(sys) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    None,
+                    Some(sys_id),
+                    "shipcaster_jump",
+                    "Active ship ball is not in space in this solar system",
+                )));
+            };
             if let Err(e) = check_proximity(
                 &sys,
                 ship_id,
@@ -1163,7 +1183,15 @@ pub async fn handle(
                 }
             }
 
-            let sys = ctx.systems.get_or_spawn(sys_id);
+            let Some(sys) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    None,
+                    Some(sys_id),
+                    "shipcaster_jump",
+                    "Active ship ball is not in space in this solar system",
+                )));
+            };
             if let Err(e) = check_proximity(
                 &sys,
                 ship_id,

@@ -141,7 +141,9 @@ pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id
             });
         (anchors, disallow, piloted)
     });
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
     let Some(mut cs) = handle.get_combat_state(ship_id).await.ok().flatten() else {
         return;
     };
@@ -282,7 +284,9 @@ pub(crate) async fn ensure_not_mjd_spooling(
 }
 
 pub(crate) async fn emit_cloak_transition(ctx: &ServerContext, sys_id: u32, ship_id: i64, cloaked: bool) {
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
     let _ = handle
         .emit_destiny_event(
             ship_id,
@@ -416,7 +420,15 @@ pub(crate) async fn handle_cmd_goto_point(
     let (Some(x), Some(y), Some(z)) = (coord(0), coord(1), coord(2)) else {
         return Err(err("InvalidArguments", "CmdGotoPoint expects finite (x, y, z)".into()));
     };
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "CmdGotoPoint",
+            "Active ship is not spawned in Ballpark",
+        ));
+    };
     let Some((_, current_ball)) = handle
         .get_ball_snapshot(ship_id)
         .await
@@ -655,7 +667,9 @@ pub(crate) async fn validate_and_prepare_jump_capacitor(
     } else {
         base_cap_need.max(0.0)
     };
-    let origin_handle = ctx.systems.get_or_spawn(cur_sys_id);
+    let Some(origin_handle) = ctx.systems.get_handle(cur_sys_id) else {
+        return Ok(None);
+    };
     let Ok(Some(mut cs)) = origin_handle.get_combat_state(ship_id).await else {
         return Ok(None);
     };
@@ -818,9 +832,10 @@ pub(crate) async fn resolve_system_target_position(
     if target_id <= 0 {
         return None;
     }
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    if let Ok(Some((_, tb))) = handle.get_ball_snapshot(target_id).await {
-        return Some(tb.position);
+    if let Some(handle) = ctx.systems.get_handle(sys_id) {
+        if let Ok(Some((_, tb))) = handle.get_ball_snapshot(target_id).await {
+            return Some(tb.position);
+        }
     }
     if let Some(sys_rec) = ctx.sde.solar_systems.get(&sys_id) {
         if let Some(st) = sys_rec.stations.iter().find(|st| st.station_id == target_id) {
@@ -886,7 +901,9 @@ pub(crate) async fn handle_cmd_goto_direction(
         })?;
     let dir = raw_dir.normalize_or_zero();
     let direction = if dir.length_squared() > 1e-6 { dir } else { DVec3::X };
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdGotoDirection", "Active ship is not spawned in Ballpark"));
+    };
     let Some((snap_tick, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
@@ -944,7 +961,9 @@ pub(crate) async fn handle_cmd_stop(
             client_error: None,
         });
     };
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdStop", "Active ship is not spawned in Ballpark"));
+    };
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
@@ -1045,7 +1064,9 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
             message: e.message,
             client_error: None,
         })?;
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdSetSpeedFraction", "Active ship is not spawned in Ballpark"));
+    };
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     let Some((snap_tick, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
@@ -1160,7 +1181,9 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
             "Cannot orbit, approach, or follow own ship",
         ));
     }
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), method, "Active ship is not spawned in Ballpark"));
+    };
     let Some((snap_tick, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
@@ -1282,7 +1305,9 @@ pub(crate) async fn handle_cmd_align_to(
             "Cannot align to own ship",
         ));
     }
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdAlignTo", "Active ship is not spawned in Ballpark"));
+    };
     let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
@@ -1393,7 +1418,9 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
 
     sync_tether(ctx, char_id, sys_id, ship_id).await;
 
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
     let Some(mut cs) = handle.get_combat_state(ship_id).await.ok().flatten() else {
         return;
     };

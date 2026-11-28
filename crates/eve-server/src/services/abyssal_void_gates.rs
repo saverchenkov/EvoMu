@@ -41,6 +41,14 @@ fn is_valid_void_exit_gate(ball_type_id: u32) -> bool {
     matches!(ball_type_id, 47_686 | 60_608 | 80_944 | 82_139)
 }
 
+fn gate_not_found_error() -> BridgeRpcError {
+    BridgeRpcError {
+        code: "GateNotFound".into(),
+        message: "Gate or ship ball not found in space".into(),
+        client_error: None,
+    }
+}
+
 enum GateInspect {
     Expired { ship_id: i64, abyss_sys: u32, now: u64 },
     Err(BridgeRpcError),
@@ -139,7 +147,6 @@ pub(crate) async fn handle_abyssal_gate_activation(
         }
     };
 
-    let abyss_handle = ctx.systems.get_or_spawn(abyss_sys);
     let expected_gate_id = 1_895_000_000 + pid * 10 + (curr_room as i64);
     let alt_gate_id = 1_895_000_000 + (curr_room as i64);
     if gate_id <= 0 || (gate_id != expected_gate_id && gate_id != alt_gate_id) {
@@ -149,6 +156,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
             client_error: None,
         });
     }
+    let abyss_handle = ctx.systems.get_handle(abyss_sys).ok_or_else(gate_not_found_error)?;
 
     if !room_already_cleared && !curr_room_npcs.is_empty() {
         let mut alive_count = 0;
@@ -198,11 +206,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
         })?
         .map(|(_, b)| b);
     let (Some(sb), Some(gb)) = (ship_ball, gate_ball) else {
-        return Err(BridgeRpcError {
-            code: "GateNotFound".into(),
-            message: "Gate or ship ball not found in space".into(),
-            client_error: None,
-        });
+        return Err(gate_not_found_error());
     };
     let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
     if surface_dist > 2_500.0 {
@@ -411,7 +415,6 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         }
     };
 
-    let abyss_handle = ctx.systems.get_or_spawn(pocket_sys);
     let expected_gate_id = 1_895_000_000 + pid * 10 + 3;
     let alt_gate_id = 1_895_000_000 + 3;
     if gate_id <= 0 || (gate_id != expected_gate_id && gate_id != alt_gate_id) {
@@ -421,6 +424,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
             client_error: None,
         });
     }
+    let abyss_handle = ctx.systems.get_handle(pocket_sys).ok_or_else(gate_not_found_error)?;
 
     if !r3_cleared && !r3_npcs.is_empty() {
         let mut alive_count = 0;
@@ -468,11 +472,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         })?
         .map(|(_, b)| b);
     let (Some(sb), Some(gb)) = (ship_ball, gate_ball) else {
-        return Err(BridgeRpcError {
-            code: "GateNotFound".into(),
-            message: "Gate or ship ball not found in space".into(),
-            client_error: None,
-        });
+        return Err(gate_not_found_error());
     };
     let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
     if surface_dist > 2_500.0 {
@@ -720,17 +720,25 @@ pub(crate) async fn handle_void_space_player_jump(
         },
     )
     .await?;
-    let origin_handle = ctx.systems.get_or_spawn(cur_sys);
-    let ship_pos = if let Ok(Some((_, ball))) = origin_handle.get_ball_snapshot(ship_id).await {
-        [ball.position.x, ball.position.y, ball.position.z]
+    let origin_handle_opt = ctx.systems.get_handle(cur_sys);
+    let ball_pos_opt = if let Some(ref origin_handle) = origin_handle_opt {
+        origin_handle
+            .get_ball_snapshot(ship_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, ball)| [ball.position.x, ball.position.y, ball.position.z])
     } else {
+        None
+    };
+    let ship_pos = ball_pos_opt.unwrap_or_else(|| {
         ctx.db.with_snapshot(|snap| {
             snap.item_positions
                 .get(&ship_id)
                 .copied()
                 .unwrap_or([0.0, 0.0, 0.0])
         })
-    };
+    });
     let ship_vec = DVec3::from_array(ship_pos);
     let void_filament_opts = |sid: i64| eve_db::ConsumeExactOptions {
         reject_blueprint_copy: true,
@@ -775,7 +783,11 @@ pub(crate) async fn handle_void_space_player_jump(
                 "Cannot target own ship as Void Space entrance gate",
             ));
         }
-        let target_ball = origin_handle.get_ball_snapshot(target_id).await.ok().flatten();
+        let target_ball = if let Some(ref origin_handle) = origin_handle_opt {
+            origin_handle.get_ball_snapshot(target_id).await.ok().flatten()
+        } else {
+            None
+        };
         let Some((_, target_b)) = target_ball else {
             return Err(BridgeRpcError::invalid_target(
                 Some(target_id),
@@ -816,7 +828,14 @@ pub(crate) async fn handle_void_space_player_jump(
     )
     .await?;
 
-    let Some(taken) = origin_handle.take_ball(ship_id).await else {
+    let origin_and_taken = match origin_handle_opt {
+        Some(origin_handle) => origin_handle
+            .take_ball(ship_id)
+            .await
+            .map(|taken| (origin_handle, taken)),
+        None => None,
+    };
+    let Some((origin_handle, taken)) = origin_and_taken else {
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
             message: format!("Ship {ship_id} is no longer in solar system {cur_sys}"),
@@ -1097,7 +1116,6 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         }
     }
 
-    let void_handle = ctx.systems.get_or_spawn(VOID_SPACE_SYSTEM_ID);
     ctx.validate_ship_movement(
         char_id,
         ship_id,
@@ -1107,8 +1125,16 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         },
     )
     .await?;
-
-    let Some((_, gb)) = void_handle.get_ball_snapshot(gate_id).await.ok().flatten() else {
+    let gb_opt = match ctx.systems.get_handle(VOID_SPACE_SYSTEM_ID) {
+        Some(void_handle) => void_handle
+            .get_ball_snapshot(gate_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, gb)| (void_handle, gb)),
+        None => None,
+    };
+    let Some((void_handle, gb)) = gb_opt else {
         return Err(BridgeRpcError {
             code: "InvalidGate".into(),
             message: format!("Gate {gate_id} is not present in Void Space"),

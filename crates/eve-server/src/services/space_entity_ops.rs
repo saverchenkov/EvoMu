@@ -160,23 +160,25 @@ pub async fn handle(
                             }
                         }
                     });
-                    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                    let sys_handle_opt = ctx.systems.get_handle(sys_id);
                     for &(tid, type_id, grp, cat, is_empty, prev_owner_id) in &metas {
-                        let _ = sys_handle
-                            .change_slim_item(
-                                tid,
-                                eve_destiny::SlimItemMeta {
-                                    group_id: grp,
-                                    category_id: cat,
-                                    owner_id: 0,
-                                    char_id: None,
-                                    corp_id: 0,
-                                    alliance_id: 0,
-                                    security_status: 0.0,
-                                    is_cloaked: false, ..Default::default()
-                                },
-                            )
-                            .await;
+                        if let Some(ref sys_handle) = sys_handle_opt {
+                            let _ = sys_handle
+                                .change_slim_item(
+                                    tid,
+                                    eve_destiny::SlimItemMeta {
+                                        group_id: grp,
+                                        category_id: cat,
+                                        owner_id: 0,
+                                        char_id: None,
+                                        corp_id: 0,
+                                        alliance_id: 0,
+                                        security_status: 0.0,
+                                        is_cloaked: false, ..Default::default()
+                                    },
+                                )
+                                .await;
+                        }
                         let build_slim_kv = |owner: i64| {
                             crate::router::notify_registry::SlimItemKeyVal::for_space_ship(
                                 crate::router::notify_registry::SpaceShipSlimFields {
@@ -283,28 +285,29 @@ pub async fn handle(
                     client_error: None,
                 }));
             };
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let cmd_pos = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position);
-            for (m_char, m_ship) in subordinates {
-                let sub_pos = sys_handle.get_ball_snapshot(m_ship).await.ok().flatten().map(|(_, b)| b.position);
-                let on_grid = match (cmd_pos, sub_pos) {
-                    (Some(cp), Some(sp)) => cp.distance(sp) <= 500_000.0,
-                    _ => false,
-                };
-                if on_grid {
-                    if let Ok((_, events)) = sys_handle
-                        .set_movement_mode_breaking_protection(
-                            m_ship,
-                            Some(m_char),
-                            MovementMode::Follow { target_id: ship_id, range: 1_000.0 },
-                            crate::system_actor::ProtectionBreakReason::SubwarpMovement,
-                            ctx.now_unix(),
-                        )
-                        .await
-                    {
-                        super::space_destiny::emit_protection_break_notifications(
-                            ctx, m_char, m_ship, &events,
-                        );
+            if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+                let cmd_pos = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position);
+                for (m_char, m_ship) in subordinates {
+                    let sub_pos = sys_handle.get_ball_snapshot(m_ship).await.ok().flatten().map(|(_, b)| b.position);
+                    let on_grid = match (cmd_pos, sub_pos) {
+                        (Some(cp), Some(sp)) => cp.distance(sp) <= 500_000.0,
+                        _ => false,
+                    };
+                    if on_grid {
+                        if let Ok((_, events)) = sys_handle
+                            .set_movement_mode_breaking_protection(
+                                m_ship,
+                                Some(m_char),
+                                MovementMode::Follow { target_id: ship_id, range: 1_000.0 },
+                                crate::system_actor::ProtectionBreakReason::SubwarpMovement,
+                                ctx.now_unix(),
+                            )
+                            .await
+                        {
+                            super::space_destiny::emit_protection_break_notifications(
+                                ctx, m_char, m_ship, &events,
+                            );
+                        }
                     }
                 }
             }
@@ -335,12 +338,30 @@ pub async fn handle(
                 }
                 let Some(sys_id) = session.solar_system_id else { return Some(Err(BridgeRpcError::user_error("NotInSpace"))) };
                 let Some(ship_id) = session.ship_id else { return Some(Err(BridgeRpcError::user_error("NoActiveShip"))) };
-                let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                let on_grid = matches!((sys_handle.get_ball_position_sync(ship_id), sys_handle.get_ball_position_sync(target_id)), (Some(sp), Some(tp)) if sp.distance(tp) <= 8_000_000.0);
-                if !on_grid {
-                    return Some(Err(BridgeRpcError { code: "TargetNotOnGrid".into(), message: format!("Target {target_id} is not on grid with caller"), client_error: None }));
-                }
-                let is_locked = sys_handle.get_target_locks(ship_id).await.map(|locks| locks.iter().any(|l| l.target_id == target_id && l.locked)).unwrap_or(false);
+                let is_locked = match ctx.systems.get_handle(sys_id) {
+                    Some(sys_handle)
+                        if matches!(
+                            (
+                                sys_handle.get_ball_position_sync(ship_id),
+                                sys_handle.get_ball_position_sync(target_id),
+                            ),
+                            (Some(sp), Some(tp)) if sp.distance(tp) <= 8_000_000.0
+                        ) =>
+                    {
+                        sys_handle
+                            .get_target_locks(ship_id)
+                            .await
+                            .map(|locks| locks.iter().any(|l| l.target_id == target_id && l.locked))
+                            .unwrap_or(false)
+                    }
+                    _ => {
+                        return Some(Err(BridgeRpcError {
+                            code: "TargetNotOnGrid".into(),
+                            message: format!("Target {target_id} is not on grid with caller"),
+                            client_error: None,
+                        }));
+                    }
+                };
                 if !is_locked {
                     return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} must be locked before tagging"), client_error: None }));
                 }
@@ -455,7 +476,15 @@ pub async fn handle(
                     format!("Bookmark {bm_id} is in another solar system"),
                 )));
             }
-            let handle = ctx.systems.get_or_spawn(sys_id);
+            let Some(handle) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "CmdGotoBookmark",
+                    "Active ship is not spawned in Ballpark",
+                )));
+            };
             let dest = DVec3::new(bm.x, bm.y, bm.z);
             let (_, ball) = match handle.get_ball_snapshot(ship_id).await {
                 Ok(Some(v)) => v,
@@ -654,17 +683,18 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError { code: "DockTargetNotFound".into(), message: format!("Station or structure {target_id} not found"), client_error: None }));
             }
             if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
-                let handle = ctx.systems.get_or_spawn(sys_id);
-                if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
-                    if matches!(ball.mode, eve_destiny::MovementMode::Warp { .. }) {
-                        let _ = handle.force_stop_warp(ship_id);
-                        crate::services::space_destiny::clear_warp_tracking(
-                            &handle,
-                            ship_id,
-                        );
+                if let Some(handle) = ctx.systems.get_handle(sys_id) {
+                    if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
+                        if matches!(ball.mode, eve_destiny::MovementMode::Warp { .. }) {
+                            let _ = handle.force_stop_warp(ship_id);
+                            crate::services::space_destiny::clear_warp_tracking(
+                                &handle,
+                                ship_id,
+                            );
+                        }
                     }
+                    handle.clear_warp_stopped_at(ship_id);
                 }
-                handle.clear_warp_stopped_at(ship_id);
             }
             // Game mechanics: Despawn active ship ball from physics simulation and commit atomic dock transition.
             let dock_spec = crate::router::SessionTransitionSpec::for_kind(
@@ -764,8 +794,10 @@ pub async fn handle(
                     });
                     if let Some((m_sys, m_ship, m_ship_type)) = member_info {
                         let pos = if m_sys != 0 && m_ship != 0 {
-                            let handle = ctx.systems.get_or_spawn(m_sys);
-                            handle.get_ball_position_sync(m_ship).unwrap_or(DVec3::ZERO)
+                            ctx.systems
+                                .get_handle(m_sys)
+                                .and_then(|handle| handle.get_ball_position_sync(m_ship))
+                                .unwrap_or(DVec3::ZERO)
                         } else {
                             DVec3::ZERO
                         };
@@ -838,13 +870,14 @@ pub async fn handle(
                 }));
             };
             let site_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let handle = ctx.systems.get_or_spawn(sys_id);
-            if let Ok(Some((_, b))) = handle.get_ball_snapshot(site_id).await {
-                return Some(Ok(PyRep::Tuple(vec![
-                    PyRep::Real(b.position.x),
-                    PyRep::Real(b.position.y),
-                    PyRep::Real(b.position.z),
-                ])));
+            if let Some(handle) = ctx.systems.get_handle(sys_id) {
+                if let Ok(Some((_, b))) = handle.get_ball_snapshot(site_id).await {
+                    return Some(Ok(PyRep::Tuple(vec![
+                        PyRep::Real(b.position.x),
+                        PyRep::Real(b.position.y),
+                        PyRep::Real(b.position.z),
+                    ])));
+                }
             }
             let site_pos = ctx.db.with_snapshot(|s| {
                 if let Some(st) = s.structures.get(&site_id) {
@@ -945,8 +978,16 @@ async fn handle_cmd_unanchor(
         });
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let Some((_, target_ball)) = sys_handle.get_ball_snapshot(target_id).await.ok().flatten() else {
+    let unanchor_target = match ctx.systems.get_handle(sys_id) {
+        Some(sys_handle) => sys_handle
+            .get_ball_snapshot(target_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, target_ball)| (sys_handle, target_ball)),
+        None => None,
+    };
+    let Some((sys_handle, target_ball)) = unanchor_target else {
         return Err(BridgeRpcError {
             code: "TargetNotInSpace".into(),
             message: format!("Target ball {target_id} is not in space in system {sys_id}"),
@@ -1329,16 +1370,25 @@ async fn handle_open_shipping_unit_storage(
         });
     };
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let ship_pos = sys_handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|(_, b)| b.position)
-        .unwrap_or(DVec3::ZERO);
-
-    let Some((_, unit_ball)) = sys_handle.get_ball_snapshot(unit_id).await.ok().flatten() else {
+    let shipping_unit = match ctx.systems.get_handle(sys_id) {
+        Some(sys_handle) => {
+            let ship_pos = sys_handle
+                .get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.position)
+                .unwrap_or(DVec3::ZERO);
+            sys_handle
+                .get_ball_snapshot(unit_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, unit_ball)| (ship_pos, unit_ball))
+        }
+        None => None,
+    };
+    let Some((ship_pos, unit_ball)) = shipping_unit else {
         return Err(BridgeRpcError {
             code: "UnitNotInSpace".into(),
             message: format!("Shipping unit {unit_id} is not in space in system {sys_id}"),
@@ -1591,7 +1641,7 @@ fn authorize_space_siphon_or_container(
         }
         Ok(())
     })?;
-    let Some(sys_handle) = ctx.systems.get_or_spawn_if_runtime(caller_sys) else {
+    let Some(sys_handle) = ctx.systems.get_handle(caller_sys) else {
         return Err(rpc_err(
             "NotInSpace",
             "Solar system runtime is not active",

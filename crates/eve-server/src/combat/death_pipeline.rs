@@ -623,7 +623,7 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
             .unwrap_or(26557)
     };
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let sys_handle_opt = ctx.systems.get_handle(sys_id);
     let now_unix = ctx.now_unix();
     let is_criminal = victim_char_id > 0
         && ctx
@@ -1278,11 +1278,6 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
     // immediately wakes `macho_listener`'s `notify_rx.recv()` loop (`#970`).
     crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[victim_ship_id]);
     crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(ctx, None, victim_ship_id);
-    let cycled_mod_ids: std::collections::HashSet<i64> = sys_handle
-        .active_cycle_module_ids_for_ship(victim_ship_id)
-        .into_iter()
-        .collect();
-    sys_handle.try_remove_destroyed_ball(victim_ship_id);
     let (wreck_grp, wreck_cat) = if is_pod {
         ctx.sde
             .types
@@ -1292,74 +1287,84 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
     } else {
         (186, 2)
     };
-    sys_handle.try_spawn_ball_with_meta(
-        Ball {
-            id: wreck_item_id,
-            type_id: wreck_type_id,
-            position: victim_pos,
-            velocity: DVec3::ZERO,
-            max_velocity: 0.0,
-            inertia: 1.0,
-            mass: if is_pod { 80.0 } else { 10_000.0 },
-            radius: if is_pod { 5.0 } else { 50.0 },
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        },
-        eve_destiny::CombatState {
-            shield_hp: 0.0,
-            max_shield_hp: 0.0,
-            armor_hp: 0.0,
-            max_armor_hp: 0.0,
-            structure_hp: 500.0,
-            max_structure_hp: 500.0,
-            ..eve_destiny::CombatState::default()
-        },
-        SlimItemMeta {
-            group_id: wreck_grp,
-            category_id: wreck_cat,
-            owner_id: wreck_owner_id,
-            char_id: None,
-            corp_id: victim_corp_owner_id.unwrap_or(-1),
-            alliance_id: if victim_corp_owner_id.is_some() {
-                vic_all.unwrap_or(-1)
-            } else {
-                -1
-            },
-            security_status: 0.0,
-            is_cloaked: false,
-            name: ctx.sde.types.get(&wreck_type_id).map(|t| t.name.clone()),
-            ..Default::default()
-        },
-    );
-    if let Some(cid) = ejected_cap_id {
-        let esc_type_id = ctx
-            .db
-            .with_snapshot(|s| s.items.get(&cid).map(|i| i.type_id))
-            .unwrap_or(670);
-        let esc_sde = ctx.sde.types.get(&esc_type_id);
-        let esc_slim = ctx.build_ship_slim_meta(victim_char_id, esc_type_id);
+    let cycled_mod_ids: std::collections::HashSet<i64> = if let Some(ref sys_handle) = sys_handle_opt {
+        let ids: std::collections::HashSet<i64> = sys_handle
+            .active_cycle_module_ids_for_ship(victim_ship_id)
+            .into_iter()
+            .collect();
+        sys_handle.try_remove_destroyed_ball(victim_ship_id);
         sys_handle.try_spawn_ball_with_meta(
             Ball {
-                id: cid,
-                type_id: esc_type_id,
+                id: wreck_item_id,
+                type_id: wreck_type_id,
                 position: victim_pos,
                 velocity: DVec3::ZERO,
-                max_velocity: esc_sde
-                    .and_then(|t| t.default_attributes.get(&37).copied())
-                    .unwrap_or(335.0),
-                inertia: esc_sde
-                    .and_then(|t| t.default_attributes.get(&70).copied())
-                    .unwrap_or(0.25),
-                mass: esc_sde.map(|t| t.mass.max(1_000.0)).unwrap_or(16_000.0),
-                radius: esc_sde.map(|t| t.radius.max(15.0)).unwrap_or(15.0),
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: if is_pod { 80.0 } else { 10_000.0 },
+                radius: if is_pod { 5.0 } else { 50.0 },
                 speed_fraction: 0.0,
                 mode: MovementMode::Stop,
             },
-            ctx.build_ship_combat_state(victim_char_id, cid, esc_type_id),
-            esc_slim,
+            eve_destiny::CombatState {
+                shield_hp: 0.0,
+                max_shield_hp: 0.0,
+                armor_hp: 0.0,
+                max_armor_hp: 0.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                ..eve_destiny::CombatState::default()
+            },
+            SlimItemMeta {
+                group_id: wreck_grp,
+                category_id: wreck_cat,
+                owner_id: wreck_owner_id,
+                char_id: None,
+                corp_id: victim_corp_owner_id.unwrap_or(-1),
+                alliance_id: if victim_corp_owner_id.is_some() {
+                    vic_all.unwrap_or(-1)
+                } else {
+                    -1
+                },
+                security_status: 0.0,
+                is_cloaked: false,
+                name: ctx.sde.types.get(&wreck_type_id).map(|t| t.name.clone()),
+                ..Default::default()
+            },
         );
-        sys_handle.try_handoff_in_space_observer(victim_ship_id, cid, &[wreck_item_id, cid]);
-    }
+        if let Some(cid) = ejected_cap_id {
+            let esc_type_id = ctx
+                .db
+                .with_snapshot(|s| s.items.get(&cid).map(|i| i.type_id))
+                .unwrap_or(670);
+            let esc_sde = ctx.sde.types.get(&esc_type_id);
+            let esc_slim = ctx.build_ship_slim_meta(victim_char_id, esc_type_id);
+            sys_handle.try_spawn_ball_with_meta(
+                Ball {
+                    id: cid,
+                    type_id: esc_type_id,
+                    position: victim_pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: esc_sde
+                        .and_then(|t| t.default_attributes.get(&37).copied())
+                        .unwrap_or(335.0),
+                    inertia: esc_sde
+                        .and_then(|t| t.default_attributes.get(&70).copied())
+                        .unwrap_or(0.25),
+                    mass: esc_sde.map(|t| t.mass.max(1_000.0)).unwrap_or(16_000.0),
+                    radius: esc_sde.map(|t| t.radius.max(15.0)).unwrap_or(15.0),
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                ctx.build_ship_combat_state(victim_char_id, cid, esc_type_id),
+                esc_slim,
+            );
+            sys_handle.try_handoff_in_space_observer(victim_ship_id, cid, &[wreck_item_id, cid]);
+        }
+        ids
+    } else {
+        std::collections::HashSet::new()
+    };
 
     if let Some((_ins_corp, _owner_id, _bal_wire, Some(mid), subject)) = ins_notify {
         if victim_char_id > 0 {
@@ -1778,9 +1783,10 @@ pub fn on_ball_destroyed_sync(
     if ctx.db.with_snapshot(|s| s.structures.contains_key(&ball_id)) {
         return Ok(None);
     }
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let pos = sys_handle
-        .get_ball_position_sync(ball_id)
+    let sys_handle_opt = ctx.systems.get_handle(sys_id);
+    let pos = sys_handle_opt
+        .as_ref()
+        .and_then(|h| h.get_ball_position_sync(ball_id))
         .or_else(|| {
             ctx.db
                 .with_snapshot(|s| s.item_positions.get(&ball_id).copied())
@@ -1789,8 +1795,10 @@ pub fn on_ball_destroyed_sync(
         .unwrap_or(fallback_pos);
 
     // 1. Active player drone in space
-    if cleanup_destroyed_player_drone_sync(ctx, &sys_handle, ball_id) {
-        return Ok(None);
+    if let Some(ref sys_handle) = sys_handle_opt {
+        if cleanup_destroyed_player_drone_sync(ctx, sys_handle, ball_id) {
+            return Ok(None);
+        }
     }
 
     // 2. Extended NPC entity
@@ -1827,7 +1835,9 @@ pub fn on_ball_destroyed_sync(
             snap.item_positions.remove(&ball_id);
             snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
         });
-        sys_handle.try_remove_ball(ball_id);
+        if let Some(ref sys_handle) = sys_handle_opt {
+            sys_handle.try_remove_ball(ball_id);
+        }
         if let Some(killer_id) = killer_id_opt {
             crate::services::agents_missions::agents_standings_arcs::apply_npc_kill_faction_standing_loss(
                 ctx,
@@ -1920,7 +1930,7 @@ pub fn on_ball_destroyed_sync(
     // calling `on_space_entity_destroyed` so `record_rat_kill_military_index` sees no remaining
     // `category_id == 6` player item and credits the kill.
     if let Some(mto_type_id) = mto_entity_opt {
-        remove_destroyed_space_item_and_ball_sync(ctx, &sys_handle, ball_id);
+        remove_destroyed_space_item_and_ball_sync(ctx, sys_handle_opt.as_ref(), ball_id);
         crate::services::sov_gameplay::on_space_entity_destroyed(
             ctx,
             sys_id,
@@ -1932,8 +1942,12 @@ pub fn on_ball_destroyed_sync(
     }
 
     // 5. Non-ship space object (fighter, wreck, jetcan, deployable, POCO, or NPC structure)
-    if crate::services::pve_dungeon_runtime_hooks::on_dungeon_structure_destroyed_sync(
-        ctx, &sys_handle, sys_id, ball_id, resolved_killer_opt.unwrap_or(0),
+    if crate::services::pve_dungeon_runtime_hooks::on_dungeon_structure_destroyed_with_optional_actor_sync(
+        ctx,
+        sys_handle_opt.as_ref(),
+        sys_id,
+        ball_id,
+        resolved_killer_opt.unwrap_or(0),
     ) || crate::services::pve_dungeon_runtime_hooks::is_dungeon_object_ball(ctx, sys_id, ball_id)
       || crate::services::pve_dungeon_runtime_hooks::is_owned_destructible_dungeon_object(ctx, sys_id, ball_id)
     {
@@ -1979,14 +1993,17 @@ pub async fn on_ball_destroyed(
     killer_id_opt: Option<i64>,
     fallback_pos: DVec3,
 ) -> Result<Option<DeathPipelineResult>, String> {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let pos = sys_handle
-        .get_ball_snapshot(ball_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|(_, b)| b.position)
-        .unwrap_or(fallback_pos);
+    let pos = if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+        sys_handle
+            .get_ball_snapshot(ball_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, b)| b.position)
+    } else {
+        None
+    }
+    .unwrap_or(fallback_pos);
     let res = on_ball_destroyed_sync(ctx, sys_id, ball_id, killer_id_opt, pos);
     let _ = crate::services::pve_dungeon_runtime::flush_pending_dungeon_escalations(ctx).await;
     res
@@ -2065,27 +2082,29 @@ pub(crate) fn cleanup_destroyed_player_drone_sync(
 }
 
 pub fn cleanup_destroyed_non_ship_ball_sync(ctx: &ServerContext, sys_id: u32, ball_id: i64) {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let sys_handle_opt = ctx.systems.get_handle(sys_id);
 
-    if cleanup_destroyed_player_drone_sync(ctx, &sys_handle, ball_id) {
-        return;
-    }
+    if let Some(ref sys_handle) = sys_handle_opt {
+        if cleanup_destroyed_player_drone_sync(ctx, sys_handle, ball_id) {
+            return;
+        }
 
-    let _ = ctx.systems.ensure_live_fighters_hydrated_sync(sys_id, &sys_handle);
-    if let Some(f) = sys_handle.cleanup_destroyed_fighter_sync(ball_id) {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.combat_crimewatch_state
-                .record_destroyed_item_id(f.ball_id);
-            snap.combat_crimewatch_state
-                .record_destroyed_item_id(f.item_id);
-            snap.items.remove(&f.item_id);
-            snap.item_positions.remove(&f.ball_id);
-            snap.sp6_lifecycle.space_object_meta.remove(&f.ball_id);
-            snap.sp6_lifecycle.space_object_meta.remove(&f.item_id);
-        });
-        sys_handle.try_remove_ball(ball_id);
-        ctx.systems.flush_system_fighter_checkpoint_sync(sys_id);
-        return;
+        let _ = ctx.systems.ensure_live_fighters_hydrated_sync(sys_id, sys_handle);
+        if let Some(f) = sys_handle.cleanup_destroyed_fighter_sync(ball_id) {
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.combat_crimewatch_state
+                    .record_destroyed_item_id(f.ball_id);
+                snap.combat_crimewatch_state
+                    .record_destroyed_item_id(f.item_id);
+                snap.items.remove(&f.item_id);
+                snap.item_positions.remove(&f.ball_id);
+                snap.sp6_lifecycle.space_object_meta.remove(&f.ball_id);
+                snap.sp6_lifecycle.space_object_meta.remove(&f.item_id);
+            });
+            sys_handle.try_remove_ball(ball_id);
+            ctx.systems.flush_system_fighter_checkpoint_sync(sys_id);
+            return;
+        }
     }
 
     let is_poco = ctx.db.with_snapshot(|snap| {
@@ -2104,7 +2123,9 @@ pub fn cleanup_destroyed_non_ship_ball_sync(ctx: &ServerContext, sys_id: u32, ba
             snap.item_positions.remove(&ball_id);
             snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
         });
-        sys_handle.try_remove_ball(ball_id);
+        if let Some(ref sys_handle) = sys_handle_opt {
+            sys_handle.try_remove_ball(ball_id);
+        }
         return;
     }
 
@@ -2116,7 +2137,7 @@ pub fn cleanup_destroyed_non_ship_ball_sync(ctx: &ServerContext, sys_id: u32, ba
         })
     });
     if is_destroyable_space_item {
-        remove_destroyed_space_item_and_ball_sync(ctx, &sys_handle, ball_id);
+        remove_destroyed_space_item_and_ball_sync(ctx, sys_handle_opt.as_ref(), ball_id);
     }
 }
 
@@ -2185,7 +2206,7 @@ pub(crate) fn cleanup_destroyed_item_tree_in_snap(
 /// `space_object_meta`, `ship_combat_hp`, and direct child items), and the `Ballpark`.
 fn remove_destroyed_space_item_and_ball_sync(
     ctx: &ServerContext,
-    sys_handle: &crate::system_actor::SystemHandle,
+    sys_handle: Option<&crate::system_actor::SystemHandle>,
     ball_id: i64,
 ) {
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
@@ -2220,7 +2241,9 @@ fn remove_destroyed_space_item_and_ball_sync(
         snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
         snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
     });
-    sys_handle.try_remove_ball(ball_id);
+    if let Some(sys_handle) = sys_handle {
+        sys_handle.try_remove_ball(ball_id);
+    }
 }
 
 /// Executes the full EVE death pipeline when a ship's structure HP reaches 0:
@@ -2479,14 +2502,22 @@ impl SelfDestructManager {
 
         let mut results = Vec::new();
         for (ship_id, char_id, sys_id) in ready {
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let pos = sys_handle
-                .get_ball_snapshot(ship_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|(_, b)| b.position)
-                .unwrap_or(DVec3::ZERO);
+            let pos = if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+                sys_handle
+                    .get_ball_snapshot(ship_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(_, b)| b.position)
+            } else {
+                None
+            }
+            .or_else(|| {
+                ctx.db
+                    .with_snapshot(|s| s.item_positions.get(&ship_id).copied())
+                    .map(DVec3::from_array)
+            })
+            .unwrap_or(DVec3::ZERO);
             let res = execute_self_destruct(ctx, sys_id, char_id, ship_id, pos, rng_seed).await;
             results.push((ship_id, res));
         }

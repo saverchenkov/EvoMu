@@ -1211,3 +1211,161 @@ mod w4_ops_pve_mut_extra_tests {
         );
     }
 }
+
+#[tokio::test]
+async fn cold_system_crab_beacon_prune_tick_and_link_preserve_cold_actor_and_waves() {
+    let ctx = build_test_ctx();
+    let cold_sys = find_nullsec_system(&ctx.sde);
+    let dread = find_ship_by_group(&ctx.sde, 485);
+    let char_id = 94_900_001_i64;
+    let ship_id = 1_900_001_i64;
+    let scan_bid = 1_900_101_i64;
+    let idle_bid = 1_900_102_i64;
+    let now = ctx.now_unix();
+
+    ctx.db
+        .provision_gm_account("crab_cold_pilot", "pw", char_id, "CrabColdPilot");
+    let uid = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id).unwrap_or(1));
+    let _ = ctx.db.acquire_online_lock_with_computer_hash(
+        uid,
+        char_id as u64,
+        Some(char_id),
+        None,
+        true,
+        now,
+    );
+    let sys_rec = ctx.sde.solar_systems.get(&cold_sys).unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = cold_sys;
+            ch.constellation_id = sys_rec.constellation_id;
+            ch.region_id = sys_rec.region_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        for (iid, tid) in [
+            (ship_id, dread),
+            (scan_bid, TYPE_CRAB_BEACON),
+            (idle_bid, TYPE_CRAB_BEACON),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: i64::from(cold_sys),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.item_positions.insert(iid, [0.0, 0.0, 0.0]);
+        }
+    });
+
+    with_crab_beacons(&ctx, |beacons| {
+        beacons.insert(
+            scan_bid,
+            CrabBeaconRecord {
+                beacon_id: scan_bid,
+                type_id: TYPE_CRAB_BEACON,
+                deployer_char_id: char_id,
+                solar_system_id: cold_sys,
+                position: [0.0, 0.0, 0.0],
+                deployed_at_sec: now,
+                phase: CrabBeaconPhase::Scanning,
+                link_started_at_sec: now,
+                link_completes_at_sec: now,
+                scan_completes_at_sec: now + 600,
+                waves_spawned: 1,
+                wave_npc_ball_ids: vec![880_001, 880_002, 880_003],
+                ..Default::default()
+            },
+        );
+        beacons.insert(
+            idle_bid,
+            CrabBeaconRecord {
+                beacon_id: idle_bid,
+                type_id: TYPE_CRAB_BEACON,
+                deployer_char_id: char_id,
+                solar_system_id: cold_sys,
+                position: [0.0, 0.0, 0.0],
+                deployed_at_sec: now,
+                phase: CrabBeaconPhase::Idle,
+                ..Default::default()
+            },
+        );
+    });
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+
+    let (waves, alive) = super::super::prune_dead_crab_wave_drones(&ctx, scan_bid);
+    assert_eq!((waves, alive), (1, 3));
+    assert_eq!(
+        read_crab_beacons(&ctx, |b| b[&scan_bid].wave_npc_ball_ids.clone()),
+        vec![880_001, 880_002, 880_003]
+    );
+
+    tick_crab_beacons_in_system(&ctx, cold_sys).await;
+    assert_eq!(
+        read_crab_beacons(&ctx, |b| (b[&scan_bid].waves_spawned, b[&scan_bid].wave_npc_ball_ids.clone())),
+        (1, vec![880_001, 880_002, 880_003])
+    );
+
+    // T3F-01: advancing past wave2_at / wave3_at on a cold system must NOT record phantom waves/IDs,
+    // and killing tracked NPCs while cold trims wave_npc_ball_ids without pre-allocating wave 2+.
+    let next_id_before = ctx.db.with_snapshot(|s| s.next_entity_id);
+    ctx.advance_secs(500);
+    tick_crab_beacons_in_system(&ctx, cold_sys).await;
+    assert_eq!(
+        read_crab_beacons(&ctx, |b| (b[&scan_bid].waves_spawned, b[&scan_bid].wave_npc_ball_ids.clone())),
+        (1, vec![880_001, 880_002, 880_003])
+    );
+    assert_eq!(ctx.db.with_snapshot(|s| s.next_entity_id), next_id_before);
+
+    for dead_npc_id in [880_001_i64, 880_002_i64, 880_003_i64] {
+        on_crab_wave_npc_destroyed(&ctx.systems, &ctx.db, &ctx.sde, cold_sys, dead_npc_id).await;
+    }
+    assert_eq!(
+        read_crab_beacons(&ctx, |b| (b[&scan_bid].waves_spawned, b[&scan_bid].wave_npc_ball_ids.clone())),
+        (1, Vec::<i64>::new())
+    );
+    assert_eq!(ctx.db.with_snapshot(|s| s.next_entity_id), next_id_before);
+
+    let mut sess = SessionState::new(char_id as u64);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(cold_sys);
+    sess.ship_id = Some(ship_id);
+
+    let err = handle_crab_component_call(
+        &ctx,
+        &sess,
+        cold_sys,
+        char_id,
+        ship_id,
+        idle_bid,
+        "linkWithShip",
+        "InitiateLink",
+        &[],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, "ShipNotInSpace");
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+}

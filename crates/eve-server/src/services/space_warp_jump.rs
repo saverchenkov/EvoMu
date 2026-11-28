@@ -608,15 +608,35 @@ async fn handle_cmd_warp_to_stuff(
             return res;
         }
     }
-    let mjd_handle = ctx.systems.get_or_spawn(sys_id);
-    crate::services::nav_warp_interdiction::validate_pre_warp_common(
-        ctx,
-        char_id,
-        ship_id,
-        sys_id,
-        &mjd_handle,
-    )
-    .await?;
+    if let Some(mjd_handle) = ctx.systems.get_handle(sys_id) {
+        crate::services::nav_warp_interdiction::validate_pre_warp_common(
+            ctx,
+            char_id,
+            ship_id,
+            sys_id,
+            &mjd_handle,
+        )
+        .await?;
+    } else {
+        crate::services::space_nav_movement_guard::validate_pre_movement_locks(
+            ctx,
+            ship_id,
+            &crate::services::space_nav_movement_guard::MovementIntent::Warp { sys_id },
+        )?;
+        crate::services::pve_ess_reserve_banks::check_ess_intrusion_bubble_restriction(
+            ctx, sys_id, ship_id, "warp",
+        )
+        .await?;
+        crate::services::tourney_service::check_tourney_warp_restricted(ctx, sys_id, char_id)?;
+        crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+            ctx,
+            char_id,
+            ship_id,
+            sys_id,
+            "warp",
+            ctx.now_unix(),
+        )?;
+    }
     let (is_stuff_call, stuff_type, target_id, target_str_opt, raw_min_range) =
         if let Some(s) = args.first().and_then(|a| a.as_str()) {
             (
@@ -686,7 +706,9 @@ async fn handle_cmd_warp_to_stuff(
         min_range,
         "CmdWarpToStuff request"
     );
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "warp_to_stuff", "Active ship is not spawned in Ballpark"));
+    };
     let Some((_, current_ball)) = (match handle.get_ball_snapshot(ship_id).await {
         Ok(v) => v,
         Err(e) => {
@@ -2049,7 +2071,9 @@ async fn handle_cmd_stargate_jump(
         now_unix,
     )?;
 
-    let old_handle = ctx.systems.get_or_spawn(old_sys);
+    let Some(old_handle) = ctx.systems.get_handle(old_sys) else {
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(old_sys), "stargate_jump", "Active ship ball is not in space"));
+    };
     let Some((cur_tick, current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
         Ok(v) => v,
         Err(e) => {
@@ -2857,27 +2881,33 @@ async fn handle_dock(
     };
 
     let now_unix = ctx.now_unix();
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    let mut ball_snap = match handle.get_ball_snapshot(ship_id).await {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(BridgeRpcError {
-                code: "DestinyQueryFailed".into(),
-                message: e,
-                client_error: None,
-            })
+    let handle_opt = ctx.systems.get_handle(sys_id);
+    let mut ball_snap = if let Some(ref handle) = handle_opt {
+        match handle.get_ball_snapshot(ship_id).await {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(BridgeRpcError {
+                    code: "DestinyQueryFailed".into(),
+                    message: e,
+                    client_error: None,
+                })
+            }
         }
+    } else {
+        None
     };
-    if ball_snap.is_none() {
-        if let Some(db_ship_id) = ctx
-            .db
-            .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id))
-            .filter(|&id| id > 0 && id != ship_id)
-        {
-            if let Ok(Some(v)) = handle.get_ball_snapshot(db_ship_id).await {
-                ship_id = db_ship_id;
-                session.ship_id = Some(db_ship_id);
-                ball_snap = Some(v);
+    if let Some(ref handle) = handle_opt {
+        if ball_snap.is_none() {
+            if let Some(db_ship_id) = ctx
+                .db
+                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id))
+                .filter(|&id| id > 0 && id != ship_id)
+            {
+                if let Ok(Some(v)) = handle.get_ball_snapshot(db_ship_id).await {
+                    ship_id = db_ship_id;
+                    session.ship_id = Some(db_ship_id);
+                    ball_snap = Some(v);
+                }
             }
         }
     }
@@ -2903,7 +2933,7 @@ async fn handle_dock(
             client_error: None,
         });
     }
-    let Some((cur_tick, ball)) = ball_snap else {
+    let (Some(handle), Some((cur_tick, ball))) = (handle_opt, ball_snap) else {
         return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "dock", format!("Ship {ship_id} is not spawned in solar system {sys_id} Ballpark")));
     };
 
@@ -3278,7 +3308,7 @@ pub(crate) async fn prepare_dock_warp_settle(
     }
 
     let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let handle = ctx.systems.get_handle(sys_id)?;
     let (cur_tick, ball) = handle.get_ball_snapshot(ship_id).await.ok().flatten()?;
 
     let stopped_now = if is_turbo {

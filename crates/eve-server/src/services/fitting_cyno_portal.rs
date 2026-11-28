@@ -196,18 +196,19 @@ pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
     drop(st);
     if let Some((bsys, bmod)) = beacon_cycle {
         if bmod != 0 {
-            ctx.systems
-                .get_or_spawn(bsys)
-                .try_remove_module_cycle(ship_id, bmod);
+            if let Some(sys) = ctx.systems.get_handle(bsys) {
+                sys.try_remove_module_cycle(ship_id, bmod);
+            }
         }
     }
     for (sys_id, bridger_ship_id, portal_mod_id, ball_id) in removed_bridges {
-        let sys = ctx.systems.get_or_spawn(sys_id);
-        if ball_id != 0 {
-            sys.try_remove_ball(ball_id);
-        }
-        if portal_mod_id != 0 {
-            sys.try_remove_module_cycle(bridger_ship_id, portal_mod_id);
+        if let Some(sys) = ctx.systems.get_handle(sys_id) {
+            if ball_id != 0 {
+                sys.try_remove_ball(ball_id);
+            }
+            if portal_mod_id != 0 {
+                sys.try_remove_module_cycle(bridger_ship_id, portal_mod_id);
+            }
         }
     }
 }
@@ -1188,8 +1189,11 @@ pub async fn relocate_ship(
     );
     let cd_secs = ((cd_min * 60.0).round() as u64).max(1);
     let fat_secs = ((fat_min * 60.0).round() as u64).max(cd_secs + 1);
-    let from = ctx.systems.get_or_spawn(from_sys);
-    let taken_opt = from.take_ball(ship_id).await;
+    let from_opt = ctx.systems.get_handle(from_sys);
+    let taken_opt = match from_opt.as_ref() {
+        Some(from) => from.take_ball(ship_id).await,
+        None => None,
+    };
     let prev_cs = taken_opt.as_ref().and_then(|t| t.combat_state.clone());
     if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
@@ -1230,7 +1234,7 @@ pub async fn relocate_ship(
         snap.character_last_jump_unix.insert(char_id, now);
         Ok(())
     }) {
-        if let Some(taken) = taken_opt {
+        if let (Some(from), Some(taken)) = (from_opt, taken_opt) {
             let _ = from.restore_ball(taken).await;
         }
         return Err(e);
@@ -1340,15 +1344,16 @@ pub(super) async fn relocate_caller(
     dist_ly: f64,
     fatigue_mult: f64,
 ) -> Result<(f64, f64, u64), BridgeRpcError> {
-    if ctx
-        .systems
-        .get_or_spawn(from_sys)
-        .get_ball_snapshot(ship_id)
-        .await
-        .ok()
-        .flatten()
-        .is_none()
-    {
+    let ship_in_origin = match ctx.systems.get_handle(from_sys) {
+        Some(from_handle) => from_handle
+            .get_ball_snapshot(ship_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some(),
+        None => false,
+    };
+    if !ship_in_origin {
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
             message: format!("Ship {ship_id} is no longer in solar system {from_sys}"),
@@ -1403,7 +1408,6 @@ pub(crate) async fn caller_in_space(
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(err("ShipDocked", "Cannot jump while docked"));
     }
-    let handle = ctx.systems.get_or_spawn(sys_id);
     let validated = ctx
         .validate_ship_movement(
             char_id,
@@ -1415,6 +1419,15 @@ pub(crate) async fn caller_in_space(
             },
         )
         .await?;
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "JumpPortal",
+            "Active ship is not in space",
+        ));
+    };
     let ball = validated.ball.ok_or_else(|| {
         BridgeRpcError::ship_not_in_space(
             ship_id,
@@ -1621,13 +1634,31 @@ pub(crate) async fn resolve_fleet_beacon(
             let owner_fleet = fleet_of(s, it.owner_id);
             it.owner_id == char_id || (caller_fleet.is_some() && caller_fleet == owner_fleet)
         };
+        let persisted_pos = |it_id: i64| -> Option<DVec3> {
+            s.item_positions
+                .get(&it_id)
+                .copied()
+                .map(DVec3::from_array)
+                .or_else(|| {
+                    dep_state
+                        .deployables
+                        .get(&it_id)
+                        .map(|r| DVec3::from_array(r.position))
+                })
+        };
         if beacon_id != 0 {
             if let Some(it) = s.items.get(&beacon_id) {
                 if is_deployable_allowed(it)
                     && is_deployable_beacon(it)
                     && (target_sys == 0 || it.location_id == target_sys as i64)
                 {
-                    return Some((it.item_id, it.type_id, it.owner_id, it.location_id as u32));
+                    return Some((
+                        it.item_id,
+                        it.type_id,
+                        it.owner_id,
+                        it.location_id as u32,
+                        persisted_pos(it.item_id),
+                    ));
                 }
             }
         }
@@ -1639,17 +1670,28 @@ pub(crate) async fn resolve_fleet_beacon(
                     && (target_sys == 0 || it.location_id == target_sys as i64)
                     && (beacon_id == 0 || it.item_id == beacon_id)
             })
-            .map(|it| (it.item_id, it.type_id, it.owner_id, it.location_id as u32))
+            .map(|it| {
+                (
+                    it.item_id,
+                    it.type_id,
+                    it.owner_id,
+                    it.location_id as u32,
+                    persisted_pos(it.item_id),
+                )
+            })
     });
-    if let Some((b_id, b_type_id, b_owner, b_sys)) = item_info {
-        let handle = ctx.systems.get_or_spawn(b_sys);
-        let pos = handle
-            .get_ball_snapshot(b_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|(_, b)| b.position)
-            .unwrap_or(DVec3::ZERO);
+    if let Some((b_id, b_type_id, b_owner, b_sys, persisted_pos)) = item_info {
+        let live_pos = if let Some(handle) = ctx.systems.get_handle(b_sys) {
+            handle
+                .get_ball_snapshot(b_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.position)
+        } else {
+            None
+        };
+        let pos = live_pos.or(persisted_pos).unwrap_or(DVec3::ZERO);
         let beacon = FleetModuleBeacon {
             beacon_id: b_id,
             char_id: b_owner,
@@ -1827,7 +1869,9 @@ pub(super) async fn jump_to_fleet_beacon(
         format!("Jump requires {fuel_qty} x type {fuel_type}, ship holds {have}")
     })?;
     if let Some(cap_cs) = updated_cap_cs {
-        let _ = ctx.systems.get_or_spawn(sys_id).set_combat_state(ship_id, cap_cs).await;
+        if let Some(sys) = ctx.systems.get_handle(sys_id) {
+            let _ = sys.set_combat_state(ship_id, cap_cs).await;
+        }
     }
     let pos = if landed_at_star {
         star_arrival_position(ctx, beacon.solar_system_id)

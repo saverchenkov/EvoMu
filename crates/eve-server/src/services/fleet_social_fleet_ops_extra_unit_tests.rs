@@ -559,3 +559,116 @@ async fn options_motd_max_size_composition_and_regroup_branches() {
     .expect("FleetWarp with explicit XYZ and Arrow formation");
     assert_eq!(fw.dict_get("formationID").and_then(|v| v.as_i64()), Some(3));
 }
+
+#[tokio::test]
+async fn cold_system_fleet_ops_do_not_wake_system_actor() {
+    let ctx = test_ctx_with_clock(1_800_000_500);
+    let cold_sys = 30_000_142_u32;
+    let fleet_id = 799_001_i64;
+    let fc_id = 90_000_001_i64;
+    let fc_ship = 100_000_901_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&fc_id) {
+            ch.solar_system_id = cold_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = fc_ship;
+        }
+        snap.items.insert(
+            fc_ship,
+            eve_db::InventoryItemRecord {
+                item_id: fc_ship,
+                type_id: 587,
+                owner_id: fc_id,
+                location_id: i64::from(cold_sys),
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        let mut member_details = HashMap::new();
+        member_details.insert(
+            fc_id,
+            eve_db::types::FleetMemberRecord {
+                character_id: fc_id,
+                role: FleetRole::FleetCommander,
+                wing_id: None,
+                squad_id: None,
+                takes_fleet_warp: true,
+                accepts_regroup: true,
+                accepts_conduit_jumps: true,
+                job: 0,
+                role_name: "Fleet Commander".into(),
+                join_time_unix: 1_800_000_000,
+            },
+        );
+        snap.fleets.insert(
+            fleet_id,
+            eve_db::FleetRecord {
+                fleet_id,
+                boss_id: fc_id,
+                members: vec![fc_id],
+                member_details,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut fc_sess = member_session(fc_id, fleet_id, cold_sys, fc_ship);
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+
+    let bcast = handle(
+        &ctx,
+        &mut fc_sess,
+        "fleetObjectHandler",
+        "SendBroadcast",
+        &[PyRep::String("NeedBackup".into()), PyRep::Integer(0)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("SendBroadcast must succeed without waking cold system");
+    assert_eq!(
+        bcast.dict_get("broadcast").and_then(|v| v.as_str()),
+        Some("NeedBackup")
+    );
+
+    let regroup = handle(&ctx, &mut fc_sess, "fleetMgr", "Regroup", &[], &kw)
+        .await
+        .unwrap()
+        .expect("Regroup on cold system skips gracefully");
+    let regrouped_empty = matches!(
+        regroup.dict_get("regroupedMemberIDs"),
+        Some(PyRep::List(ref v)) if v.is_empty()
+    );
+    assert!(regrouped_empty);
+
+    let fw_err = handle_fleet_warp(
+        &ctx,
+        &fc_sess,
+        &[
+            PyRep::Real(5_000_000.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(fw_err.code, "ShipNotInSpace");
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+}

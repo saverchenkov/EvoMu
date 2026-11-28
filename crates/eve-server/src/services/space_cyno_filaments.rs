@@ -142,7 +142,15 @@ async fn prepare_wormhole_jump_caller(
     };
     crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "jump wormhole")?;
 
-    let old_handle = ctx.systems.get_or_spawn(old_sys);
+    let Some(old_handle) = ctx.systems.get_handle(old_sys) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(old_sys),
+            "WormholeJump",
+            "Active ship ball is not in space",
+        ));
+    };
     let Some((_, mut current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
         Ok(v) => v,
         Err(e) => {
@@ -451,7 +459,15 @@ async fn handle_random_jump_filament(
     };
     crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, old_sys)?;
 
-    let old_handle = ctx.systems.get_or_spawn(old_sys);
+    let Some(old_handle) = ctx.systems.get_handle(old_sys) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(old_sys),
+            "FilamentJump",
+            "Active ship ball is not in space",
+        ));
+    };
     let Some((cur_tick, mut current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
         Ok(v) => v,
         Err(e) => return Err(BridgeRpcError { code: "DestinyQueryFailed".into(), message: e, client_error: None }),
@@ -992,7 +1008,6 @@ async fn handle_cmd_jump_to_structure_beacon(
     } else {
         (None, args.first().and_then(|a| a.as_i64()).unwrap_or(0))
     };
-    let cur_sys_handle = ctx.systems.get_or_spawn(cur_sys_id);
     let validated_jump = ctx
         .validate_ship_movement(
             char_id,
@@ -1004,6 +1019,15 @@ async fn handle_cmd_jump_to_structure_beacon(
             },
         )
         .await?;
+    let Some(cur_sys_handle) = ctx.systems.get_handle(cur_sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(cur_sys_id),
+            "CynoJump",
+            "Active ship is not spawned in space",
+        ));
+    };
     let current_ball = validated_jump.ball.ok_or_else(|| {
         BridgeRpcError::ship_not_in_space(
             ship_id,
@@ -1342,9 +1366,9 @@ async fn handle_cone_scan(
         .unwrap_or(max_scan_range)
         .clamp(0.0, max_scan_range);
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let sys_handle_opt = ctx.systems.get_handle(sys_id);
     let caller_ship = session.ship_id;
-    let caller_ball = if let Some(sid) = caller_ship {
+    let caller_ball = if let (Some(sys_handle), Some(sid)) = (sys_handle_opt.as_ref(), caller_ship) {
         sys_handle
             .get_ball_snapshot(sid)
             .await
@@ -1401,7 +1425,11 @@ async fn handle_cone_scan(
         return Some(Ok(PyRep::List(Vec::new())));
     }
     let cos_half_angle = (scan_angle.to_radians() * 0.5).cos();
-    let balls = sys_handle.list_balls().await.unwrap_or_default();
+    let balls = if let Some(ref sys_handle) = sys_handle_opt {
+        sys_handle.list_balls().await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let inhibitor_positions = active_scan_inhibitor_positions(ctx, sys_id, &balls);
     // DERIVED: 30_000.0 m Mobile Scan Inhibitor (`33_589`, group `1275`) cloak sphere radius;
     // ships inside an active inhibitor sphere have inoperable sensors (`Mobile_structures.md:92`).
@@ -1448,12 +1476,14 @@ async fn handle_cone_scan(
             continue;
         }
         if crate::services::inventory_fitting::fitting_cyno_portal::is_covert_beacon_type(ball.type_id) {
-            let caller_bub = if let Some(sid) = session.ship_id {
-                sys_handle.get_bubble_id_for_ball(sid).await.ok().flatten()
-            } else {
-                None
+            let caller_bub = match (sys_handle_opt.as_ref(), session.ship_id) {
+                (Some(sys_handle), Some(sid)) => sys_handle.get_bubble_id_for_ball(sid).await.ok().flatten(),
+                _ => None,
             };
-            let b_bub = sys_handle.get_bubble_id_for_ball(ball.id).await.ok().flatten();
+            let b_bub = match sys_handle_opt.as_ref() {
+                Some(sys_handle) => sys_handle.get_bubble_id_for_ball(ball.id).await.ok().flatten(),
+                None => None,
+            };
             if caller_bub.is_none() || b_bub != caller_bub {
                 continue;
             }
@@ -1464,9 +1494,11 @@ async fn handle_cone_scan(
         {
             continue;
         }
-        if let Ok(Some(cs)) = sys_handle.get_combat_state(ball.id).await {
-            if cs.is_cloaked {
-                continue;
+        if let Some(ref sys_handle) = sys_handle_opt {
+            if let Ok(Some(cs)) = sys_handle.get_combat_state(ball.id).await {
+                if cs.is_cloaked {
+                    continue;
+                }
             }
         }
         seen_ids.insert(ball.id);
@@ -1535,7 +1567,15 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     }
     let cur_sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solarSystemID".into(), client_error: None })?;
 
-    let cur_sys_handle = ctx.systems.get_or_spawn(cur_sys_id);
+    let Some(cur_sys_handle) = ctx.systems.get_handle(cur_sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(cur_sys_id),
+            "BeaconJumpFleet",
+            "Active ship is not spawned in space",
+        ));
+    };
     let (_, current_ball) = cur_sys_handle.get_ball_snapshot(ship_id).await
         .map_err(|e| BridgeRpcError { code: "DestinyCommandFailed".into(), message: e, client_error: None })?
         .ok_or_else(|| BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(cur_sys_id), "BeaconJumpFleet", "Active ship is not spawned in space"))?;
