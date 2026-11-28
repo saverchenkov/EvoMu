@@ -32,7 +32,7 @@
     "service_caller_trace_comparisons": {},
     "service_caller_trace_params": {}
   },
-  "max_transport_differing_replies": 21,
+  "max_transport_differing_replies": 20,
   "known_rules": [
     "notify:DoDestinyUpdates",
     "notify:OnDamageMessage",
