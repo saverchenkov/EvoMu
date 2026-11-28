@@ -153,7 +153,12 @@ async fn tales_incursions_system_effects_deathzone_and_expedition_notifications(
         .unwrap_or(20_000_020);
 
     emit_progression_left(&ctx, char_id);
-    emit_tale_data_for_system(&ctx, sys_id, 901, PyRep::Integer(1));
+    emit_tale_data_for_system(
+        &ctx,
+        sys_id,
+        901,
+        PyRep::Dict(vec![(PyRep::String("taleID".into()), PyRep::Integer(901))]),
+    );
     emit_tale_influence_update(&ctx, const_id, 901, 0.65);
     emit_tale_remove_for_constellation(&ctx, const_id, 901, 1, 7);
     emit_system_effect_started(&ctx, sys_id, vec![30829]);

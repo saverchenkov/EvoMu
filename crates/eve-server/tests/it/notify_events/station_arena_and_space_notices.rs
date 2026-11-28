@@ -90,10 +90,10 @@ async fn test_batch5_station_damage_crimewatch_shutdown_scanners() {
     let ev_now = events(&ctx, P2, "OnCharNowInStation");
     assert_eq!(ev_now.len(), 1, "P2 must receive OnCharNowInStation");
     assert_eq!(ev_now[0].len(), 1);
-    if let PyRep::List(ref row) = ev_now[0][0] {
+    if let PyRep::Tuple(ref row) = ev_now[0][0] {
         assert_eq!(row[0], PyRep::Integer(P1));
     } else {
-        panic!("expected PyRep::List for guest row");
+        panic!("expected PyRep::Tuple for guest row");
     }
 
     // 2. OnCharNoLongerInStation: Pilot 1 leaves station -> Pilot 2 receives undock guest row
@@ -101,10 +101,10 @@ async fn test_batch5_station_damage_crimewatch_shutdown_scanners() {
     let ev_gone = events(&ctx, P2, "OnCharNoLongerInStation");
     assert_eq!(ev_gone.len(), 1, "P2 must receive OnCharNoLongerInStation");
     assert_eq!(ev_gone[0].len(), 1);
-    if let PyRep::List(ref row) = ev_gone[0][0] {
+    if let PyRep::Tuple(ref row) = ev_gone[0][0] {
         assert_eq!(row[0], PyRep::Integer(P1));
     } else {
-        panic!("expected PyRep::List for guest row");
+        panic!("expected PyRep::Tuple for guest row");
     }
 
     // 3. OnDamageStateChange: Emit V24 damage tuple
@@ -290,11 +290,21 @@ async fn test_batch5_space_combat_arena_and_ess() {
     assert_eq!(ev_fail[0][0], PyRep::List(vec![PyRep::Integer(404)]));
 
     // 6. DoDestinyUpdates: Batch destiny movement updates
-    emit_destiny_updates(&ctx, P1, vec![PyRep::Integer(101), PyRep::Integer(102)]);
+    let destiny_updates = vec![PyRep::Tuple(vec![
+        PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(101),
+            PyRep::Tuple(vec![
+                PyRep::String("SetMaxSpeed".into()),
+                PyRep::Tuple(vec![PyRep::Integer(102), PyRep::Real(250.0)]),
+            ]),
+        ])]),
+        PyRep::Bool(false),
+    ])];
+    emit_destiny_updates(&ctx, P1, destiny_updates.clone());
     let ev_dest = events(&ctx, P1, "DoDestinyUpdates");
     assert_eq!(ev_dest.len(), 1);
     assert_eq!(ev_dest[0].len(), 1);
-    assert_eq!(ev_dest[0][0], PyRep::List(vec![PyRep::Integer(101), PyRep::Integer(102)]));
+    assert_eq!(ev_dest[0][0], PyRep::List(destiny_updates));
 
     // 7. OnComponentRemovedSystemEnvironment: Clear environmental hazards
     emit_component_removed_system_environment(&ctx, JITA_SYSTEM);

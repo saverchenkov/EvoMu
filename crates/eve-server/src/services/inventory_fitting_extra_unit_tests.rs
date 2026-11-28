@@ -3087,7 +3087,13 @@ async fn bf_1290_r2_04_multiadd_sma_rules_positional_pw_and_split_notify() {
     assert!(
         !owner_notifs.iter().any(|n| {
             (n.event == "OnItemChange" && dbrow_i64(&n.args[0], "itemID") == Some(new_split_id))
-                || (n.event == "ProcessInventoryChange" && n.args.first().and_then(|v| v.as_i64()) == Some(new_split_id))
+                || (n.event == "ProcessInventoryChange"
+                    && (n.args.first().and_then(|v| v.as_i64()) == Some(new_split_id)
+                        || matches!(
+                            n.args.first(),
+                            Some(PyRep::List(items))
+                                if items.iter().any(|it| it.dict_get("itemID") == Some(&PyRep::Integer(new_split_id)))
+                        )))
         }),
         "ship owner must NOT receive OnItemChange or ProcessInventoryChange for mate's private extracted stack {new_split_id}: {owner_notifs:?}"
     );

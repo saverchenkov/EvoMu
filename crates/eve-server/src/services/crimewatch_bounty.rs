@@ -533,9 +533,7 @@ pub fn handle_bounty_proxy(
             ctx.emit_typed(
                 NotificationTarget::Character(target_id),
                 OnBountyPlaced {
-                    owner_id: char_id,
-                    target_id: Some(target_id),
-                    amount_isk: Some(amount_isk),
+                    owner_id: target_id,
                 },
             );
             Some(Ok(PyRep::keyval([

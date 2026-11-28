@@ -748,9 +748,7 @@ fn set_corp_allowed(ctx: &ServerContext, session: &mut SessionState, args: &[PyR
     }
     ctx.emit_typed(
         NotificationTarget::Corporation(corp_id),
-        crate::router::notify_registry::OnCorpAllowedEnlistmentFactionsSet {
-            factions: Some(factions.clone()),
-        },
+        crate::router::notify_registry::OnCorpAllowedEnlistmentFactionsSet {},
     );
     Ok(PyRep::List(factions.into_iter().map(PyRep::Integer).collect()))
 }

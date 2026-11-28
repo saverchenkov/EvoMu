@@ -153,8 +153,8 @@ async fn test_ship_clone_vat_bookmarks_standings_agents_and_item_locking_notific
     call(&ctx, &mut s1, "jumpCloneSvc", "CancelShipCloneInstallation", &[]).await;
     let n_cancel_p1 = ctx.drain_notifications_for_char(P1);
     let n_cancel_p2 = ctx.drain_notifications_for_char(P2);
-    assert_eq!(events_from(&n_cancel_p1, "OnShipJumpCloneInstallationCanceled"), vec![Vec::<PyRep>::new()]);
-    assert_eq!(events_from(&n_cancel_p2, "OnShipJumpCloneInstallationCanceled"), vec![Vec::<PyRep>::new()]);
+    assert_eq!(events_from(&n_cancel_p1, "OnShipJumpCloneInstallationCanceled"), vec![vec![PyRep::Tuple(Vec::new())]]);
+    assert_eq!(events_from(&n_cancel_p2, "OnShipJumpCloneInstallationCanceled"), vec![vec![PyRep::Tuple(Vec::new())]]);
 
     call(&ctx, &mut s1, "jumpCloneSvc", "OfferShipCloneInstallation", &[PyRep::Integer(P2)]).await;
     ctx.drain_notifications_for_char(P1);

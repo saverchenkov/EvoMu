@@ -147,7 +147,7 @@ async fn auth_cache_machonet_config_and_notifications() {
             &mut sess,
             "machoNet",
             "ForwardCharacterNotification",
-            &[PyRep::Integer(90_000_001), PyRep::String("OnNotificationReceived".into()), PyRep::Tuple(vec![PyRep::Integer(42)])],
+            &[PyRep::Integer(90_000_001), PyRep::String("OnNotificationReceived".into()), PyRep::Dict(vec![(PyRep::String("key".into()), PyRep::Integer(42))])],
             &kw,
         )
         .await

@@ -1454,14 +1454,12 @@ pub(crate) fn dispatch_fit_slash(
                 }
                 // ProcessInventoryChange still emits right before `invalidate_and_push_fit` / `OnModuleFitted`
                 // (#1252, parity with `inventory_fitting.rs`); `OnItemChange` is commit-projected.
-                ctx.emit_typed(
-                    NotificationTarget::Character(rec.owner_id),
-                    crate::router::notify_registry::ProcessInventoryChange {
-                        arg0: PyRep::Integer(rec.item_id),
-                        arg1: PyRep::Integer(rec.location_id),
-                        arg2: PyRep::Integer(chosen_flag as i64),
-                        arg3: None,
-                    },
+                crate::router::notify_registry::emit_process_inventory_change(
+                    ctx,
+                    rec.owner_id,
+                    &rec,
+                    0,
+                    0,
                 );
                 ctx.invalidate_and_push_fit(ship_id);
                 if is_fitting_slot {

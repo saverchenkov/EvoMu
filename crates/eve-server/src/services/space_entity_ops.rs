@@ -178,17 +178,22 @@ pub async fn handle(
                             )
                             .await;
                         let build_slim_kv = |owner: i64| {
-                            crate::router::notify_registry::SlimItemKeyVal::from_pairs([
-                                ("itemID", PyRep::Integer(tid)),
-                                ("typeID", PyRep::Integer(type_id as i64)),
-                                ("groupID", PyRep::Integer(grp as i64)),
-                                ("categoryID", PyRep::Integer(cat as i64)),
-                                ("ownerID", PyRep::Integer(owner)),
-                                ("charID", PyRep::None),
-                                ("corpID", PyRep::None),
-                                ("allianceID", PyRep::None),
+                            crate::router::notify_registry::SlimItemKeyVal::for_space_ship(
+                                crate::router::notify_registry::SpaceShipSlimFields {
+                                    item_id: tid,
+                                    type_id: type_id as i64,
+                                    group_id: grp as i64,
+                                    category_id: cat as i64,
+                                    owner_id: owner,
+                                    char_id: None,
+                                    corp_id: None,
+                                    alliance_id: None,
+                                    name: String::new(),
+                                },
+                            )
+                            .with_extra_pairs([
                                 ("securityStatus", PyRep::Real(0.0)),
-                                ("isEmpty", PyRep::Integer(if is_empty { 1 } else { 0 })),
+                                ("isEmpty", PyRep::Bool(is_empty)),
                             ])
                         };
                         if let Some(scene) =

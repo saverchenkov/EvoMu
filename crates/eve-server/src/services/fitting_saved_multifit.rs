@@ -1232,13 +1232,20 @@ pub(crate) async fn handle_ships_and_services(
                     .sde
                     .types
                     .get(&item.type_id)
-                    .map(|t| (i64::from(t.group_id), i64::from(t.category_id)));
+                    .map(|t| (i64::from(t.group_id), i64::from(t.category_id), t.name.clone()));
+                let old_name = snap
+                    .item_custom_names
+                    .get(&item_id)
+                    .cloned()
+                    .or_else(|| slim_fields.as_ref().map(|(_, _, n)| n.clone()))
+                    .unwrap_or_default();
                 let space_slim = if is_ship {
                     u32::try_from(item.location_id)
                         .ok()
                         .filter(|s| ctx.sde.solar_systems.contains_key(s))
                         .map(|sys_id| {
-                            let (group_id, category_id) = slim_fields.unwrap_or((25, 6));
+                            let (group_id, category_id, _) =
+                                slim_fields.unwrap_or((25, 6, String::new()));
                             let owner_char_id = if snap.characters.contains_key(&item.owner_id) {
                                 Some(item.owner_id)
                             } else if session.ship_id == Some(item_id) {
@@ -1260,6 +1267,7 @@ pub(crate) async fn handle_ships_and_services(
                                 .filter(|&aid| aid > 0);
                             (
                                 sys_id,
+                                old_name,
                                 crate::router::notify_registry::SpaceShipSlimFields {
                                     item_id,
                                     type_id: i64::from(item.type_id),
@@ -1282,15 +1290,25 @@ pub(crate) async fn handle_ships_and_services(
             match res {
                 Ok(space_slim) => {
                     ctx.esi_state.set_custom_item_name(item_id, label.to_string());
-                    if let Some((scene, slim_fields)) = space_slim.and_then(|(sys_id, sf)| {
-                        crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
-                            .map(|sc| (sc, sf))
-                    }) {
+                    if let Some((scene, old_name, slim_fields)) =
+                        space_slim.and_then(|(sys_id, old_name, sf)| {
+                            crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
+                                .map(|sc| (sc, old_name, sf))
+                        })
+                    {
+                        let old_fields = crate::router::notify_registry::SpaceShipSlimFields {
+                            name: old_name,
+                            ..slim_fields.clone()
+                        };
                         ctx.emit_typed(
                             crate::router::NotificationTarget::SolarSystem(scene.solar_system_id()),
                             crate::router::notify_registry::OnSlimItemChange {
                                 scene,
-                                old_slim: PyRep::Integer(item_id),
+                                old_slim: crate::router::notify_registry::ToNotifyArg::into_notify_arg(
+                                    crate::router::notify_registry::SlimItemKeyVal::for_space_ship(
+                                        old_fields,
+                                    ),
+                                ),
                                 new_slim: crate::router::notify_registry::SlimItemKeyVal::for_space_ship(
                                     slim_fields,
                                 ),

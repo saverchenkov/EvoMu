@@ -72,17 +72,19 @@ pub struct ProjectedNotification {
 impl ProjectedNotification {
     /// Builds a [`ProjectedNotification`] from a strongly typed [`TypedNotification`] using its
     /// registered `EVENT` and `DEFAULT_ID_TYPE`.
+    #[track_caller]
     pub fn from_typed<N: TypedNotification>(target: ProjectedTarget, notif: N) -> Self {
         Self {
             target,
             event: N::EVENT,
             id_type: N::DEFAULT_ID_TYPE,
-            args: notif.into_args(),
+            args: crate::router::notify_registry::typed_args_checked(notif),
         }
     }
 
     /// Builds a [`ProjectedNotification`] from a strongly typed [`TypedNotification`] with an
     /// explicit Macho `id_type` (for scope-dependent events like `OnItemChange` or `OnAccountChange`).
+    #[track_caller]
     pub fn from_typed_with_id_type<N: TypedNotification>(
         target: ProjectedTarget,
         id_type: &'static str,
@@ -92,7 +94,7 @@ impl ProjectedNotification {
             target,
             event: N::EVENT,
             id_type,
-            args: notif.into_args(),
+            args: crate::router::notify_registry::typed_args_checked(notif),
         }
     }
 }
@@ -791,11 +793,17 @@ fn on_item_change_two_args(notif: OnItemChange) -> Vec<PyRep> {
 }
 
 fn projected_item_change(target: ProjectedTarget, notif: OnItemChange) -> ProjectedNotification {
+    let args = on_item_change_two_args(notif);
+    #[cfg(any(test, feature = "testkit"))]
+    crate::router::notify_registry::assert_registered_event_shape_if_registered(
+        OnItemChange::EVENT,
+        &args,
+    );
     ProjectedNotification {
         target,
         event: OnItemChange::EVENT,
         id_type: target.default_id_type(),
-        args: on_item_change_two_args(notif),
+        args,
     }
 }
 
@@ -815,7 +823,7 @@ fn build_on_item_change(
     OnItemChange {
         item: row,
         change: change_dict,
-        location: PyRep::None,
+        location: None,
     }
 }
 
@@ -1851,6 +1859,11 @@ pub fn materialize_pending_notifications(
     resolved
         .into_iter()
         .filter_map(|notif| {
+            #[cfg(any(test, feature = "testkit"))]
+            crate::router::notify_registry::assert_registered_event_shape_if_registered(
+                &notif.event,
+                &notif.args,
+            );
             // Canonical internal `OnItemChange` uses 2 positional args `(row, change_dict)`
             // matching `cache_notifications.rs` (`client_compat` pads trailing `None` on TCP wire).
             if notif.event == OnItemChange::EVENT && notif.args.len() == 2 {
@@ -1999,7 +2012,7 @@ pub(crate) fn push_item_diffs_tx_effects(
     }
 
     for (owner_id, target) in bp_owners_to_notify {
-        let args = OnBlueprintsUpdated { owner_id }.into_args();
+        let args = crate::router::notify_registry::typed_args_checked(OnBlueprintsUpdated { owner_id });
         match target {
             ProjectedTarget::Character(cid) => {
                 effects.notify_character(

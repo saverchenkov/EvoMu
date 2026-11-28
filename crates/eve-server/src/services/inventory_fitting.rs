@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::formulas::abyssal_attribute_roll;
-use crate::router::notify_registry::{OnModuleFitted, ProcessInventoryChange};
+use crate::router::notify_registry::OnModuleFitted;
 use crate::router::{BoundObjectEntry, NotificationTarget, ServerContext};
 use crate::services::notify_emitters_skills_trade_godma::{
     emit_ship_fitting_attr_changes_for_ship, emit_ship_fitting_attr_changes_from_fit,
@@ -2123,24 +2123,20 @@ pub(crate) async fn handle_invbroker_add(
                     } else {
                         ctx.invalidate_ship_fitting_cache_only(new_loc);
                     }
-                    ctx.emit_typed(
-                        NotificationTarget::Character(char_id),
-                        ProcessInventoryChange {
-                            arg0: PyRep::Integer(merged_item.item_id),
-                            arg1: PyRep::Integer(merged_item.location_id),
-                            arg2: PyRep::Integer(merged_item.flag as i64),
-                            arg3: None,
-                        },
+                    crate::router::notify_registry::emit_process_inventory_change(
+                        ctx,
+                        char_id,
+                        &merged_item,
+                        orig_source_loc_id,
+                        merged_item.flag as i64,
                     );
                     if let Some(dst_owner) = dst_ship_bay_foreign_owner {
-                        ctx.emit_typed(
-                            NotificationTarget::Character(dst_owner),
-                            ProcessInventoryChange {
-                                arg0: PyRep::Integer(merged_item.item_id),
-                                arg1: PyRep::Integer(merged_item.location_id),
-                                arg2: PyRep::Integer(merged_item.flag as i64),
-                                arg3: None,
-                            },
+                        crate::router::notify_registry::emit_process_inventory_change(
+                            ctx,
+                            dst_owner,
+                            &merged_item,
+                            orig_source_loc_id,
+                            merged_item.flag as i64,
                         );
                     }
                     Some(Ok(PyRep::keyval([
@@ -2266,12 +2262,12 @@ pub(crate) async fn handle_invbroker_add(
                     {
                         return Some(Ok(build_rep(false)));
                     }
-                    ctx.emit_typed(
-                        NotificationTarget::Character(char_id),
-                        ProcessInventoryChange {
-                            arg0: PyRep::Integer(updated.item_id), arg1: PyRep::Integer(updated.location_id),
-                            arg2: PyRep::Integer(updated.flag as i64), arg3: None,
-                        },
+                    crate::router::notify_registry::emit_process_inventory_change(
+                        ctx,
+                        char_id,
+                        &updated,
+                        old_loc_id,
+                        old_flag_id,
                     );
                     let extra_ship_owners: Vec<i64> = if did_split.is_some() || updated.item_id != effective_item_id {
                         dst_ship_bay_foreign_owner.into_iter().collect()
@@ -2280,12 +2276,12 @@ pub(crate) async fn handle_invbroker_add(
                     };
                     for (idx, &extra_owner) in extra_ship_owners.iter().enumerate() {
                         if extra_owner != char_id && !extra_ship_owners[..idx].contains(&extra_owner) {
-                            ctx.emit_typed(
-                                NotificationTarget::Character(extra_owner),
-                                ProcessInventoryChange {
-                                    arg0: PyRep::Integer(updated.item_id), arg1: PyRep::Integer(updated.location_id),
-                                    arg2: PyRep::Integer(updated.flag as i64), arg3: None,
-                                },
+                            crate::router::notify_registry::emit_process_inventory_change(
+                                ctx,
+                                extra_owner,
+                                &updated,
+                                old_loc_id,
+                                old_flag_id,
                             );
                         }
                     }

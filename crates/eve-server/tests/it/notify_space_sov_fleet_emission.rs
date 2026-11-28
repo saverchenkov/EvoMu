@@ -333,11 +333,12 @@ async fn test_structure_upwell_asset_safety_and_access_notifications() {
         }
     });
 
-    // 1. RenameStructure -> emits OnSlimItemChange(structureID, slimKeyVal).
+    // 1. RenameStructure -> emits OnSlimItemChange(oldSlim, newSlim).
     call(&ctx, &mut s1, "structureDeployment", "RenameStructure", &[PyRep::Integer(structure_id), PyRep::String("Jita Upwell Prime".into())]).await;
     let slim_changes = events(&ctx, P1, "OnSlimItemChange");
     assert_eq!(slim_changes.len(), 1);
-    assert_eq!(slim_changes[0][0], PyRep::Integer(structure_id));
+    assert_eq!(slim_changes[0][0].dict_get("itemID"), Some(&PyRep::Integer(structure_id)));
+    assert_ne!(slim_changes[0][0].dict_get("name"), Some(&PyRep::String("Jita Upwell Prime".into())));
     assert_eq!(slim_changes[0][1].dict_get("name"), Some(&PyRep::String("Jita Upwell Prime".into())));
     assert!(events(&ctx, p3, "OnSlimItemChange").is_empty());
 
@@ -633,7 +634,7 @@ async fn test_crimewatch_duels_kill_rights_and_bounties_notifications() {
     assert_eq!(events(&ctx, P2, "OnKillRightActivated"), vec![vec![]]);
 
     call(&ctx, &mut s1, "bountyProxy", "AddToBounty", &[PyRep::Integer(P2), PyRep::Real(200_000.0)]).await;
-    assert_eq!(events(&ctx, P2, "OnBountyPlaced"), vec![vec![PyRep::Integer(P1), PyRep::Integer(P2), PyRep::Real(200_000.0)]]);
+    assert_eq!(events(&ctx, P2, "OnBountyPlaced"), vec![vec![PyRep::Integer(P2)]]);
 
     let claimed = combat_crimewatch::claim_player_bounty_on_kill(&ctx, P1, P2, 587);
     assert!(claimed > 0.0);

@@ -813,7 +813,14 @@ fn resolve_campaign_error_cached_mods_sde_none_notifications_and_removed_fallbac
     let p_notifs = &ctx.pending_notifications.read().unwrap()[&p_win];
     assert!(p_notifs.iter().any(|n| {
         n.event == "OnInsurgencyCampaignUpdatedForLocation"
-            && n.args == vec![eve_proto::PyRep::Integer(402), eve_proto::PyRep::Integer(5)]
+            && n.args.len() == 1
+            && n.args[0].dict_get("campaignID") == Some(&eve_proto::PyRep::Integer(402))
+            && n.args[0].dict_get("state") == Some(&eve_proto::PyRep::Integer(5))
+            && matches!(
+                n.args[0].dict_get("coveredSolarsystemIDs"),
+                Some(eve_proto::PyRep::List(list))
+                    if list.contains(&eve_proto::PyRep::Integer(i64::from(sys_a)))
+            )
     }));
     assert!(p_notifs.iter().any(|n| {
         n.event == "OnInsurgencyStateChangedForFaction"

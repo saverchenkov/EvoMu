@@ -204,7 +204,18 @@ fn typed_issue_1562_and_sibling_notification_contracts() {
             OnSlimItemChange::EVENT,
             OnSlimItemChange {
                 scene: BallparkScene::try_solar_system(30_000_142).expect("non-zero scene"),
-                old_slim: PyRep::Integer(100_000_001),
+                old_slim: SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
+                    item_id: 100_000_001,
+                    type_id: 587,
+                    group_id: 25,
+                    category_id: 6,
+                    owner_id: 90_000_001,
+                    char_id: Some(90_000_001),
+                    corp_id: Some(98_000_001),
+                    alliance_id: None,
+                    name: "Rifter".into(),
+                })
+                .into_notify_arg(),
                 new_slim: SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
                     item_id: 100_000_001,
                     type_id: 587,
@@ -975,7 +986,18 @@ fn ballpark_marked_notifications_enforce_scene_field_and_registry_set() {
     assert!(OnSlimItemChange::IS_BALLPARK_SCOPED);
     let slim = OnSlimItemChange {
         scene,
-        old_slim: PyRep::Integer(100_000_001),
+        old_slim: SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
+            item_id: 100_000_001,
+            type_id: 587,
+            group_id: 25,
+            category_id: 6,
+            owner_id: 90_000_001,
+            char_id: Some(90_000_001),
+            corp_id: Some(98_000_001),
+            alliance_id: None,
+            name: "Rifter".into(),
+        })
+        .into_notify_arg(),
         new_slim: SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
             item_id: 100_000_001,
             type_id: 587,
@@ -1390,8 +1412,9 @@ fn count_notify_registry_pyrep_fields(src: &str) -> (usize, usize) {
 
 #[test]
 fn notify_registry_pyrep_field_count_respects_monotonic_ratchet() {
-    // Track 6a baseline: 179 PyRep + 16 Vec<PyRep> + 25 Option<PyRep> = 220 (must remain <= 237).
-    const PYREP_FIELD_BASELINE: usize = 220;
+    // Track 6b monotonic tightening: eliminated fake optional `arg2`/`arg3` & typed `key`
+    // on `OnClientNodeGraphUpdate`/`OnClientNodeGraphMessage` (194 PyRep + 23 Option<PyRep> = 217 <= 220 <= 237).
+    const PYREP_FIELD_BASELINE: usize = 217;
     const _: () = assert!(PYREP_FIELD_BASELINE <= 237);
 
     let src = include_str!("notify_registry.rs");
@@ -1425,4 +1448,103 @@ fn on_session_changed_sample_payloads_include_keyval() {
     let samples = (entry.sample_payloads)();
     assert!(samples.iter().any(|s| matches!(s.get(1), Some(PyRep::None))));
     assert!(samples.iter().any(|s| matches!(s.get(1), Some(PyRep::KeyVal(_)))));
+}
+
+#[test]
+#[should_panic(expected = "for event 'OnPlayerStateUpdated': sample[0] failed at arg[0]")]
+fn emit_typed_panics_on_mismatched_pyrep_arg() {
+    let ctx = crate::router::ServerContext::new();
+    let _ = ctx.emit_typed(
+        crate::router::NotificationTarget::Character(90_000_001),
+        super::notify_registry::OnPlayerStateUpdated {
+            player_state: PyRep::Integer(42),
+        },
+    );
+}
+
+#[test]
+#[should_panic(expected = "for event 'OnWeaponBanksChanged': sample[0] failed at arg[1]")]
+fn build_pending_typed_notification_panics_on_mismatched_pyrep_arg() {
+    let _ = super::notify_registry::build_pending_typed_notification(
+        90_000_001,
+        Some(1),
+        "charid",
+        1_335_000_000_000_000_00,
+        super::notify_registry::OnWeaponBanksChanged {
+            ship_id: 100_000_010,
+            info: PyRep::String("wrong_type".into()),
+        },
+    );
+}
+
+#[test]
+#[should_panic(expected = "for event 'OnPlayerStateUpdated': sample[0] failed at arg[0]")]
+fn emit_registered_to_char_panics_on_mismatched_pyrep_arg() {
+    let ctx = crate::router::ServerContext::new();
+    let _ = ctx.emit_registered_to_char(
+        90_000_001,
+        "OnPlayerStateUpdated",
+        "charid",
+        vec![PyRep::Integer(42)],
+    );
+}
+
+#[test]
+fn incomplete_sample_events_allowlist_ratchet() {
+    let allowlist = super::notify_shape_check::INCOMPLETE_SAMPLE_EVENTS;
+    assert_eq!(
+        allowlist.len(),
+        3,
+        "INCOMPLETE_SAMPLE_EVENTS may only shrink cleanly; observed: {allowlist:?}"
+    );
+    let registered: HashSet<&'static str> = all_registered_notifications()
+        .iter()
+        .map(|e| e.event)
+        .collect();
+    let mut seen = HashSet::new();
+    let trailing: Vec<&'static str> = super::notify_shape_check::INCOMPLETE_TRAILING_SLOT_DISCRIMINANTS
+        .iter()
+        .map(|(e, _)| *e)
+        .collect();
+    for &event in allowlist {
+        assert!(
+            seen.insert(event),
+            "duplicate entry '{event}' in INCOMPLETE_SAMPLE_EVENTS"
+        );
+        assert!(
+            registered.contains(event),
+            "allowlist entry '{event}' missing from all_registered_notifications()"
+        );
+        assert!(
+            trailing.contains(&event),
+            "allowlist entry '{event}' missing from INCOMPLETE_TRAILING_SLOT_DISCRIMINANTS"
+        );
+    }
+    assert_eq!(trailing.len(), allowlist.len());
+}
+
+#[test]
+fn deferred_6b2_emitter_compat_allowlist_ratchet() {
+    let deferred = super::notify_shape_check::DEFERRED_6B2_EMITTER_COMPAT_EVENTS;
+    assert_eq!(
+        deferred,
+        &[
+            "OnDeathzoneStateUpdate",
+            "OnFighterAddedToController",
+            "OnMissionsUpdated",
+            "OnProgressionTaskWidgetUpdate",
+            "OnTaleData",
+        ],
+        "DEFERRED_6B2_EMITTER_COMPAT_EVENTS must remain pinned at these exact 5 deferred emitters (or shrink toward 0 in 6b-2); observed: {deferred:?}"
+    );
+    let registered: HashSet<&'static str> = all_registered_notifications()
+        .iter()
+        .map(|e| e.event)
+        .collect();
+    for &event in deferred {
+        assert!(
+            registered.contains(event),
+            "deferred compat entry '{event}' missing from all_registered_notifications()"
+        );
+    }
 }

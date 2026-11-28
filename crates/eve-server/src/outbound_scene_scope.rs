@@ -746,7 +746,8 @@ impl ServerContext {
         notif: N,
     ) -> Vec<PendingMachoNotification> {
         let scope = resolve_ballpark_scope(scene, &notif);
-        self.notify_in_scene(target, N::EVENT, N::DEFAULT_ID_TYPE, notif.into_args(), Some(scope))
+        let args = crate::router::notify_registry::typed_args_checked(notif);
+        self.notify_in_scene(target, N::EVENT, N::DEFAULT_ID_TYPE, args, Some(scope))
     }
 
     pub(crate) fn default_notify_scene_scope(
@@ -879,7 +880,7 @@ impl ServerContext {
             target,
             <crate::router::notify_registry::OnGodmaShipEffect as crate::router::notify_registry::TypedNotification>::EVENT,
             <crate::router::notify_registry::OnGodmaShipEffect as crate::router::notify_registry::TypedNotification>::DEFAULT_ID_TYPE,
-            crate::router::notify_registry::TypedNotification::into_args(notif),
+            crate::router::notify_registry::typed_args_checked(notif),
             scope,
         )
     }

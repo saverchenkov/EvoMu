@@ -221,7 +221,20 @@ async fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
     emit_local_hack_progress_updated(&ctx, sys_id, 800_001, 1.5);
     emit_pvp_match_found_and_expiry(&ctx, char_id, 1_775_401_000);
     emit_pvp_matchmaking_failure(&ctx, char_id, 42);
-    emit_destiny_updates(&ctx, char_id, vec![PyRep::Integer(1)]);
+    emit_destiny_updates(
+        &ctx,
+        char_id,
+        vec![PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::Tuple(vec![
+                    PyRep::String("SetMaxSpeed".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::Real(250.0)]),
+                ]),
+            ])]),
+            PyRep::Bool(false),
+        ])],
+    );
     emit_cloak_module_force_deactivated(&ctx, char_id, "Decloaked", 1200.0);
     emit_component_removed_system_environment(&ctx, sys_id);
     emit_deathzone_state_update(&ctx, char_id, sys_id, ship_id, true, 15_000.0);

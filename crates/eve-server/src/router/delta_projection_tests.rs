@@ -914,7 +914,17 @@ fn recipient_resolution_filters_offline_sessions_and_materializes_macho_packets(
             event: "OnItemChange",
             id_type: "charid",
             args: vec![
-                PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(42))]),
+                eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(vec![
+                    PyRep::Integer(42),
+                    PyRep::Integer(34),
+                    PyRep::Integer(p1),
+                    PyRep::Integer(60_003_760),
+                    PyRep::Integer(4),
+                    PyRep::Integer(10),
+                    PyRep::Integer(18),
+                    PyRep::Integer(4),
+                    PyRep::String(String::new()),
+                ]),
                 PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]),
             ],
         }],
@@ -1607,4 +1617,19 @@ fn concurrent_cross_owner_fuel_rollback_never_notifies_unrelated_new_owner_r7_02
     }
     shadow_a.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
     shadow_b.assert_converged_with_world(&ctx.db, Some(&ctx.sde));
+}
+
+#[test]
+#[should_panic(expected = "Notification shape mismatch for event 'OnAccountChange'")]
+fn materialize_pending_notifications_panics_on_wrong_arity_registered_event() {
+    let _ = materialize_pending_notifications(
+        vec![ResolvedNotification {
+            recipient_char_id: 90_000_001,
+            recipient_user_id: Some(1),
+            event: "OnAccountChange",
+            id_type: "corpid",
+            args: vec![PyRep::String("cash".into())],
+        }],
+        unix_to_filetime(1_700_000_000),
+    );
 }

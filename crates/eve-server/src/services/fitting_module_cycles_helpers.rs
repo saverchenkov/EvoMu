@@ -316,10 +316,8 @@ pub(crate) async fn handle_survey_scanner_activation_with_excluded_dbuffs(
             let vol = ctx.sde.types.get(&ast.type_id).map(|t| t.volume).unwrap_or(0.1);
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                crate::router::notify_registry::OnAsteroidRevealedDetailed {
+                crate::router::notify_registry::OnAsteroidRevealed {
                     asteroid_id: ast.asteroid_id,
-                    type_id: ast.type_id as i64,
-                    quantity: ast.quantity,
                 },
             );
             scanned_asteroids.push(PyRep::keyval([

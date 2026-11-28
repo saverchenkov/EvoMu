@@ -423,6 +423,11 @@ pub(crate) fn build_switched_item_commit_notifications(
             None
         };
         active_fuel_reserves.observe_pre_emit_event(db_key, "OnItemChange", &spec.args);
+        #[cfg(any(test, feature = "testkit"))]
+        crate::router::notify_registry::assert_registered_event_shape_if_registered(
+            "OnItemChange",
+            &spec.args,
+        );
         notifs.push(assemble_pending_notification(
             recipient_char_id,
             Some(recipient_user_id),
@@ -434,12 +439,18 @@ pub(crate) fn build_switched_item_commit_notifications(
         if last_spec_idx_by_char.get(&recipient_char_id) == Some(&idx) {
             if let Some(ind_notifs) = industry_notifs_by_char.remove(&recipient_char_id) {
                 for (ind_user_id, monitor_id, entries) in ind_notifs {
+                    let mat_args = vec![PyRep::Integer(monitor_id), PyRep::Dict(entries)];
+                    #[cfg(any(test, feature = "testkit"))]
+                    crate::router::notify_registry::assert_registered_event_shape_if_registered(
+                        "OnIndustryMaterials",
+                        &mat_args,
+                    );
                     notifs.push(assemble_pending_notification(
                         recipient_char_id,
                         Some(ind_user_id),
                         "OnIndustryMaterials",
                         "charid",
-                        vec![PyRep::Integer(monitor_id), PyRep::Dict(entries)],
+                        mat_args,
                         now_ft,
                     ));
                 }
@@ -447,6 +458,11 @@ pub(crate) fn build_switched_item_commit_notifications(
         }
         if let Some(multi_args) = multi_args {
             active_fuel_reserves.observe_pre_emit_event(db_key, "OnMultipleItemChange", &multi_args);
+            #[cfg(any(test, feature = "testkit"))]
+            crate::router::notify_registry::assert_registered_event_shape_if_registered(
+                "OnMultipleItemChange",
+                &multi_args,
+            );
             notifs.push(assemble_pending_notification(
                 recipient_char_id,
                 Some(recipient_user_id),
@@ -459,12 +475,18 @@ pub(crate) fn build_switched_item_commit_notifications(
     }
 
     for bp_spec in blueprint_specs {
+        let bp_args = vec![PyRep::Integer(bp_spec.owner_id)];
+        #[cfg(any(test, feature = "testkit"))]
+        crate::router::notify_registry::assert_registered_event_shape_if_registered(
+            "OnBlueprintsUpdated",
+            &bp_args,
+        );
         notifs.push(assemble_pending_notification(
             bp_spec.recipient_char_id,
             Some(bp_spec.recipient_user_id),
             "OnBlueprintsUpdated",
             "ownerID",
-            vec![PyRep::Integer(bp_spec.owner_id)],
+            bp_args,
             now_ft,
         ));
     }

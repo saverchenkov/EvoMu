@@ -537,6 +537,11 @@ pub fn emit_campaign_resolution_effects_core(
                     },
                 );
             } else {
+                let covered_systems: Vec<eve_proto::PyRep> = res
+                    .sys_list
+                    .iter()
+                    .map(|&s| eve_proto::PyRep::Integer(i64::from(s)))
+                    .collect();
                 crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
                     pending_notifications,
                     notify_tx,
@@ -544,9 +549,12 @@ pub fn emit_campaign_resolution_effects_core(
                     None,
                     "solarsystemid",
                     now_ft,
-                    crate::router::notify_registry::OnInsurgencyCampaignUpdatedForLocationFallback {
-                        campaign_id: res.campaign_id,
-                        state: 5,
+                    crate::router::notify_registry::OnInsurgencyCampaignUpdatedForLocation {
+                        campaign_snapshot: eve_proto::PyRep::keyval([
+                            ("campaignID", eve_proto::PyRep::Integer(res.campaign_id)),
+                            ("state", eve_proto::PyRep::Integer(5)),
+                            ("coveredSolarsystemIDs", eve_proto::PyRep::List(covered_systems)),
+                        ]),
                     },
                 );
             }

@@ -1074,9 +1074,20 @@ async fn test_rename_ship_kill_counter_ship_tree_and_masteries() {
     let notes = ctx.drain_notifications_for_char(C1);
     let slim_notif = notes
         .iter()
-        .find(|n| n.event == "OnSlimItemChange" && n.args.first().and_then(|a| a.as_i64()) == Some(100_000_001))
+        .find(|n| {
+            n.event == "OnSlimItemChange"
+                && n.args
+                    .first()
+                    .and_then(|a| a.dict_get("itemID"))
+                    .and_then(|v| v.as_i64())
+                    == Some(100_000_001)
+        })
         .expect("OnSlimItemChange for renamed ship");
     assert_eq!(slim_notif.args.len(), 2);
+    assert_ne!(
+        slim_notif.args[0].dict_get("name"),
+        Some(&PyRep::String("Wolfpack Leader".into()))
+    );
     assert_eq!(
         slim_notif.args[1].dict_get("name"),
         Some(&PyRep::String("Wolfpack Leader".into()))

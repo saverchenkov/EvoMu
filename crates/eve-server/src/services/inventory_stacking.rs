@@ -630,14 +630,12 @@ pub(crate) async fn handle_multi_add(
             .await;
         }
         if let Some(fin) = fin_opt {
-            ctx.emit_typed(
-                crate::router::NotificationTarget::Character(char_id),
-                crate::router::notify_registry::ProcessInventoryChange {
-                    arg0: PyRep::Integer(fin.item_id),
-                    arg1: PyRep::Integer(fin.location_id),
-                    arg2: PyRep::Integer(fin.flag as i64),
-                    arg3: None,
-                },
+            crate::router::notify_registry::emit_process_inventory_change(
+                ctx,
+                char_id,
+                &fin,
+                pre_item.location_id,
+                pre_item.flag as i64,
             );
             for (idx, extra_owner) in [dst_ship_bay_foreign_owner, src_ship_bay_owner]
                 .into_iter()
@@ -646,26 +644,22 @@ pub(crate) async fn handle_multi_add(
             {
                 let prev_dup = idx == 1 && dst_ship_bay_foreign_owner == Some(extra_owner);
                 if extra_owner != char_id && !prev_dup {
-                    ctx.emit_typed(
-                        crate::router::NotificationTarget::Character(extra_owner),
-                        crate::router::notify_registry::ProcessInventoryChange {
-                            arg0: PyRep::Integer(fin.item_id),
-                            arg1: PyRep::Integer(fin.location_id),
-                            arg2: PyRep::Integer(fin.flag as i64),
-                            arg3: None,
-                        },
+                    crate::router::notify_registry::emit_process_inventory_change(
+                        ctx,
+                        extra_owner,
+                        &fin,
+                        pre_item.location_id,
+                        pre_item.flag as i64,
                     );
                 }
             }
         } else if let Some(updated) = post_it {
-            ctx.emit_typed(
-                crate::router::NotificationTarget::Character(char_id),
-                crate::router::notify_registry::ProcessInventoryChange {
-                    arg0: PyRep::Integer(updated.item_id),
-                    arg1: PyRep::Integer(updated.location_id),
-                    arg2: PyRep::Integer(updated.flag as i64),
-                    arg3: None,
-                },
+            crate::router::notify_registry::emit_process_inventory_change(
+                ctx,
+                char_id,
+                &updated,
+                pre_item.location_id,
+                pre_item.flag as i64,
             );
             for (idx, extra_owner) in [dst_ship_bay_foreign_owner, src_ship_bay_owner]
                 .into_iter()
@@ -674,14 +668,12 @@ pub(crate) async fn handle_multi_add(
             {
                 let prev_dup = idx == 1 && dst_ship_bay_foreign_owner == Some(extra_owner);
                 if extra_owner != char_id && !prev_dup {
-                    ctx.emit_typed(
-                        crate::router::NotificationTarget::Character(extra_owner),
-                        crate::router::notify_registry::ProcessInventoryChange {
-                            arg0: PyRep::Integer(updated.item_id),
-                            arg1: PyRep::Integer(updated.location_id),
-                            arg2: PyRep::Integer(updated.flag as i64),
-                            arg3: None,
-                        },
+                    crate::router::notify_registry::emit_process_inventory_change(
+                        ctx,
+                        extra_owner,
+                        &updated,
+                        pre_item.location_id,
+                        pre_item.flag as i64,
                     );
                 }
             }
@@ -1194,14 +1186,12 @@ async fn handle_multi_add_auto_fit(
         ctx.invalidate_ship_fitting(ship_id);
         let rebuilt_fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
 
-        ctx.emit_typed(
-            crate::router::NotificationTarget::Character(char_id),
-            crate::router::notify_registry::ProcessInventoryChange {
-                arg0: PyRep::Integer(updated.item_id),
-                arg1: PyRep::Integer(updated.location_id),
-                arg2: PyRep::Integer(updated.flag as i64),
-                arg3: None,
-            },
+        crate::router::notify_registry::emit_process_inventory_change(
+            ctx,
+            char_id,
+            &updated,
+            old_loc,
+            updated.flag as i64,
         );
         let group_id = ctx
             .sde
@@ -2024,7 +2014,7 @@ pub async fn despawn_empty_jetcan_if_needed(
                     ]),
                 ])]),
                 wait_for_bubble: PyRep::Bool(false),
-                dogma_messages: None,
+                dogma_messages: Some(PyRep::List(Vec::new())),
                 extra: None,
             },
         );

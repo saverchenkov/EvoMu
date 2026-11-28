@@ -1454,15 +1454,20 @@ pub async fn broadcast_ship_skin_cosmetic_change(
         );
         let group_id = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(25);
         let build_slim = |skin_rep: PyRep, mat_rep: PyRep| {
-            crate::router::notify_registry::SlimItemKeyVal::from_pairs([
-                ("itemID", PyRep::Integer(ship_id)),
-                ("typeID", PyRep::Integer(i64::from(ship_type_id))),
-                ("groupID", PyRep::Integer(i64::from(group_id))),
-                ("categoryID", PyRep::Integer(i64::from(CATEGORY_SHIP))),
-                ("ownerID", PyRep::Integer(char_id)),
-                ("charID", PyRep::Integer(char_id)),
-                ("corpID", PyRep::Integer(corp_id)),
-                ("allianceID", alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            crate::router::notify_registry::SlimItemKeyVal::for_space_ship(
+                crate::router::notify_registry::SpaceShipSlimFields {
+                    item_id: ship_id,
+                    type_id: i64::from(ship_type_id),
+                    group_id: i64::from(group_id),
+                    category_id: i64::from(CATEGORY_SHIP),
+                    owner_id: char_id,
+                    char_id: Some(char_id),
+                    corp_id: Some(corp_id),
+                    alliance_id,
+                    name: String::new(),
+                },
+            )
+            .with_extra_pairs([
                 ("securityStatus", PyRep::Real(sec_status)),
                 ("skinID", skin_rep),
                 ("skinMaterialSetID", mat_rep),

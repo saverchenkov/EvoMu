@@ -5,9 +5,11 @@
 use crate::router::cache_notifications::{
     next_notification_seq_id, push_or_stage_pending_notification, PendingMachoNotification,
 };
+#[cfg(any(test, feature = "testkit"))]
+use crate::router::notify_registry::assert_registered_entry_shape;
 use crate::router::notify_registry::{
     encode_macho_packet_for_emit, find_registered_notification_checked,
-    push_session_notification_for_emit, TypedNotification,
+    push_session_notification_for_emit, typed_args_checked, TypedNotification,
 };
 use eve_db::lock_rank::AnyRwLock;
 use eve_proto::PyRep;
@@ -107,6 +109,7 @@ pub fn emit_typed_target_to_char_capped<N: TypedNotification>(
 
 /// Builds one fleet-scoped typed notification and enqueues/broadcasts it to each fleet member
 /// (used by dungeon/escalation hooks outside `ServerContext`, retaining the 256-entry FIFO bound).
+#[track_caller]
 pub fn emit_typed_to_fleet_members_core<N: TypedNotification>(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
@@ -120,7 +123,7 @@ pub fn emit_typed_to_fleet_members_core<N: TypedNotification>(
     }
     let now_ft = db.clock().now_blueos_filetime_ticks();
     let scene_scope = notif.scene_scope();
-    let args = notif.into_args();
+    let args = typed_args_checked(notif);
     let (packet, marshaled_packet) = encode_macho_packet_for_emit(
         fleet_id,
         None,
@@ -154,6 +157,7 @@ pub fn emit_typed_to_fleet_members_core<N: TypedNotification>(
 
 /// Broadcasts one typed notification to all in-space characters currently in `solar_system_id`
 /// outside [`ServerContext`] (used by expedition destruction hooks, retaining the 512-entry FIFO bound).
+#[track_caller]
 pub fn emit_typed_to_solar_system_in_space_core<N: TypedNotification>(
     db: &eve_db::WorldRepository,
     pending_notifications: &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
@@ -176,7 +180,7 @@ pub fn emit_typed_to_solar_system_in_space_core<N: TypedNotification>(
     let base_scope = notif
         .scene_scope()
         .or_else(|| crate::outbound_scene_scope::space_scope(Some(solar_system_id), None));
-    let args = notif.into_args();
+    let args = typed_args_checked(notif);
     for (cid, uid) in recips {
         if cid <= 0 {
             continue;
@@ -237,14 +241,17 @@ pub fn session_accepts_scene_scope(
 }
 
 /// Pushes a typed notification onto an active [`eve_machonet::SessionState`].
+#[track_caller]
 pub fn push_typed_session_notification<N: TypedNotification>(
     session: &mut eve_machonet::SessionState,
     notif: N,
 ) {
-    if !session_accepts_scene_scope(session, notif.scene_scope()) {
+    let scene_scope = notif.scene_scope();
+    let args = typed_args_checked(notif);
+    if !session_accepts_scene_scope(session, scene_scope) {
         return;
     }
-    push_session_notification_for_emit(session, N::EVENT, notif.into_args());
+    push_session_notification_for_emit(session, N::EVENT, args);
 }
 
 /// Flushes an already-constructed [`PendingMachoNotification`] onto an active [`eve_machonet::SessionState`].
@@ -288,6 +295,7 @@ fn build_pending_notification_for_event(
 
 /// Encodes a strongly typed notification into a wire-ready [`PendingMachoNotification`]
 /// without pushing it to any queue (used by callers applying custom queue coalescing).
+#[track_caller]
 pub fn build_pending_typed_notification<N: TypedNotification>(
     recipient_char_id: i64,
     user_id_opt: Option<u64>,
@@ -296,12 +304,13 @@ pub fn build_pending_typed_notification<N: TypedNotification>(
     notif: N,
 ) -> PendingMachoNotification {
     let scene_scope = notif.scene_scope();
+    let args = typed_args_checked(notif);
     build_pending_notification_for_event(
         recipient_char_id,
         user_id_opt,
         N::EVENT,
         id_type,
-        notif.into_args(),
+        args,
         created_filetime,
     )
     .with_scene_scope(scene_scope)
@@ -328,6 +337,7 @@ pub fn push_pending_char_notification_256(
 /// Encodes a registered notification by event name into a wire-ready [`PendingMachoNotification`]
 /// after verifying that `event` is registered in [`super::notify_registry::all_registered_notifications`]
 /// and `args.len()` satisfies its registered arity bounds.
+#[track_caller]
 pub fn build_pending_registered_notification(
     recipient_char_id: i64,
     user_id_opt: Option<u64>,
@@ -340,6 +350,8 @@ pub fn build_pending_registered_notification(
     if entry.is_ballpark_scoped {
         return None;
     }
+    #[cfg(any(test, feature = "testkit"))]
+    assert_registered_entry_shape(entry, &args);
     Some(build_pending_notification_for_event(
         recipient_char_id,
         user_id_opt,
@@ -350,6 +362,7 @@ pub fn build_pending_registered_notification(
     ))
 }
 
+#[track_caller]
 #[allow(clippy::too_many_arguments)]
 fn build_and_push_typed_notification<N: TypedNotification>(
     pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,

@@ -100,26 +100,27 @@ pub fn notify_moderate_outpost_bc_bonus(
     } else {
         0.0
     };
+    let item_ref = PyRep::keyval([("itemID", PyRep::Integer(ship_id))]);
+    let dbuff_val = if active {
+        f64::from(MODERATE_OUTPOST_BC_SKILL_DBUFF_ID)
+    } else {
+        0.0
+    };
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnAttributes {
-            changes: PyRep::Dict(vec![(
-                PyRep::Integer(ship_id),
-                PyRep::Dict(vec![
-                    (
-                        PyRep::String("moderateOutpostDbuffID".into()),
-                        PyRep::Integer(if active {
-                            i64::from(MODERATE_OUTPOST_BC_SKILL_DBUFF_ID)
-                        } else {
-                            0
-                        }),
-                    ),
-                    (
-                        PyRep::String("battlecruiserRoleBonusPct".into()),
-                        PyRep::Real(effective_bonus_pct),
-                    ),
+            changes: PyRep::List(vec![
+                PyRep::Tuple(vec![
+                    PyRep::String("moderateOutpostDbuffID".into()),
+                    item_ref.clone(),
+                    PyRep::Real(dbuff_val),
                 ]),
-            )]),
+                PyRep::Tuple(vec![
+                    PyRep::String("battlecruiserRoleBonusPct".into()),
+                    item_ref,
+                    PyRep::Real(effective_bonus_pct),
+                ]),
+            ]),
         },
     );
 }

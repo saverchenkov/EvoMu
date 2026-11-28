@@ -726,10 +726,10 @@ pub async fn handle_ess_link(
             post_reserve_cents,
             now_u,
         );
-        let ess_data = PyRep::keyval([
-            ("solarSystemID", PyRep::Integer(sys_id as i64)),
-            ("mainBank", PyRep::Real(post_main_cents.to_wire_f64())),
-            ("reserveBank", PyRep::Real(post_reserve_cents.to_wire_f64())),
+        let ess_data = PyRep::Dict(vec![
+            (PyRep::String("solarSystemID".into()), PyRep::Integer(sys_id as i64)),
+            (PyRep::String("mainBank".into()), PyRep::Real(post_main_cents.to_wire_f64())),
+            (PyRep::String("reserveBank".into()), PyRep::Real(post_reserve_cents.to_wire_f64())),
         ]);
         super::notify_emitters_combat_ess_progression::emit_system_ess_data_changed(ctx, sys_id as i64, ess_data);
     }

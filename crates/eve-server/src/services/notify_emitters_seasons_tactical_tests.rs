@@ -159,13 +159,14 @@ fn season_slash_commands_transitions_and_challenge_expiry() {
 
     // Reconcile FSD reload and challenge expiration
     reconcile_seasons_on_fsd_reload(&ctx, char_id);
-    emit_expired_challenges(&ctx, char_id, vec![(77, PyRep::Integer(88))]);
+    let challenge_kv = PyRep::keyval([("challengeID", PyRep::Integer(88))]);
+    emit_expired_challenges(&ctx, char_id, vec![(77, challenge_kv.clone())]);
     let fsd_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(fsd_notifs
         .iter()
         .any(|n| n.event == "OnSeasonsFsdDataChanged"));
     assert!(fsd_notifs.iter().any(|n| n.event == "OnChallengeExpired"
-        && n.args == vec![PyRep::Integer(77), PyRep::Integer(88)]));
+        && n.args == vec![PyRep::Integer(77), challenge_kv.clone()]));
 }
 
 #[test]

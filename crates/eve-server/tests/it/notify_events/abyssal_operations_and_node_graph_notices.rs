@@ -374,7 +374,7 @@ async fn test_parity_notifies_operations_and_node_graphs() {
     assert!(!find_notif(&msg_n, "OnClientNodeGraphUpdate").is_empty());
     assert_eq!(
         find_notif(&msg_n, "OnClientNodeGraphMessage")
-            .get(2)
+            .get(1)
             .and_then(|v| v.as_str()),
         Some("pocket_entered")
     );

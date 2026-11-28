@@ -723,7 +723,7 @@ fn strip_ship_fitting(
                     char_id,
                     OnItemsChanged::EVENT,
                     OnItemsChanged::DEFAULT_ID_TYPE,
-                    notif.into_args(),
+                    crate::router::notify_registry::typed_args_checked(notif),
                 );
             }
         }

@@ -149,7 +149,7 @@ pub fn emit_char_station_notification(
             c.and_then(|c| c.war_faction_id),
         )
     });
-    let guest_row = PyRep::List(vec![
+    let guest_row = PyRep::Tuple(vec![
         PyRep::Integer(char_id),
         PyRep::Integer(corp_id),
         alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
@@ -321,11 +321,14 @@ pub fn emit_main_bank_player_link_disconnected(
     reason: &str,
     link_id: i64,
 ) {
-    let payload = PyRep::keyval([
-        ("characterID", PyRep::Integer(char_id)),
-        ("solarSystemID", PyRep::Integer(i64::from(system_id))),
-        ("reason", PyRep::String(reason.to_string())),
-        ("linkID", PyRep::Integer(link_id)),
+    let payload = PyRep::Dict(vec![
+        (PyRep::String("characterID".into()), PyRep::Integer(char_id)),
+        (
+            PyRep::String("solarSystemID".into()),
+            PyRep::Integer(i64::from(system_id)),
+        ),
+        (PyRep::String("reason".into()), PyRep::String(reason.to_string())),
+        (PyRep::String("linkID".into()), PyRep::Integer(link_id)),
     ]);
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
@@ -340,10 +343,13 @@ pub fn emit_reserve_bank_player_link_disconnected(
     system_id: u32,
     reason: i64,
 ) {
-    let payload = PyRep::keyval([
-        ("characterID", PyRep::Integer(char_id)),
-        ("solarSystemID", PyRep::Integer(i64::from(system_id))),
-        ("reason", PyRep::Integer(reason)),
+    let payload = PyRep::Dict(vec![
+        (PyRep::String("characterID".into()), PyRep::Integer(char_id)),
+        (
+            PyRep::String("solarSystemID".into()),
+            PyRep::Integer(i64::from(system_id)),
+        ),
+        (PyRep::String("reason".into()), PyRep::Integer(reason)),
     ]);
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
@@ -358,10 +364,13 @@ pub fn emit_main_bank_player_hack_success(
     system_id: u32,
     link_id: i64,
 ) {
-    let payload = PyRep::keyval([
-        ("characterID", PyRep::Integer(char_id)),
-        ("solarSystemID", PyRep::Integer(i64::from(system_id))),
-        ("linkID", PyRep::Integer(link_id)),
+    let payload = PyRep::Dict(vec![
+        (PyRep::String("characterID".into()), PyRep::Integer(char_id)),
+        (
+            PyRep::String("solarSystemID".into()),
+            PyRep::Integer(i64::from(system_id)),
+        ),
+        (PyRep::String("linkID".into()), PyRep::Integer(link_id)),
     ]);
     ctx.emit_typed(
         NotificationTarget::Character(char_id),

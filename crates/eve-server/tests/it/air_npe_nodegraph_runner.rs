@@ -254,7 +254,7 @@ async fn air_npe_server_nodegraph_runner_full_tutorial_to_completion() {
     assert!(cin_notifs.iter().any(|(e, _)| e == "OnClientNodeGraphUpdate"));
     assert!(cin_notifs.iter().any(|(e, args)| {
         e == "OnClientNodeGraphMessage"
-            && args.get(2).and_then(|a| a.as_str()) == Some("pocket_entered")
+            && args.get(1).and_then(|a| a.as_str()) == Some("pocket_entered")
     }));
 
     assert_eq!(sess.station_id, None);
