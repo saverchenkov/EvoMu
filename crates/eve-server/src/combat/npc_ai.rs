@@ -1563,7 +1563,9 @@ fn collect_ai_step_inputs(
     sys_id: u32,
     npc_ids: &HashSet<i64>,
 ) -> (HashMap<i64, AiBallKinematics>, Vec<(i64, DVec3, f64)>) {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return (HashMap::new(), Vec::new());
+    };
     let view = sys_handle.view();
     let (mut ball_kinematics, mut cand_targets): (
         HashMap<i64, AiBallKinematics>,
@@ -1944,7 +1946,9 @@ fn apply_ai_step_world_effects(
     dmg_actions: Vec<AiDamageAction>,
     ball_kinematics: &HashMap<i64, AiBallKinematics>,
 ) -> Vec<(i64, i64, Ball)> {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Vec::new();
+    };
     let target_sigs: HashMap<i64, f64> = ball_kinematics
         .iter()
         .map(|(&id, k)| (id, k.target_sig_radius))

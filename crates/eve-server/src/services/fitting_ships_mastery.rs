@@ -564,7 +564,15 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         format!("Cannot eject from ship {old_ship_id}: no active solar system"),
                     )));
                 };
-                let sys_h = ctx.systems.get_or_spawn(sys_id);
+                let Some(sys_h) = ctx.systems.get_handle(sys_id) else {
+                    return Some(Err(BridgeRpcError::ship_not_in_space(
+                        old_ship_id,
+                        Some(char_id),
+                        Some(sys_id),
+                        "Eject",
+                        format!("Active ship {old_ship_id} has no live ballpark entity in solar system {sys_id}"),
+                    )));
+                };
                 let Ok(Some((_, cur_b))) = sys_h.get_ball_snapshot(old_ship_id).await else {
                     return Some(Err(BridgeRpcError::ship_not_in_space(
                         old_ship_id,
@@ -744,71 +752,85 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             );
             if dock_opt.is_none() {
                 if let Some(sys_id) = sys_opt {
-                    let sys = ctx.systems.get_or_spawn(sys_id);
-                    let _ = sys.stop_non_warp_module_cycles(old_ship_id).await;
-                    let cycle_mods = sys.active_cycle_module_ids_for_ship(old_ship_id);
-                    for mid in cycle_mods {
-                        let _ = sys.remove_module_cycle(old_ship_id, mid).await;
+                    if let Some(sys) = ctx.systems.get_handle(sys_id) {
+                        let _ = sys.stop_non_warp_module_cycles(old_ship_id).await;
+                        let cycle_mods = sys.active_cycle_module_ids_for_ship(old_ship_id);
+                        for mid in cycle_mods {
+                            let _ = sys.remove_module_cycle(old_ship_id, mid).await;
+                        }
+                        let _ = sys.clear_target_locks(old_ship_id).await;
+                        crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+                            ctx,
+                            char_id,
+                            old_ship_id,
+                            sys_id,
+                        );
+                        let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(
+                            ctx,
+                            char_id,
+                            Some(sys_id),
+                            old_ship_id,
+                        );
+                        let _ = sys
+                            .set_movement_mode(old_ship_id, eve_destiny::MovementMode::Stop)
+                            .await;
+                        let old_pos = sys
+                            .get_ball_snapshot(old_ship_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|(_, b)| b.position)
+                            .or(live_eject_pos)
+                            .unwrap_or(DVec3::ZERO);
+                        let pod_pos = DVec3::new(old_pos.x + 150.0, old_pos.y, old_pos.z);
+                        ctx.db.with_mut_snapshot(|snap| {
+                            snap.item_positions.insert(old_ship_id, old_pos.to_array());
+                            snap.item_positions.insert(capsule_id, pod_pos.to_array());
+                            crate::sp6_lifecycle::enter_space_in_snap(snap, capsule_id, sys_id);
+                        });
+                        let (pod_ball, pod_cs) = build_ejected_capsule_ball_and_combat_state(
+                            ctx,
+                            char_id,
+                            capsule_id,
+                            pod_pos,
+                        );
+                        let pod_slim = ctx.build_ship_slim_meta(char_id, 670);
+                        let _ = sys
+                            .spawn_ball_with_meta(pod_ball, pod_cs, pod_slim)
+                            .await;
+                        // Transfer observer registration and pre-handoff events to `capsule_id`,
+                        // ensuring one incremental `AddBalls2` without emitting `SetState` (`#992`, `HF1005-02`).
+                        handoff_in_space_pilot_observer(&sys, old_ship_id, capsule_id, true).await;
+                        let vacated_meta =
+                            build_vacated_ship_slim_meta(ctx, &sys, char_id, old_ship_id);
+                        let slim_changed = sys
+                            .change_slim_item(old_ship_id, vacated_meta)
+                            .await
+                            .unwrap_or(false);
+                        let slim_ev = eve_destiny::DestinyEvent::OnSlimItemChange { ball_id: old_ship_id };
+                        if !slim_changed {
+                            let _ = sys.emit_destiny_event(capsule_id, slim_ev.clone()).await;
+                        }
+                        let inter_ev = eve_destiny::DestinyEvent::SetBallInteractive {
+                            ball_id: old_ship_id,
+                            is_interactive: false,
+                        };
+                        let _ = sys.emit_destiny_event(capsule_id, inter_ev.clone()).await;
+                        let _ = sys.emit_packaged_actions(capsule_id, vec![slim_ev, inter_ev]).await;
+                    } else {
+                        crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+                            ctx,
+                            char_id,
+                            old_ship_id,
+                            sys_id,
+                        );
+                        let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(
+                            ctx,
+                            char_id,
+                            Some(sys_id),
+                            old_ship_id,
+                        );
                     }
-                    let _ = sys.clear_target_locks(old_ship_id).await;
-                    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
-                        ctx,
-                        char_id,
-                        old_ship_id,
-                        sys_id,
-                    );
-                    let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(
-                        ctx,
-                        char_id,
-                        Some(sys_id),
-                        old_ship_id,
-                    );
-                    let _ = sys
-                        .set_movement_mode(old_ship_id, eve_destiny::MovementMode::Stop)
-                        .await;
-                    let old_pos = sys
-                        .get_ball_snapshot(old_ship_id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|(_, b)| b.position)
-                        .or(live_eject_pos)
-                        .unwrap_or(DVec3::ZERO);
-                    let pod_pos = DVec3::new(old_pos.x + 150.0, old_pos.y, old_pos.z);
-                    ctx.db.with_mut_snapshot(|snap| {
-                        snap.item_positions.insert(old_ship_id, old_pos.to_array());
-                        snap.item_positions.insert(capsule_id, pod_pos.to_array());
-                        crate::sp6_lifecycle::enter_space_in_snap(snap, capsule_id, sys_id);
-                    });
-                    let (pod_ball, pod_cs) = build_ejected_capsule_ball_and_combat_state(
-                        ctx,
-                        char_id,
-                        capsule_id,
-                        pod_pos,
-                    );
-                    let pod_slim = ctx.build_ship_slim_meta(char_id, 670);
-                    let _ = sys
-                        .spawn_ball_with_meta(pod_ball, pod_cs, pod_slim)
-                        .await;
-                    // Transfer observer registration and pre-handoff events to `capsule_id`,
-                    // ensuring one incremental `AddBalls2` without emitting `SetState` (`#992`, `HF1005-02`).
-                    handoff_in_space_pilot_observer(&sys, old_ship_id, capsule_id, true).await;
-                    let vacated_meta =
-                        build_vacated_ship_slim_meta(ctx, &sys, char_id, old_ship_id);
-                    let slim_changed = sys
-                        .change_slim_item(old_ship_id, vacated_meta)
-                        .await
-                        .unwrap_or(false);
-                    let slim_ev = eve_destiny::DestinyEvent::OnSlimItemChange { ball_id: old_ship_id };
-                    if !slim_changed {
-                        let _ = sys.emit_destiny_event(capsule_id, slim_ev.clone()).await;
-                    }
-                    let inter_ev = eve_destiny::DestinyEvent::SetBallInteractive {
-                        ball_id: old_ship_id,
-                        is_interactive: false,
-                    };
-                    let _ = sys.emit_destiny_event(capsule_id, inter_ev.clone()).await;
-                    let _ = sys.emit_packaged_actions(capsule_id, vec![slim_ev, inter_ev]).await;
                 }
             }
 
@@ -1146,92 +1168,105 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                 prev,
                             );
                             if let Some(sys_id) = session.solar_system_id {
-                                let _ = ctx.systems.get_or_spawn(sys_id).stop_non_warp_module_cycles(prev).await;
+                                if let Some(sys) = ctx.systems.get_handle(sys_id) {
+                                    let _ = sys.stop_non_warp_module_cycles(prev).await;
+                                }
                             }
                         }
                         if prev != sid && session.station_id.is_none() && session.structure_id.is_none() {
                             if let Some(sys_id) = session.solar_system_id {
-                                let sys = ctx.systems.get_or_spawn(sys_id);
-                                let cycle_mods = sys.active_cycle_module_ids_for_ship(prev);
-                                for mid in cycle_mods {
-                                    let _ = sys.remove_module_cycle(prev, mid).await;
-                                }
-                                let _ = sys.clear_target_locks(prev).await;
-                                crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
-                                    ctx, char_id, prev, sys_id,
-                                );
-                                let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(
-                                    ctx,
-                                    char_id,
-                                    Some(sys_id),
-                                    prev,
-                                );
-                                if !was_capsule {
-                                    let _ = sys
-                                        .set_movement_mode(prev, eve_destiny::MovementMode::Stop)
-                                        .await;
-                                }
-                                // Transfer observer registration and pre-handoff events to `sid`
-                                // before `take_ball(prev)` so `RemoveBall(prev)` and `OnSlimItemChange`
-                                // flow incrementally (`#992`, `HF1005-02`) without `SetState` or stranded events.
-                                handoff_in_space_pilot_observer(&sys, prev, sid, false).await;
-                                let mut pkg_events = Vec::new();
-                                if was_capsule {
-                                    let _ = sys.take_ball(prev).await;
-                                } else {
-                                    if let Ok(Some((_, prev_ball))) = sys.get_ball_snapshot(prev).await {
+                                if let Some(sys) = ctx.systems.get_handle(sys_id) {
+                                    let cycle_mods = sys.active_cycle_module_ids_for_ship(prev);
+                                    for mid in cycle_mods {
+                                        let _ = sys.remove_module_cycle(prev, mid).await;
+                                    }
+                                    let _ = sys.clear_target_locks(prev).await;
+                                    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+                                        ctx, char_id, prev, sys_id,
+                                    );
+                                    let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(
+                                        ctx,
+                                        char_id,
+                                        Some(sys_id),
+                                        prev,
+                                    );
+                                    if !was_capsule {
+                                        let _ = sys
+                                            .set_movement_mode(prev, eve_destiny::MovementMode::Stop)
+                                            .await;
+                                    }
+                                    // Transfer observer registration and pre-handoff events to `sid`
+                                    // before `take_ball(prev)` so `RemoveBall(prev)` and `OnSlimItemChange`
+                                    // flow incrementally (`#992`, `HF1005-02`) without `SetState` or stranded events.
+                                    handoff_in_space_pilot_observer(&sys, prev, sid, false).await;
+                                    let mut pkg_events = Vec::new();
+                                    if was_capsule {
+                                        let _ = sys.take_ball(prev).await;
+                                    } else {
+                                        if let Ok(Some((_, prev_ball))) = sys.get_ball_snapshot(prev).await {
+                                            ctx.db.with_mut_snapshot(|snap| {
+                                                snap.item_positions.insert(prev, prev_ball.position.to_array());
+                                            });
+                                        }
+                                        let vacated_meta =
+                                            build_vacated_ship_slim_meta(ctx, &sys, char_id, prev);
+                                        let prev_slim_changed = sys
+                                            .change_slim_item(prev, vacated_meta)
+                                            .await
+                                            .unwrap_or(false);
+                                        let prev_slim_ev =
+                                            eve_destiny::DestinyEvent::OnSlimItemChange { ball_id: prev };
+                                        if !prev_slim_changed {
+                                            let _ = sys.emit_destiny_event(sid, prev_slim_ev.clone()).await;
+                                        }
+                                        let prev_inter_ev =
+                                            eve_destiny::DestinyEvent::SetBallInteractive {
+                                                ball_id: prev,
+                                                is_interactive: false,
+                                            };
+                                        let _ = sys.emit_destiny_event(sid, prev_inter_ev.clone()).await;
+                                        pkg_events.push(prev_slim_ev);
+                                        pkg_events.push(prev_inter_ev);
+                                    }
+                                    let sid_type_id = ctx
+                                        .db
+                                        .with_snapshot(|s| s.items.get(&sid).map(|i| i.type_id))
+                                        .unwrap_or(0);
+                                    if let Ok(Some((_, sid_ball))) = sys.get_ball_snapshot(sid).await {
                                         ctx.db.with_mut_snapshot(|snap| {
-                                            snap.item_positions.insert(prev, prev_ball.position.to_array());
+                                            snap.item_positions.insert(sid, sid_ball.position.to_array());
+                                            crate::sp6_lifecycle::enter_space_in_snap(snap, sid, sys_id);
                                         });
                                     }
-                                    let vacated_meta =
-                                        build_vacated_ship_slim_meta(ctx, &sys, char_id, prev);
-                                    let prev_slim_changed = sys
-                                        .change_slim_item(prev, vacated_meta)
+                                    let boarded_slim = ctx.build_ship_slim_meta(char_id, sid_type_id);
+                                    let slim_changed = sys
+                                        .change_slim_item(sid, boarded_slim)
                                         .await
                                         .unwrap_or(false);
-                                    let prev_slim_ev =
-                                        eve_destiny::DestinyEvent::OnSlimItemChange { ball_id: prev };
-                                    if !prev_slim_changed {
-                                        let _ = sys.emit_destiny_event(sid, prev_slim_ev.clone()).await;
+                                    let slim_ev =
+                                        eve_destiny::DestinyEvent::OnSlimItemChange { ball_id: sid };
+                                    if !slim_changed {
+                                        let _ = sys.emit_destiny_event(sid, slim_ev.clone()).await;
                                     }
-                                    let prev_inter_ev =
-                                        eve_destiny::DestinyEvent::SetBallInteractive {
-                                            ball_id: prev,
-                                            is_interactive: false,
-                                        };
-                                    let _ = sys.emit_destiny_event(sid, prev_inter_ev.clone()).await;
-                                    pkg_events.push(prev_slim_ev);
-                                    pkg_events.push(prev_inter_ev);
+                                    let inter_ev = eve_destiny::DestinyEvent::SetBallInteractive {
+                                        ball_id: sid,
+                                        is_interactive: true,
+                                    };
+                                    let _ = sys.emit_destiny_event(sid, inter_ev.clone()).await;
+                                    pkg_events.push(slim_ev);
+                                    pkg_events.push(inter_ev);
+                                    let _ = sys.emit_packaged_actions(sid, pkg_events).await;
+                                } else {
+                                    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+                                        ctx, char_id, prev, sys_id,
+                                    );
+                                    let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(
+                                        ctx,
+                                        char_id,
+                                        Some(sys_id),
+                                        prev,
+                                    );
                                 }
-                                let sid_type_id = ctx
-                                    .db
-                                    .with_snapshot(|s| s.items.get(&sid).map(|i| i.type_id))
-                                    .unwrap_or(0);
-                                if let Ok(Some((_, sid_ball))) = sys.get_ball_snapshot(sid).await {
-                                    ctx.db.with_mut_snapshot(|snap| {
-                                        snap.item_positions.insert(sid, sid_ball.position.to_array());
-                                        crate::sp6_lifecycle::enter_space_in_snap(snap, sid, sys_id);
-                                    });
-                                }
-                                let boarded_slim = ctx.build_ship_slim_meta(char_id, sid_type_id);
-                                let slim_changed = sys
-                                    .change_slim_item(sid, boarded_slim)
-                                    .await
-                                    .unwrap_or(false);
-                                let slim_ev =
-                                    eve_destiny::DestinyEvent::OnSlimItemChange { ball_id: sid };
-                                if !slim_changed {
-                                    let _ = sys.emit_destiny_event(sid, slim_ev.clone()).await;
-                                }
-                                let inter_ev = eve_destiny::DestinyEvent::SetBallInteractive {
-                                    ball_id: sid,
-                                    is_interactive: true,
-                                };
-                                let _ = sys.emit_destiny_event(sid, inter_ev.clone()).await;
-                                pkg_events.push(slim_ev);
-                                pkg_events.push(inter_ev);
-                                let _ = sys.emit_packaged_actions(sid, pkg_events).await;
                             }
                         }
                     }
@@ -1244,12 +1279,12 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                 .with_snapshot(|s| s.items.get(&sid).map(|i| i.type_id))
                                 .unwrap_or(0);
                             if sid_type_id > 0 {
-                                let boarded_cs =
-                                    ctx.build_ship_combat_state(char_id, sid, sid_type_id);
-                                let sync_ref = boarded_cs.clone();
-                                let sys_h = ctx.systems.get_or_spawn(sys_id);
-                                if let Ok(Some(updated_cs)) = sys_h
-                                    .modify_combat_state(sid, move |cs| {
+                                if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
+                                    let boarded_cs =
+                                        ctx.build_ship_combat_state(char_id, sid, sid_type_id);
+                                    let sync_ref = boarded_cs.clone();
+                                    if let Ok(Some(updated_cs)) = sys_h
+                                        .modify_combat_state(sid, move |cs| {
                                         let scale_attr = |cur: f64,
                                                           prev_max: f64,
                                                           new_max: f64,
@@ -1315,13 +1350,14 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                             boarded_cs.base_structure_resonance;
                                     })
                                     .await
-                                {
-                                    let _ = sys_h.try_sync_ship_ballpark_stats(sid, &sync_ref);
-                                    crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
-                                        &ctx.db,
-                                        sys_id,
-                                        std::iter::once((sid, &updated_cs)),
-                                    );
+                                    {
+                                        let _ = sys_h.try_sync_ship_ballpark_stats(sid, &sync_ref);
+                                        crate::sp6_lifecycle::persist_existing_ship_combat_hp_for_system_in_db(
+                                            &ctx.db,
+                                            sys_id,
+                                            std::iter::once((sid, &updated_cs)),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1433,10 +1469,13 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 }
             };
             let supplied_password = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
-            let sys = ctx.systems.get_or_spawn(sys_id);
+            let not_in_space_err = || BridgeRpcError { code: "ObjectNotInSpace".into(), message: "Active ship not in space".into(), client_error: None };
+            let Some(sys) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(not_in_space_err()));
+            };
             let (active_pos, active_radius) = match sys.get_ball_snapshot(active_ship_id).await {
                 Ok(Some((_, b))) => (b.position, b.radius.max(0.0)),
-                _ => return Some(Err(BridgeRpcError { code: "ObjectNotInSpace".into(), message: "Active ship not in space".into(), client_error: None })),
+                _ => return Some(Err(not_in_space_err())),
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let (type_id, parent_id, item_owner) = {
@@ -2097,8 +2136,9 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 Err(e) => return Some(Err(e)),
             };
             for (sys_id, ball_id) in balls_to_remove {
-                let handle = ctx.systems.get_or_spawn(sys_id);
-                handle.try_remove_ball(ball_id);
+                if let Some(handle) = ctx.systems.get_handle(sys_id) {
+                    handle.try_remove_ball(ball_id);
+                }
             }
             for old_item in &trashed {
                 if old_item.location_id > 0 {

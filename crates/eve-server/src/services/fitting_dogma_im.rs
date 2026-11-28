@@ -1571,12 +1571,13 @@ pub(crate) async fn handle_dogma_im(
             if let Some(sys_id) = session.solar_system_id {
                 let loc_opt = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).map(|i| i.location_id));
                 if let Some(loc) = loc_opt {
-                    let sys = ctx.systems.get_or_spawn(sys_id);
-                    if sys.has_active_module_cycle_sync(loc, item_id) {
-                        return Some(Err(BridgeRpcError { code: "ModuleIsActive".into(), message: format!("Module {item_id} cannot be destroyed while active"), client_error: None }));
-                    }
-                    if sys.has_active_nanite_repair_sync(loc, item_id) {
-                        return Some(Err(BridgeRpcError { code: "ModuleBeingRepaired".into(), message: format!("Module {item_id} cannot be destroyed while undergoing nanite repair"), client_error: None }));
+                    if let Some(sys) = ctx.systems.get_handle(sys_id) {
+                        if sys.has_active_module_cycle_sync(loc, item_id) {
+                            return Some(Err(BridgeRpcError { code: "ModuleIsActive".into(), message: format!("Module {item_id} cannot be destroyed while active"), client_error: None }));
+                        }
+                        if sys.has_active_nanite_repair_sync(loc, item_id) {
+                            return Some(Err(BridgeRpcError { code: "ModuleBeingRepaired".into(), message: format!("Module {item_id} cannot be destroyed while undergoing nanite repair"), client_error: None }));
+                        }
                     }
                 }
             }
@@ -1673,8 +1674,9 @@ pub(crate) async fn handle_dogma_im(
             let loc_opt = match destroy_res { Ok(v) => v, Err(e) => return Some(Err(e)) };
             if let Some((loc, _flag, _type_id, _qty)) = loc_opt {
                 if let Some(sys_id) = session.solar_system_id {
-                    let sys = ctx.systems.get_or_spawn(sys_id);
-                    let _ = sys.remove_module_cycle(loc, item_id).await;
+                    if let Some(sys) = ctx.systems.get_handle(sys_id) {
+                        let _ = sys.remove_module_cycle(loc, item_id).await;
+                    }
                 }
                 let affected_ewar = crate::services::notify_emitters_space_dungeons::flush_module_profile_and_ewar_end(
                     ctx,
@@ -1684,12 +1686,13 @@ pub(crate) async fn handle_dogma_im(
                     item_id,
                 );
                 if let Some(sys_id) = session.solar_system_id {
-                    let sys = ctx.systems.get_or_spawn(sys_id);
-                    for tid in affected_ewar {
-                        let tp_mult = ctx.effective_target_painter_multiplier(tid);
-                        sys.try_recompute_combat_attributes(tid, move |t_cs| {
-                            t_cs.tp_sig_multiplier = (tp_mult > 1.0 + 1e-6).then_some(tp_mult);
-                        });
+                    if let Some(sys) = ctx.systems.get_handle(sys_id) {
+                        for tid in affected_ewar {
+                            let tp_mult = ctx.effective_target_painter_multiplier(tid);
+                            sys.try_recompute_combat_attributes(tid, move |t_cs| {
+                                t_cs.tp_sig_multiplier = (tp_mult > 1.0 + 1e-6).then_some(tp_mult);
+                            });
+                        }
                     }
                 }
                 crate::services::tactical_modules::remove_projected_remote_assistance(ctx, loc, item_id);
@@ -1752,7 +1755,15 @@ pub(crate) async fn handle_dogma_im(
             if let Err(e) = crate::services::tourney_service::check_tourney_lock_restricted(ctx, sys_id, char_id) {
                 return Some(Err(e));
             }
-            let sys = ctx.systems.get_or_spawn(sys_id);
+            let Some(sys) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(BridgeRpcError::targeting_failed(
+                    Some(ship_id),
+                    Some(target_id),
+                    eve_proto::UserErrorKey::CantShipNotPresent,
+                    "ship_not_in_space",
+                    format!("Ship ball {ship_id} not found in system"),
+                )));
+            };
             if crate::services::tactical_module_mechanics::is_untargetable_interdiction_probe(
                 ctx, &sys, target_id,
             )
@@ -1987,15 +1998,15 @@ pub(crate) async fn handle_dogma_im(
                 && (session.structure_id.is_none() || session.structure_id == Some(ship_id));
             let (removed, sys_id_opt) =
                 match (in_space, session.solar_system_id.filter(|&s| s > 0)) {
-                    (true, Some(sys_id)) => {
-                        let sys = ctx.systems.get_or_spawn(sys_id);
-                        (
+                    (true, Some(sys_id)) => match ctx.systems.get_handle(sys_id) {
+                        Some(sys) => (
                             sys.remove_target_lock_quiet(ship_id, target_id)
                                 .await
                                 .unwrap_or(false),
                             Some(sys_id),
-                        )
-                    }
+                        ),
+                        None => (false, Some(sys_id)),
+                    },
                     _ => (false, None),
                 };
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(target_id));
@@ -2035,13 +2046,15 @@ pub(crate) async fn handle_dogma_im(
                 return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into(), client_error: None }));
             };
             let (cleared_targets, sys_id_opt) = match (session.station_id, session.solar_system_id) {
-                (None, Some(sys_id)) => {
-                    let sys = ctx.systems.get_or_spawn(sys_id);
-                    let prior = sys.get_target_locks(ship_id).await.unwrap_or_default();
-                    let _ = sys.clear_target_locks_quiet(ship_id).await;
-                    let locked_ids: Vec<i64> = prior.into_iter().filter(|l| l.locked).map(|l| l.target_id).collect();
-                    (locked_ids, Some(sys_id))
-                }
+                (None, Some(sys_id)) => match ctx.systems.get_handle(sys_id) {
+                    Some(sys) => {
+                        let prior = sys.get_target_locks(ship_id).await.unwrap_or_default();
+                        let _ = sys.clear_target_locks_quiet(ship_id).await;
+                        let locked_ids: Vec<i64> = prior.into_iter().filter(|l| l.locked).map(|l| l.target_id).collect();
+                        (locked_ids, Some(sys_id))
+                    }
+                    None => (Vec::new(), Some(sys_id)),
+                },
                 _ => (Vec::new(), None),
             };
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, None);
@@ -2084,13 +2097,14 @@ pub(crate) async fn handle_dogma_im(
             };
             if session.station_id.is_none() && session.structure_id.is_none() {
                 if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
-                    let sys = ctx.systems.get_or_spawn(sys_id);
-                    let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
-                    let ids = locks
-                        .into_iter()
-                        .map(|l| PyRep::Integer(l.target_id))
-                        .collect();
-                    return Some(Ok(PyRep::List(ids)));
+                    if let Some(sys) = ctx.systems.get_handle(sys_id) {
+                        let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
+                        let ids = locks
+                            .into_iter()
+                            .map(|l| PyRep::Integer(l.target_id))
+                            .collect();
+                        return Some(Ok(PyRep::List(ids)));
+                    }
                 }
             }
             Some(Ok(PyRep::List(Vec::new())))
@@ -2103,13 +2117,14 @@ pub(crate) async fn handle_dogma_im(
             };
             if session.station_id.is_none() && session.structure_id.is_none() {
                 if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
-                    let sys = ctx.systems.get_or_spawn(sys_id);
-                    let view = sys.view();
-                    let targeter_ids: Vec<PyRep> = view
-                        .targeters_of(ship_id)
-                        .map(PyRep::Integer)
-                        .collect();
-                    return Some(Ok(PyRep::List(targeter_ids)));
+                    if let Some(sys) = ctx.systems.get_handle(sys_id) {
+                        let view = sys.view();
+                        let targeter_ids: Vec<PyRep> = view
+                            .targeters_of(ship_id)
+                            .map(PyRep::Integer)
+                            .collect();
+                        return Some(Ok(PyRep::List(targeter_ids)));
+                    }
                 }
             }
             Some(Ok(PyRep::List(Vec::new())))

@@ -189,6 +189,9 @@ async fn handle_npcs_drones_launch_return_engage_scoop_and_salvage_branches() {
     );
     session.solar_system_id = Some(sys_id);
 
+    // Spawn the solar system before running in-space validation checks (`#1542` cold fail-closed).
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
     // Drones skill 0 -> NoDroneManagementAbilities
     seed_skill(&ctx, char_id, 3436, 0);
     assert_eq!(
@@ -246,7 +249,6 @@ async fn handle_npcs_drones_launch_return_engage_scoop_and_salvage_branches() {
             make_fighter_item(salv_id, 33_681, char_id, ship_id, InventoryFlag::DroneBay, 1),
         );
     });
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle
         .spawn_ball(make_ball(ship_id, 28_352, DVec3::ZERO, DVec3::ZERO))
         .await;
@@ -377,4 +379,200 @@ async fn handle_npcs_drones_launch_return_engage_scoop_and_salvage_branches() {
             .code,
         "DroneOwnedByOther"
     );
+}
+
+#[tokio::test]
+async fn cold_system_docked_cmd_engage_and_inspace_drone_commands_fail_closed_without_waking() {
+    use crate::services::combat_crimewatch::combat_missiles_aoe::step_missiles_and_breachers;
+    use crate::services::combat_crimewatch::combat_wrecks_killmails::{
+        register_container_lifetime, step_wreck_and_jetcan_decay,
+    };
+    use crate::sp6_lifecycle::drone_return::{
+        abandon_drones_and_fighters_for_ship_sync, abandon_drones_on_warp_sync, handle_cmd_return_bay,
+    };
+    use crate::system_actor::SystemLifecycleState;
+
+    let (ctx, mut session, char_id, ship_id, _default_sys_id) = setup_drone_env();
+    let cold_sys_id = 30_000_144_u32;
+    let station_id = 60_003_760_i64;
+    let struct_id = 1_000_000_400_001_i64;
+    let drone_id = 911_901_i64;
+    let target_id = 911_902_i64;
+    let expired_can_id = 911_903_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = cold_sys_id;
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(cold_sys_id);
+        }
+        snap.items.insert(
+            drone_id,
+            make_fighter_item(drone_id, 2_456, char_id, ship_id, InventoryFlag::DroneBay, 1),
+        );
+        snap.items.insert(
+            expired_can_id,
+            make_fighter_item(expired_can_id, 23, char_id, i64::from(cold_sys_id), InventoryFlag::None, 1),
+        );
+    });
+    register_container_lifetime(&ctx, expired_can_id, cold_sys_id, 23, char_id, 1, false);
+
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys_id), SystemLifecycleState::Cold);
+    assert!(!ctx.systems.is_system_loaded(cold_sys_id));
+
+    // 1. Docked CmdEngage (station and structure) returns ShipDocked before touching cold system.
+    session.solar_system_id = Some(cold_sys_id);
+    session.station_id = Some(station_id);
+    session.structure_id = None;
+    let station_engage_err = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdEngage",
+        &[PyRep::List(vec![PyRep::Integer(drone_id)]), PyRep::Integer(target_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("docked CmdEngage must return ShipDocked");
+    assert_eq!(station_engage_err.code, "ShipDocked");
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys_id), SystemLifecycleState::Cold);
+
+    session.station_id = None;
+    session.structure_id = Some(struct_id);
+    let struct_engage_err = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdEngage",
+        &[PyRep::Integer(target_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("structure-docked CmdEngage must return ShipDocked");
+    assert_eq!(struct_engage_err.code, "ShipDocked");
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys_id), SystemLifecycleState::Cold);
+
+    // 2. Undocked cold system: LaunchDrones, CmdEngage, CmdReturnBay fail closed with ShipNotInSpace.
+    session.station_id = None;
+    session.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+
+    let launch_err = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "ship",
+        "LaunchDrones",
+        &[PyRep::List(vec![PyRep::Integer(drone_id)])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("cold-system LaunchDrones must fail closed");
+    assert_eq!(launch_err.code, "ShipNotInSpace");
+    assert_eq!(
+        launch_err
+            .to_client_error("ship", "LaunchDrones")
+            .as_user_error()
+            .map(|(k, _)| k),
+        Some(eve_proto::UserErrorKey::CantShipNotPresent)
+    );
+
+    let engage_err = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdEngage",
+        &[PyRep::List(vec![PyRep::Integer(drone_id)]), PyRep::Integer(target_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("cold-system CmdEngage must fail closed");
+    assert_eq!(engage_err.code, "ShipNotInSpace");
+    assert_eq!(
+        engage_err
+            .to_client_error("entity", "CmdEngage")
+            .as_user_error()
+            .map(|(k, _)| k),
+        Some(eve_proto::UserErrorKey::CantShipNotPresent)
+    );
+
+    let return_dispatch_err = handle_npcs_drones(
+        &ctx,
+        &mut session,
+        "entity",
+        "CmdReturnBay",
+        &[PyRep::List(vec![PyRep::Integer(drone_id)])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("cold-system entity.CmdReturnBay must fail closed");
+    assert_eq!(return_dispatch_err.code, "ShipNotInSpace");
+
+    let return_direct_err = handle_cmd_return_bay(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(drone_id)],
+        &kw,
+    )
+    .await
+    .expect_err("cold-system drone_return::handle_cmd_return_bay must fail closed");
+    assert_eq!(return_direct_err.code, "ShipNotInSpace");
+    assert_eq!(
+        return_direct_err
+            .to_client_error("entity", "CmdReturnBay")
+            .as_user_error()
+            .map(|(k, _)| k),
+        Some(eve_proto::UserErrorKey::CantShipNotPresent)
+    );
+
+    // 3. Cold-safe no-op/cleanup helpers stay Cold while still pruning DB decay records.
+    let abandon_res = handle_npcs_drones(&ctx, &mut session, "entity", "CmdAbandonDrone", &[], &kw)
+        .await
+        .expect("handled")
+        .expect("cold CmdAbandonDrone returns empty dict");
+    assert_eq!(abandon_res, PyRep::Dict(Vec::new()));
+
+    let reconnect_res = handle_npcs_drones(&ctx, &mut session, "entity", "CmdReconnectToDrones", &[], &kw)
+        .await
+        .expect("handled")
+        .expect("cold CmdReconnectToDrones returns empty dict");
+    assert_eq!(reconnect_res, PyRep::Dict(Vec::new()));
+
+    assert_eq!(
+        apply_damage_to_drone_in_space(
+            &ctx,
+            cold_sys_id,
+            999_001,
+            DamageVector::new(10.0, 0.0, 0.0, 0.0),
+        )
+        .await,
+        (0.0, false)
+    );
+    assert!(step_drone_auto_aggression_and_assist(&ctx, cold_sys_id, char_id, None, None, None)
+        .await
+        .is_empty());
+    abandon_drones_on_warp_sync(&ctx, char_id, ship_id, cold_sys_id);
+    abandon_drones_and_fighters_for_ship_sync(&ctx, char_id, ship_id, cold_sys_id);
+    assert!(step_missiles_and_breachers(&ctx, cold_sys_id, 1.0).await.is_empty());
+
+    let decayed = step_wreck_and_jetcan_decay(&ctx, cold_sys_id, ctx.now_unix()).await;
+    assert_eq!(decayed, vec![expired_can_id]);
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&expired_can_id)));
+
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys_id), SystemLifecycleState::Cold);
+    assert!(!ctx.systems.is_system_loaded(cold_sys_id));
 }

@@ -606,12 +606,13 @@ pub async fn step_wreck_and_jetcan_decay(
         }
     }
     if !expired.is_empty() {
-        let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-        for &bid in &expired_bubbles {
-            let _ = sys_handle.remove_warp_bubble(bid).await;
-        }
-        for &iid in &expired {
-            let _ = sys_handle.remove_ball(iid).await;
+        if let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) {
+            for &bid in &expired_bubbles {
+                let _ = sys_handle.remove_warp_bubble(bid).await;
+            }
+            for &iid in &expired {
+                let _ = sys_handle.remove_ball(iid).await;
+            }
         }
         ctx.db.with_mut_snapshot(|snap| {
             for &iid in &expired {
@@ -951,7 +952,15 @@ pub async fn handle_wrecks_killmails(
             }) {
                 return Some(Err(e));
             }
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "wrecks_killmails",
+                    "Active ship is not spawned in space",
+                )));
+            };
             match crate::services::space_nav_movement_guard::is_ship_module_cloaked_fail_closed(
                 ctx,
                 &sys_handle,
@@ -1367,9 +1376,10 @@ pub async fn handle_wrecks_killmails(
             }
             crate::services::combat_weapons_spool::clear_entropic_spool(ctx, ship_id, module_id);
             if let Some(sys_id) = session.solar_system_id {
-                let sys = ctx.systems.get_or_spawn(sys_id);
-                if !sys.request_cycle_deactivation(ship_id, module_id).await.unwrap_or(false) {
-                    let _ = sys.remove_module_cycle(ship_id, module_id).await;
+                if let Some(sys) = ctx.systems.get_handle(sys_id) {
+                    if !sys.request_cycle_deactivation(ship_id, module_id).await.unwrap_or(false) {
+                        let _ = sys.remove_module_cycle(ship_id, module_id).await;
+                    }
                 }
             }
             ctx.db.with_mut_snapshot(|snap| {
