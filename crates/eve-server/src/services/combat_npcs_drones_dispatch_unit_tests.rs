@@ -542,13 +542,19 @@ async fn cold_system_docked_cmd_engage_and_inspace_drone_commands_fail_closed_wi
     );
 
     // 3. RPC entity.CmdAbandonDrone / CmdReconnectToDrones fail closed while direct sp6_lifecycle helpers no-op cleanly.
-    for method in ["CmdAbandonDrone", "CmdReconnectToDrones"] {
-        let entity_err = handle_npcs_drones(&ctx, &mut session, "entity", method, &[], &kw)
+    let abandon_entity_err =
+        handle_npcs_drones(&ctx, &mut session, "entity", "CmdAbandonDrone", &[], &kw)
             .await
             .expect("handled")
-            .expect_err(&format!("cold-system entity.{method} must fail closed"));
-        assert_eq!(entity_err.code, "ShipNotInSpace");
-    }
+            .expect_err("cold-system entity.CmdAbandonDrone must fail closed");
+    assert_eq!(abandon_entity_err.code, "ShipNotInSpace");
+
+    let reconnect_entity_err =
+        handle_npcs_drones(&ctx, &mut session, "entity", "CmdReconnectToDrones", &[], &kw)
+            .await
+            .expect("handled")
+            .expect_err("cold-system entity.CmdReconnectToDrones must fail closed");
+    assert_eq!(reconnect_entity_err.code, "ShipNotInSpace");
 
     let abandon_res = crate::sp6_lifecycle::handle_cmd_abandon_drone(&ctx, &mut session, &[], &kw)
         .await
