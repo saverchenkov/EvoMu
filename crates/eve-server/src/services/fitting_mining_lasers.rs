@@ -130,8 +130,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 .unwrap_or(false);
 
             let mut removed_cycle_delay = None;
-            if let Some(sys_id) = session.solar_system_id {
-                let sys = ctx.systems.get_or_spawn(sys_id);
+            if let Some(sys) = session.solar_system_id.and_then(|sys_id| ctx.systems.get_handle(sys_id)) {
                 if sys.is_module_mjd_or_mjfg_spooling_sync(ship_id, module_id) {
                     return Some(Err(BridgeRpcError {
                         code: "CantDeactivateWhileSpooling".into(),
@@ -233,8 +232,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 ship_id,
                 module_id,
             );
-            if let Some(sys_id) = session.solar_system_id {
-                let sys = ctx.systems.get_or_spawn(sys_id);
+            if let Some(sys) = session.solar_system_id.and_then(|sys_id| ctx.systems.get_handle(sys_id)) {
                 for tid in affected_ewar_ships {
                     let tp_mult = ctx.effective_target_painter_multiplier(tid);
                     sys.try_recompute_combat_attributes(tid, move |t_cs| {
@@ -395,8 +393,11 @@ pub(crate) async fn handle_mining_and_deactivate(
                     super::fitting_scanners_superweapons::clear_ship_dbuffs_by_source_module(
                         ctx, module_id,
                     );
-                if let Some(sys_id) = session.solar_system_id.filter(|&s| s > 0) {
-                    let sys = ctx.systems.get_or_spawn(sys_id);
+                if let Some(sys) = session
+                    .solar_system_id
+                    .filter(|&s| s > 0)
+                    .and_then(|sys_id| ctx.systems.get_handle(sys_id))
+                {
                     let balls = sys.list_balls().await.unwrap_or_default();
                     let dyn_ship_ids: Vec<i64> = balls
                         .iter()
@@ -484,8 +485,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                     format!("Module {module_id} is not fitted to active ship {ship_id}"),
                 )));
             }
-            let was_cycling = if let Some(sys_id) = session.solar_system_id {
-                let sys = ctx.systems.get_or_spawn(sys_id);
+            let was_cycling = if let Some(sys) = session.solar_system_id.and_then(|sys_id| ctx.systems.get_handle(sys_id)) {
                 sys.update_module_overload(ship_id, module_id, false).await.unwrap_or(false)
             } else {
                 false
@@ -581,7 +581,8 @@ pub(crate) async fn handle_mining_and_deactivate(
             if overloaded
                 && session
                     .solar_system_id
-                    .is_some_and(|sid| ctx.systems.get_or_spawn(sid).has_any_active_nanite_repair_sync(ship_id))
+                    .and_then(|sid| ctx.systems.get_handle(sid))
+                    .is_some_and(|sys| sys.has_any_active_nanite_repair_sync(ship_id))
             {
                 return Some(Err(BridgeRpcError {
                     code: "CannotOverheatWhileRepairing".into(),
@@ -590,10 +591,12 @@ pub(crate) async fn handle_mining_and_deactivate(
                 }));
             }
             let cycle_overload_states: std::collections::HashMap<i64, (bool, Option<bool>)> =
-                if let Some(sys_id) = session.solar_system_id.filter(|&s| s > 0) {
-                    ctx.systems
-                        .get_or_spawn(sys_id)
-                        .active_cycle_overload_states_for_ship(ship_id)
+                if let Some(sys) = session
+                    .solar_system_id
+                    .filter(|&s| s > 0)
+                    .and_then(|sys_id| ctx.systems.get_handle(sys_id))
+                {
+                    sys.active_cycle_overload_states_for_ship(ship_id)
                 } else {
                     std::collections::HashMap::new()
                 };
@@ -664,8 +667,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                         idle_ids.push(mid);
                     }
                 };
-            if let Some(sys_id) = session.solar_system_id {
-                let sys = ctx.systems.get_or_spawn(sys_id);
+            if let Some(sys) = session.solar_system_id.and_then(|sys_id| ctx.systems.get_handle(sys_id)) {
                 for &mid in &cycling_modules {
                     let was_cycling = sys.update_module_overload(ship_id, mid, overloaded).await.unwrap_or(false);
                     if !was_cycling {
@@ -742,7 +744,15 @@ pub(crate) async fn handle_mining_and_deactivate(
                 }));
             }
             let sys_id = session.solar_system_id.unwrap();
-            let sys = ctx.systems.get_or_spawn(sys_id);
+            let Some(sys) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    method,
+                    "Active ship is not spawned in space",
+                )));
+            };
             let module_id = args
                 .get(1)
                 .and_then(|a| a.as_i64())
@@ -928,32 +938,18 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Err(e) => return Some(Err(e)),
             };
 
-            if let Some(sys_id) = session.solar_system_id {
-                let sys = ctx.systems.get_or_spawn(sys_id);
-                let _ = sys
-                    .start_nanite_repair(crate::system_actor::ActiveNaniteRepair {
-                        char_id,
-                        ship_id,
-                        module_id,
-                        initial_damage_hp: cur_dmg,
-                        paste_total_needed: paste_needed.max(1),
-                        paste_consumed_so_far: initial_consumed,
-                        duration_s,
-                        elapsed_s: 0.0,
-                    })
-                    .await;
-            } else {
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(m_item) = snap.items.get_mut(&module_id) {
-                        if m_item.owner_id == char_id
-                            && m_item.location_id == ship_id
-                            && matches!(m_item.flag as u16, 11..=34 | 92..=94 | 125..=132)
-                        {
-                            m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
-                        }
-                    }
-                });
-            }
+            let _ = sys
+                .start_nanite_repair(crate::system_actor::ActiveNaniteRepair {
+                    char_id,
+                    ship_id,
+                    module_id,
+                    initial_damage_hp: cur_dmg,
+                    paste_total_needed: paste_needed.max(1),
+                    paste_consumed_so_far: initial_consumed,
+                    duration_s,
+                    elapsed_s: 0.0,
+                })
+                .await;
 
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
@@ -991,8 +987,7 @@ pub(crate) async fn handle_mining_and_deactivate(
             let mut stopped = false;
             let mut rem_dmg_out = 0.0;
             let mut paste_refunded = 0i32;
-            if let Some(sys_id) = session.solar_system_id {
-                let sys = ctx.systems.get_or_spawn(sys_id);
+            if let Some(sys) = session.solar_system_id.and_then(|sys_id| ctx.systems.get_handle(sys_id)) {
                 if let Some((rem_dmg, refund)) = sys
                     .stop_nanite_repair(ship_id, module_id)
                     .await

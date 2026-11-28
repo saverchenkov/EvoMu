@@ -148,26 +148,29 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
     });
 
     let eff_pocket_sys = pocket_cleanup.as_ref().map(|c| c.0).unwrap_or(abyssal_sys);
-    let handle = ctx.systems.get_or_spawn(eff_pocket_sys);
+    let handle_opt = ctx.systems.get_handle(eff_pocket_sys);
     if let Some((_, origin_sys, any_other_alive, ref trace_ids, ref markers, ref caches, ref env_balls, ref npcs, _)) =
         pocket_cleanup
     {
-        let origin_handle = ctx.systems.get_or_spawn(origin_sys);
-        for &tid in trace_ids {
-            origin_handle.try_remove_ball(tid);
+        if let Some(origin_handle) = ctx.systems.get_handle(origin_sys) {
+            for &tid in trace_ids {
+                origin_handle.try_remove_ball(tid);
+            }
         }
         if !any_other_alive {
-            for &mid in markers {
-                handle.try_remove_ball(mid);
-            }
-            for &cid in caches {
-                handle.try_remove_ball(cid);
-            }
-            for &eid in env_balls {
-                handle.try_remove_ball(eid);
-            }
-            for &nid in npcs {
-                handle.try_remove_ball(nid);
+            if let Some(ref handle) = handle_opt {
+                for &mid in markers {
+                    handle.try_remove_ball(mid);
+                }
+                for &cid in caches {
+                    handle.try_remove_ball(cid);
+                }
+                for &eid in env_balls {
+                    handle.try_remove_ball(eid);
+                }
+                for &nid in npcs {
+                    handle.try_remove_ball(nid);
+                }
             }
             crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                 for nid in npcs {
@@ -187,9 +190,11 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
             pilot_cid,
             eff_pocket_sys,
         );
-        handle.try_remove_ball(pilot_sid);
-        if ship_id > 0 && ship_id != pilot_sid {
-            handle.try_remove_ball(ship_id);
+        if let Some(ref handle) = handle_opt {
+            handle.try_remove_ball(pilot_sid);
+            if ship_id > 0 && ship_id != pilot_sid {
+                handle.try_remove_ball(ship_id);
+            }
         }
         ctx.invalidate_ship_fitting(pilot_sid);
 
@@ -283,8 +288,10 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
                     );
                 (home_sys_id, home_station_id, corvette_id, cleared_lock, extra_balls)
             });
-        for eb in extra_balls_to_remove {
-            handle.try_remove_ball(eb);
+        if let Some(ref handle) = handle_opt {
+            for eb in extra_balls_to_remove {
+                handle.try_remove_ball(eb);
+            }
         }
 
         if let Some(locked_gate_id) = cleared_zarzakh_gate {
@@ -375,7 +382,9 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
     });
 
     for (origin_sys, tid) in despawned_traces {
-        ctx.systems.get_or_spawn(origin_sys).try_remove_ball(tid);
+        if let Some(origin_handle) = ctx.systems.get_handle(origin_sys) {
+            origin_handle.try_remove_ball(tid);
+        }
     }
 
     let closed_abyss_systems: HashSet<SolarSystemId> = evacuated
@@ -385,9 +394,11 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         .collect();
 
     for (pid, abyss_sys, npcs) in pocket_cleanups {
-        let abyss_handle = ctx.systems.get_or_spawn(abyss_sys);
-        for &nid in &npcs {
-            abyss_handle.try_remove_ball(nid);
+        let abyss_handle_opt = ctx.systems.get_handle(abyss_sys);
+        if let Some(ref abyss_handle) = abyss_handle_opt {
+            for &nid in &npcs {
+                abyss_handle.try_remove_ball(nid);
+            }
         }
         crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
             for &nid in &npcs {
@@ -398,14 +409,16 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
             let marker_id = 1_895_000_000 + pid * 10 + r;
             let cache_id = 1_896_000_000 + pid * 10 + r;
             let subnode_id = cache_id + 500_000;
-            abyss_handle.try_remove_ball(marker_id);
-            abyss_handle.try_remove_ball(cache_id);
-            abyss_handle.try_remove_ball(subnode_id);
-            for c in 1..=3_i64 {
-                abyss_handle.try_remove_ball(1_898_000_000 + pid * 100 + r * 10 + c);
-            }
-            for py in 1..=5_i64 {
-                abyss_handle.try_remove_ball(1_899_000_000 + pid * 100 + r * 10 + py);
+            if let Some(ref abyss_handle) = abyss_handle_opt {
+                abyss_handle.try_remove_ball(marker_id);
+                abyss_handle.try_remove_ball(cache_id);
+                abyss_handle.try_remove_ball(subnode_id);
+                for c in 1..=3_i64 {
+                    abyss_handle.try_remove_ball(1_898_000_000 + pid * 100 + r * 10 + c);
+                }
+                for py in 1..=5_i64 {
+                    abyss_handle.try_remove_ball(1_899_000_000 + pid * 100 + r * 10 + py);
+                }
             }
             ctx.db.with_mut_snapshot(|snap| {
                 snap.items.remove(&cache_id);
@@ -422,8 +435,10 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         ctx.invalidate_ship_fitting(*sid);
         crate::sp6_lifecycle::clear_abyssal_session(ctx, *cid);
         let evacuated_pos = random_offset_around_trace_origin(ctx, *origin_pos);
-        let abyss_handle = ctx.systems.get_or_spawn(*abyss_sys);
-        abyss_handle.try_remove_ball(*sid);
+        let abyss_handle_opt = ctx.systems.get_handle(*abyss_sys);
+        if let Some(ref abyss_handle) = abyss_handle_opt {
+            abyss_handle.try_remove_ball(*sid);
+        }
         let mut destroyed_drones: Vec<ItemId> = Vec::new();
         let mut cross_sys_drones: Vec<(ItemId, u32)> = Vec::new();
         let char_id_val = *cid;
@@ -477,8 +492,10 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
                 }
             });
         }
-        for did in &destroyed_drones {
-            abyss_handle.try_remove_ball(*did);
+        if let Some(ref abyss_handle) = abyss_handle_opt {
+            for did in &destroyed_drones {
+                abyss_handle.try_remove_ball(*did);
+            }
         }
         for (did, d_sys) in cross_sys_drones {
             if let Some(h) = ctx.systems.get_handle(d_sys) {
@@ -520,8 +537,10 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
                 owned_pocket_drones,
             )
         });
-        for did in extra_drone_balls {
-            abyss_handle.try_remove_ball(did);
+        if let Some(ref abyss_handle) = abyss_handle_opt {
+            for did in extra_drone_balls {
+                abyss_handle.try_remove_ball(did);
+            }
         }
         let cs = ctx.build_ship_combat_state(*cid, *sid, ship_type);
         let ball = build_fitted_ship_space_ball(
@@ -565,26 +584,30 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         if any_active_in_sys {
             continue;
         }
-        let abyss_handle = ctx.systems.get_or_spawn(abyss_sys);
-        let mut orphaned_drone_ids: Vec<ItemId> = abyss_handle
-            .mutate_active_drones_sync(move |drones, _, _| {
-                let mut local_ids = Vec::new();
-                let mut dirty = false;
-                drones.retain(|&did, d| {
-                    if did > 0 && d.solar_system_id == abyss_sys {
-                        local_ids.push(did);
-                        if d.drone_item_id != did {
-                            local_ids.push(d.drone_item_id);
+        let abyss_handle_opt = ctx.systems.get_handle(abyss_sys);
+        let mut orphaned_drone_ids: Vec<ItemId> = if let Some(ref abyss_handle) = abyss_handle_opt {
+            abyss_handle
+                .mutate_active_drones_sync(move |drones, _, _| {
+                    let mut local_ids = Vec::new();
+                    let mut dirty = false;
+                    drones.retain(|&did, d| {
+                        if did > 0 && d.solar_system_id == abyss_sys {
+                            local_ids.push(did);
+                            if d.drone_item_id != did {
+                                local_ids.push(d.drone_item_id);
+                            }
+                            dirty = true;
+                            false
+                        } else {
+                            true
                         }
-                        dirty = true;
-                        false
-                    } else {
-                        true
-                    }
-                });
-                (dirty, local_ids)
-            })
-            .unwrap_or_default();
+                    });
+                    (dirty, local_ids)
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         ctx.db.with_mut_snapshot(|snap| {
             let item_drone_ids: Vec<ItemId> = snap
                 .items
@@ -605,8 +628,10 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
                 snap.item_positions.remove(did);
             }
         });
-        for did in orphaned_drone_ids {
-            abyss_handle.try_remove_ball(did);
+        if let Some(ref abyss_handle) = abyss_handle_opt {
+            for did in orphaned_drone_ids {
+                abyss_handle.try_remove_ball(did);
+            }
         }
     }
     evacuated.len() as i64
@@ -670,9 +695,9 @@ pub fn evacuate_void_space_session_sync(
             .unwrap_or(origin_sys);
     }
 
-    ctx.systems
-        .get_or_spawn(VOID_SPACE_SYSTEM_ID)
-        .try_remove_ball(eff_ship_id);
+    if let Some(void_handle) = ctx.systems.get_handle(VOID_SPACE_SYSTEM_ID) {
+        void_handle.try_remove_ball(eff_ship_id);
+    }
     let cs = ctx.build_ship_combat_state(char_id, eff_ship_id, ship_type);
     let ball = build_fitted_ship_space_ball(
         ctx,

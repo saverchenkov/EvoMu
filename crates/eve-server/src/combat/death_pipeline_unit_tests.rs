@@ -3427,3 +3427,214 @@ async fn zero_system_destroyed_player_drone_skips_ballpark_on_drone_state_change
     );
     assert!(ctx.ballpark_scene_for_char(owner_char_id, 0).is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_system_death_pipeline_and_self_destruct_complete_db_state_without_waking_actor() {
+    let ctx = test_ctx();
+    let cold_sys = 30_000_142_u32;
+    let victim = 90_000_001_i64;
+    let attacker = 90_000_002_i64;
+    let ship1 = 100_990_001_i64;
+    let cargo1 = 100_990_002_i64;
+    let ship2 = 100_990_010_i64;
+    let now = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&victim) {
+            ch.active_ship_id = ship1;
+            ch.solar_system_id = cold_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship1,
+            make_item(
+                ship1,
+                587,
+                victim,
+                i64::from(cold_sys),
+                InventoryFlag::None,
+                1,
+                400_000.0,
+            ),
+        );
+        snap.item_positions.insert(ship1, [1_000.0, 2_000.0, 3_000.0]);
+        snap.items.insert(
+            cargo1,
+            make_item(cargo1, 34, victim, ship1, InventoryFlag::Cargo, 100, 0.0),
+        );
+    });
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+
+    let res1 = on_ball_destroyed_sync(
+        &ctx,
+        cold_sys,
+        ship1,
+        Some(attacker),
+        DVec3::new(9.0, 9.0, 9.0),
+    )
+    .expect("on_ball_destroyed_sync must succeed on cold system")
+    .expect("cold-system ship death must return result");
+    assert_eq!(res1.insurance_payout_isk, 400_000.0);
+    assert!(res1.ejected_capsule_id.is_some());
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.killmails.contains_key(&res1.killmail_id));
+        assert!(snap.items.contains_key(&res1.wreck_item_id));
+        assert!(!snap.items.contains_key(&ship1));
+        assert_eq!(
+            snap.item_positions.get(&res1.wreck_item_id),
+            Some(&[1_000.0, 2_000.0, 3_000.0])
+        );
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&attacker) {
+            ch.active_ship_id = ship2;
+            ch.solar_system_id = cold_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship2,
+            make_item(
+                ship2,
+                587,
+                attacker,
+                i64::from(cold_sys),
+                InventoryFlag::None,
+                1,
+                0.0,
+            ),
+        );
+        snap.item_positions.insert(ship2, [5_000.0, 0.0, 0.0]);
+    });
+
+    let mut mgr = SelfDestructManager::new();
+    let det = mgr.start_self_destruct(ship2, attacker, cold_sys, now);
+    let detonated = mgr.step_timers(&ctx, det, 1).await;
+    assert_eq!(detonated.len(), 1);
+    assert_eq!(detonated[0].0, ship2);
+    assert!(detonated[0].1.is_ok());
+    assert!(!ctx.db.with_snapshot(|snap| snap.items.contains_key(&ship2)));
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_system_destructible_dungeon_structure_updates_db_and_triggers_without_waking_actor() {
+    let ctx = test_ctx();
+    let cold_sys = 30_000_142_u32;
+    let killer_char_id = 90_000_002_i64;
+    let inst_id = 88_901_i64;
+    let struct_ball_id = 880_990_001_i64;
+    let loot_item_id = 880_990_002_i64;
+    let now = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            struct_ball_id,
+            make_item(
+                struct_ball_id,
+                19_221,
+                0,
+                i64::from(cold_sys),
+                InventoryFlag::None,
+                1,
+                0.0,
+            ),
+        );
+        snap.item_positions.insert(struct_ball_id, [12_000.0, 0.0, 0.0]);
+        snap.items.insert(
+            loot_item_id,
+            make_item(loot_item_id, 34, 0, struct_ball_id, InventoryFlag::Cargo, 25, 0.0),
+        );
+        snap.dungeon_runtime.instances.insert(
+            inst_id,
+            eve_db::DungeonRuntimeInstance {
+                instance_id: inst_id,
+                dungeon_id: 901,
+                dungeon_name: "Cold Bunker Site".into(),
+                solar_system_id: cold_sys,
+                owner_char_id: killer_char_id,
+                entry_gate_locked: true,
+                created_unix: now,
+                rooms: vec![eve_db::DungeonRuntimeRoom {
+                    room_index: 0,
+                    room_id: 1,
+                    room_name: "Room 1".into(),
+                    gated: true,
+                    gate_locked: true,
+                    spawned: true,
+                    entered: true,
+                    objects: vec![eve_db::DungeonRuntimeObject {
+                        ball_id: struct_ball_id,
+                        type_id: 19_221,
+                        name: "Cold Bunker".into(),
+                        position: [12_000.0, 0.0, 0.0],
+                        radius: 250.0,
+                        spawned: true,
+                        destructible: true,
+                        destroyed: false,
+                        tag: Some("cold_bunker".into()),
+                        ..Default::default()
+                    }],
+                    triggers: vec![eve_db::DungeonTrigger {
+                        trigger_id: 77,
+                        kind: eve_db::DungeonTriggerKind::OnStructureDestroyed {
+                            target_ball_id: Some(struct_ball_id),
+                            target_object_index: None,
+                            target_tag: None,
+                            target_type_id: None,
+                        },
+                        action: eve_db::DungeonTriggerAction::UnlockGate,
+                        extra_actions: vec![eve_db::DungeonTriggerAction::UnlockEntryGate],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+    });
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+
+    let res = on_ball_destroyed_sync(&ctx, cold_sys, struct_ball_id, Some(killer_char_id), DVec3::ZERO)
+        .expect("cold destructible dungeon structure destruction must succeed");
+    assert!(res.is_none());
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&struct_ball_id));
+        assert!(!snap.items.contains_key(&loot_item_id));
+        assert!(!snap.item_positions.contains_key(&struct_ball_id));
+        let inst = snap
+            .dungeon_runtime
+            .instances
+            .get(&inst_id)
+            .expect("dungeon instance retained");
+        assert!(!inst.entry_gate_locked);
+        assert!(!inst.rooms[0].gate_locked);
+        assert!(inst.rooms[0].objects[0].destroyed);
+        assert!(inst.rooms[0].triggers[0].fired);
+    });
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+}

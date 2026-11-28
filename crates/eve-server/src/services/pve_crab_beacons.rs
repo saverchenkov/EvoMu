@@ -256,11 +256,12 @@ fn apply_crab_link_ship_effects(
         }
     });
     ctx.invalidate_ship_fitting(ship_id);
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    sys_handle.try_recompute_combat_attributes(ship_id, |cs| {
-        cs.crab_resonance_multiplier = Some(0.90);
-        cs.is_tethered = false;
-    });
+    if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+        sys_handle.try_recompute_combat_attributes(ship_id, |cs| {
+            cs.crab_resonance_multiplier = Some(0.90);
+            cs.is_tethered = false;
+        });
+    }
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnDbuffUpdated { ship_id },
@@ -289,15 +290,16 @@ fn clear_crab_link_ship_effects(
                 .map(|item| (char_id_opt.unwrap_or(item.owner_id), item.type_id))
         })
         .map(|(cid, tid)| ctx.build_ship_combat_state(cid, ship_id, tid));
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    sys_handle.try_recompute_combat_attributes(ship_id, move |cs| {
-        if let Some(ref base) = base_cs {
-            cs.base_shield_resonance = Some(base.shield_resonance);
-            cs.base_armor_resonance = Some(base.armor_resonance);
-            cs.base_structure_resonance = Some(base.structure_resonance);
-        }
-        cs.crab_resonance_multiplier = None;
-    });
+    if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+        sys_handle.try_recompute_combat_attributes(ship_id, move |cs| {
+            if let Some(ref base) = base_cs {
+                cs.base_shield_resonance = Some(base.shield_resonance);
+                cs.base_armor_resonance = Some(base.armor_resonance);
+                cs.base_structure_resonance = Some(base.structure_resonance);
+            }
+            cs.crab_resonance_multiplier = None;
+        });
+    }
     if let Some(cid) = char_id_opt {
         ctx.emit_typed(
             NotificationTarget::Character(cid),
@@ -383,6 +385,19 @@ fn build_rogue_drone_combat(sde: &SdeRegistry, type_id: TypeId) -> CombatState {
 }
 
 fn spawn_crab_rogue_drone_wave(ctx: &ServerContext, beacon_id: i64, wave_num: u8) {
+    let target_sys_id = ctx.db.with_snapshot(|snap| {
+        snap.crab_beacons.beacons.get(&beacon_id).and_then(|rec| {
+            (rec.phase == CrabBeaconPhase::Scanning && rec.waves_spawned < wave_num)
+                .then_some(rec.solar_system_id)
+        })
+    });
+    let Some(sys_id) = target_sys_id else {
+        return;
+    };
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
+
     let spawned_info = ctx.db.with_mut_snapshot(|snap| {
         let beacon_tid = snap
             .crab_beacons
@@ -392,27 +407,29 @@ fn spawn_crab_rogue_drone_wave(ctx: &ServerContext, beacon_id: i64, wave_num: u8
             .unwrap_or(TYPE_CRAB_BEACON);
         let drone_types = ops::resolve_crab_wave_drone_types(&ctx.sde, beacon_tid, wave_num);
         let mut allocated = Vec::with_capacity(drone_types.len());
-        for tid in drone_types {
-            snap.next_entity_id += 1;
-            allocated.push((snap.next_entity_id, tid));
-        }
         let Some(rec) = snap.crab_beacons.beacons.get_mut(&beacon_id) else {
             return None;
         };
-        if rec.phase != CrabBeaconPhase::Scanning || rec.waves_spawned >= wave_num {
+        if rec.phase != CrabBeaconPhase::Scanning
+            || rec.waves_spawned >= wave_num
+            || rec.solar_system_id != sys_id
+        {
             return None;
+        }
+        for tid in drone_types {
+            snap.next_entity_id += 1;
+            allocated.push((snap.next_entity_id, tid));
         }
         rec.waves_spawned = wave_num;
         for &(bid, _) in &allocated {
             rec.wave_npc_ball_ids.push(bid);
         }
-        Some((rec.solar_system_id, DVec3::from_array(rec.position), allocated))
+        Some((DVec3::from_array(rec.position), allocated))
     });
 
-    let Some((sys_id, beacon_pos, allocated)) = spawned_info else {
+    let Some((beacon_pos, allocated)) = spawned_info else {
         return;
     };
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     for (idx, (bid, tid)) in allocated.into_iter().enumerate() {
         ctx.systems.claim_special_site_ball(sys_id, bid);
         let angle = (idx as f64) * 1.4 + f64::from(wave_num);
@@ -459,7 +476,9 @@ fn prune_dead_crab_wave_drones(ctx: &ServerContext, beacon_id: i64) -> (u8, usiz
         return (waves_spawned, 0);
     }
     let orig_len = ball_ids.len();
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return (waves_spawned, orig_len);
+    };
     let mut alive_ids = Vec::with_capacity(orig_len);
     for bid in ball_ids {
         if sys_handle
@@ -564,9 +583,10 @@ fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
         return;
     };
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for drone_bid in drones_to_clear {
-        sys_handle.try_remove_ball(drone_bid);
+    if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+        for drone_bid in drones_to_clear {
+            sys_handle.try_remove_ball(drone_bid);
+        }
     }
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -671,11 +691,13 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
         );
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for drone_bid in drones_to_clear {
-        sys_handle.try_remove_ball(drone_bid);
+    let sys_handle_opt = ctx.systems.get_handle(sys_id);
+    if let Some(ref sys_handle) = sys_handle_opt {
+        for drone_bid in drones_to_clear {
+            sys_handle.try_remove_ball(drone_bid);
+        }
+        sys_handle.try_remove_ball(beacon_id);
     }
-    sys_handle.try_remove_ball(beacon_id);
 
     let spawned_can_id = ctx.db.with_mut_snapshot(|snap| {
         let remaining_loot: Vec<i64> = snap
@@ -739,21 +761,23 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
             max_structure_hp: 500.0,
             ..CombatState::default()
         };
-        sys_handle.try_spawn_ball_with_combat(
-            Ball {
-                id: can_id,
-                type_id: 23,
-                position: DVec3::from_array(pos_arr),
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 1_000.0,
-                radius: 25.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            can_cs,
-        );
+        if let Some(ref sys_handle) = sys_handle_opt {
+            sys_handle.try_spawn_ball_with_combat(
+                Ball {
+                    id: can_id,
+                    type_id: 23,
+                    position: DVec3::from_array(pos_arr),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 1_000.0,
+                    radius: 25.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                can_cs,
+            );
+        }
     }
 
     if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) {
@@ -938,19 +962,21 @@ pub async fn tick_crab_beacons_in_system(ctx: &ServerContext, sys_id: SolarSyste
 
 /// Called when an NPC ball is destroyed in `solar_system_id`; advances CRAB Rogue Drone waves if cleared early.
 pub async fn on_crab_wave_npc_destroyed(
-    _systems: &Arc<crate::system_actor::SystemRegistry>,
+    systems: &Arc<crate::system_actor::SystemRegistry>,
     db: &Arc<WorldRepository>,
     sde: &Arc<eve_sde::SdeRegistry>,
     solar_system_id: SolarSystemId,
     npc_ball_id: i64,
 ) {
+    let sys_handle_opt = systems.get_handle(solar_system_id);
     let next_wave_info = db.with_mut_snapshot(|snap| {
         let mut to_spawn = None;
         let mut next_id = snap.next_entity_id;
         for b in snap.crab_beacons.beacons.values_mut() {
             if b.solar_system_id == solar_system_id && b.wave_npc_ball_ids.contains(&npc_ball_id) {
                 b.wave_npc_ball_ids.retain(|&id| id != npc_ball_id);
-                if b.phase == CrabBeaconPhase::Scanning
+                if sys_handle_opt.is_some()
+                    && b.phase == CrabBeaconPhase::Scanning
                     && b.wave_npc_ball_ids.is_empty()
                     && b.waves_spawned < 3
                 {
@@ -973,10 +999,11 @@ pub async fn on_crab_wave_npc_destroyed(
         to_spawn
     });
 
-    if let Some((beacon_id, next_w, beacon_pos, allocated)) = next_wave_info {
-        let sys_handle = _systems.get_or_spawn(solar_system_id);
+    if let (Some(sys_handle), Some((beacon_id, next_w, beacon_pos, allocated))) =
+        (sys_handle_opt, next_wave_info)
+    {
         for (idx, (bid, tid)) in allocated.into_iter().enumerate() {
-            _systems.claim_special_site_ball(solar_system_id, bid);
+            systems.claim_special_site_ball(solar_system_id, bid);
             let angle = (idx as f64) * 1.4 + f64::from(next_w);
             let offset = DVec3::new(angle.cos() * 4_500.0, 250.0 * f64::from(next_w), angle.sin() * 4_500.0);
             let cs = build_rogue_drone_combat(sde, tid);
@@ -1102,7 +1129,15 @@ pub async fn handle_crab_component_call(
                 return Err(BridgeRpcError::user_error("CynoJammed"));
             }
 
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+                return Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "CrabBeaconLink",
+                    "Active ship is not spawned in space",
+                ));
+            };
             let (_, ship_ball) = sys_handle
                 .get_ball_snapshot(ship_id)
                 .await

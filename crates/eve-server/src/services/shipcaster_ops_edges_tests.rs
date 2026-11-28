@@ -138,6 +138,7 @@ async fn deploy_partial_contribute_deposit_and_link_disrupt_edges() {
         );
     });
 
+    let _ = ctx.systems.get_or_spawn(lowsec_sys);
     let deployed = deploy_fw_beacon_constructor(&ctx, &sess, ctor_id, DVec3::ZERO)
         .await
         .expect("deploy qty=1 succeeds");

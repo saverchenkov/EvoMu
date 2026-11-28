@@ -2190,3 +2190,113 @@ async fn cyno_portal_state_and_bridges_stay_isolated_across_two_contexts() {
     );
 }
 
+#[tokio::test]
+async fn cold_destination_deployable_beacon_resolution_uses_persisted_position() {
+    let ctx = test_ctx_with_custom(|_| {});
+    let cold_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.solar_system_id < 31_000_000 && s.security_status > 0.0 && s.security_status < 0.45)
+        .map(|s| s.solar_system_id)
+        .unwrap_or(30_002_505);
+    let fleet_id = 77_901_i64;
+    let cyno_char = 94_900_101_i64;
+    let jumper_char = 94_900_102_i64;
+    let dep_beacon_pos_id = 94_900_201_i64;
+    let dep_beacon_rec_only_id = 94_900_202_i64;
+    let now_u = ctx.now_unix();
+    let expected_pos_a = [125_000.0, -42_000.0, 88_000.0];
+    let expected_pos_b = [-77_000.0, 19_000.0, 54_000.0];
+
+    ensure_char(&ctx, cyno_char, 98_000_001, cold_sys, 94_900_301, Some(fleet_id));
+    ensure_char(&ctx, jumper_char, 98_000_001, cold_sys, 94_900_302, Some(fleet_id));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            fleet_id,
+            FleetRecord {
+                fleet_id,
+                boss_id: cyno_char,
+                members: vec![cyno_char, jumper_char],
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            dep_beacon_pos_id,
+            InventoryItemRecord {
+                item_id: dep_beacon_pos_id,
+                type_id: 57_319,
+                owner_id: cyno_char,
+                location_id: i64::from(cold_sys),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(dep_beacon_pos_id, expected_pos_a);
+        snap.items.insert(
+            dep_beacon_rec_only_id,
+            InventoryItemRecord {
+                item_id: dep_beacon_rec_only_id,
+                type_id: 57_319,
+                owner_id: cyno_char,
+                location_id: i64::from(cold_sys),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        write_deployable_state_snap(snap, |st| {
+            for (bid, pos) in [
+                (dep_beacon_pos_id, expected_pos_a),
+                (dep_beacon_rec_only_id, expected_pos_b),
+            ] {
+                st.deployables.insert(
+                    bid,
+                    MobileDeployableRecord {
+                        item_id: bid,
+                        type_id: 57_319,
+                        group_id: 4093,
+                        owner_id: cyno_char,
+                        solar_system_id: cold_sys,
+                        anchor_start_unix: now_u.saturating_sub(120),
+                        anchor_duration_secs: 60,
+                        anchor_completed: true,
+                        is_unanchored: false,
+                        expires_at_unix: now_u + 3_600,
+                        last_interaction_unix: now_u,
+                        reinforced_until_unix: None,
+                        last_ping_unix: None,
+                        position: pos,
+                        deployed_fleet_id: Some(fleet_id),
+                    },
+                );
+            }
+        });
+    });
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+
+    let beacon_a = resolve_fleet_beacon(&ctx, jumper_char, cyno_char, dep_beacon_pos_id, cold_sys, true)
+        .await
+        .expect("cold deployable cyno beacon with item_positions must resolve");
+    assert_eq!(beacon_a.position, DVec3::from_array(expected_pos_a));
+
+    let beacon_b = resolve_fleet_beacon(&ctx, jumper_char, cyno_char, dep_beacon_rec_only_id, cold_sys, true)
+        .await
+        .expect("cold deployable cyno beacon with deployables.position fallback must resolve");
+    assert_eq!(beacon_b.position, DVec3::from_array(expected_pos_b));
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+}
+

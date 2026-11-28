@@ -140,6 +140,7 @@ async fn beacon_constructor_deploy_contribute_deposit_and_link_limits() {
             ch.war_faction_id = Some(ctor_faction);
         }
     });
+    let sys_h = ctx.systems.get_or_spawn(lowsec_sys);
     let deployed = deploy_fw_beacon_constructor(&ctx, &sess, ctor_item_id, DVec3::ZERO).await.expect("deploy succeeds");
     assert!(!deployed.is_built);
     assert_eq!(deployed.type_id, ctor_tid);
@@ -151,7 +152,6 @@ async fn beacon_constructor_deploy_contribute_deposit_and_link_limits() {
     assert_eq!(contribute_fw_beacon_material(&ctx, &sess, -999_999, 1, 5).await.unwrap_err().code, "LandingPadNotFound");
     assert_eq!(contribute_fw_beacon_material(&ctx, &jita_sess, deployed.item_id, 1, 5).await.unwrap_err().code, "InvalidSolarSystem");
 
-    let sys_h = ctx.systems.get_or_spawn(lowsec_sys);
     let _ = sys_h
         .spawn_ball(Ball {
             id: ship_id,

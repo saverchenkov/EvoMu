@@ -347,6 +347,22 @@ pub fn on_dungeon_structure_destroyed_sync(
     ball_id: i64,
     killer_char_id: i64,
 ) -> bool {
+    on_dungeon_structure_destroyed_with_optional_actor_sync(
+        ctx,
+        Some(sys_handle),
+        sys_id,
+        ball_id,
+        killer_char_id,
+    )
+}
+
+pub(crate) fn on_dungeon_structure_destroyed_with_optional_actor_sync(
+    ctx: &ServerContext,
+    sys_handle: Option<&crate::system_actor::SystemHandle>,
+    sys_id: SolarSystemId,
+    ball_id: i64,
+    killer_char_id: i64,
+) -> bool {
     if ball_id <= 0 || !has_dungeon_runtime_store(ctx) {
         return false;
     }
@@ -473,7 +489,9 @@ pub fn on_dungeon_structure_destroyed_sync(
     with_mut_combat_runtime(ctx, |rt| {
         rt.container_lifetimes.remove(&ball_id);
     });
-    let _ = sys_handle.remove_ball_sync(ball_id);
+    if let Some(sys_handle) = sys_handle {
+        let _ = sys_handle.remove_ball_sync(ball_id);
+    }
     flush_trigger_effects_sync(DungeonRuntimeDeps::from_ctx(ctx), sys_id, effects);
     true
 }

@@ -494,6 +494,8 @@ async fn overload_rack_nanite_repair_guards_ehe_burnout_and_mining_scan_branches
     assert_eq!(e.code, "CannotRepairModuleWhileDocked");
     sess.station_id = None;
 
+    let sys = ctx.systems.get_or_spawn(sys_id);
+
     let e = call_dogma(&ctx, &mut sess, "InitiateModuleRepair", &[PyRep::List(vec![PyRep::Integer(low_ehe)])]).await.unwrap_err();
     assert_eq!(e.code, "ModuleBurnedOut");
 
@@ -529,7 +531,6 @@ async fn overload_rack_nanite_repair_guards_ehe_burnout_and_mining_scan_branches
     let e_docked_scan = call_scan(&ctx, &mut docked_sess, &[], &kw).await.unwrap().unwrap_err();
     assert_eq!(e_docked_scan.code, "ShipDocked");
 
-    let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
         .spawn_ball_with_meta(
             Ball {
@@ -1972,4 +1973,124 @@ async fn overload_rack_handles_pending_midcycle_states_skips_non_overloadable_an
             .unwrap_err();
         assert_eq!(e_stop.code, "ModuleNotFound");
     }
+}
+
+#[tokio::test]
+async fn cold_system_nanite_repair_rejects_ship_not_in_space_and_conserves_paste() {
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.types.insert(
+            995_099,
+            custom_inv_type(
+                sde,
+                995_099,
+                53,
+                7,
+                "Cold Repairable Module",
+                &[(40, 40.0), (1212, 1.0), (1267, 10.0), (1277, 1.0)],
+                &[11, 12, 13],
+            ),
+        );
+    });
+
+    let char_id = 95_500_999_i64;
+    let cold_sys = 30_002_509_u32;
+    let ship_id = 1_000_955_999_i64;
+    let med_mod = 1_000_955_998_i64;
+    let paste_id = 1_000_955_997_i64;
+
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        let uid = ch.user_id;
+        ch.solar_system_id = cold_sys;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, 587, char_id, i64::from(cold_sys), InventoryFlag::None, 0.0),
+        );
+        snap.items.insert(
+            med_mod,
+            make_item(med_mod, 995_099, char_id, ship_id, InventoryFlag::MedSlot0, 10.0),
+        );
+        snap.items.insert(
+            paste_id,
+            InventoryItemRecord {
+                item_id: paste_id,
+                type_id: 28668,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 50,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        uid
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 9_550_099, Some(char_id), true, ctx.now_unix_secs())
+        .unwrap();
+
+    let mut fit = ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+    fit.modules.insert(
+        med_mod,
+        FittedModule {
+            item_id: med_mod,
+            type_id: 995_099,
+            flag_id: InventoryFlag::MedSlot0 as u16,
+            state: ModuleState::Online,
+            charge_type_id: None,
+            charge_quantity: 0,
+            damage_hp: 10.0,
+            max_hp: 40.0,
+            dynamic_attribute_overrides: HashMap::new(),
+        },
+    );
+    fit.recalculate_stats(&ctx.sde);
+    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+    ctx.store_ship_fitting(ship_id, fit);
+
+    let mut sess = SessionState {
+        user_id: Some(uid),
+        character_id: Some(char_id),
+        solar_system_id: Some(cold_sys),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+
+    let err = call_dogma(&ctx, &mut sess, "RepairModule", &[PyRep::Integer(med_mod)])
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "ShipNotInSpace");
+
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap.items[&paste_id].quantity),
+        50,
+        "Nanite Repair Paste must not be consumed when system actor is cold"
+    );
+
+    let stop_rep = call_dogma(&ctx, &mut sess, "StopRepairModule", &[PyRep::Integer(med_mod)])
+        .await
+        .unwrap();
+    assert_eq!(
+        stop_rep.dict_get("stopped").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
 }

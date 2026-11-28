@@ -528,3 +528,186 @@ async fn pregame_checks_overrides_cleanup_grid_teleport_return_and_fleet_sync() 
         "TourneyNotReferee"
     );
 }
+
+#[tokio::test]
+async fn cold_system_tourney_cleanup_and_departing_teleport_do_not_wake_cold_origins() {
+    let ctx = test_ctx();
+    let ref_id = 972_001_i64;
+    let red_capt = 972_002_i64;
+    let blue_capt = 972_003_i64;
+    let match_sys = 30_000_142_u32;
+    let cold_origin_sys = 30_000_144_u32;
+    let cold_cleanup_sys = 30_000_145_u32;
+    let cold_match_id = 6_901_i64;
+    let match_id = 6_902_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base = snap.characters.values().next().unwrap().clone();
+        for (cid, name, ship_id, char_sys) in [
+            (ref_id, "ColdRef", 720_001_i64, match_sys),
+            (red_capt, "ColdRedCapt", 720_002_i64, cold_origin_sys),
+            (blue_capt, "ColdBlueCapt", 720_003_i64, cold_origin_sys),
+        ] {
+            let mut ch = base.clone();
+            ch.character_id = cid;
+            ch.name = name.into();
+            ch.solar_system_id = char_sys;
+            ch.active_ship_id = ship_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            snap.characters.insert(cid, ch);
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: i64::from(char_sys),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.fleets.insert(
+            891,
+            FleetRecord {
+                fleet_id: 891,
+                boss_id: red_capt,
+                members: vec![red_capt],
+                ..Default::default()
+            },
+        );
+        snap.fleets.insert(
+            892,
+            FleetRecord {
+                fleet_id: 892,
+                boss_id: blue_capt,
+                members: vec![blue_capt],
+                ..Default::default()
+            },
+        );
+        for (iid, tid, loc, pos) in [
+            (750_901_i64, 26557_u32, i64::from(cold_cleanup_sys), Some([-50_000.0, 100.0, 0.0])),
+            (750_902_i64, 34_u32, 750_901_i64, None),
+            (750_903_i64, 23_u32, i64::from(cold_cleanup_sys), Some([50_000.0, 0.0, 0.0])),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: red_capt,
+                    location_id: loc,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            if let Some(p) = pos {
+                snap.item_positions.insert(iid, p);
+            }
+        }
+        let mut store = load_store(snap);
+        let mut cold_m = TourneyMatch::new(
+            cold_match_id,
+            20,
+            i64::from(cold_cleanup_sys),
+            500,
+            600,
+            0,
+            2,
+        );
+        cold_m.arena_centers = vec![[-50_000.0, 0.0, 0.0], [50_000.0, 0.0, 0.0]];
+        cold_m.beacon_ids = vec![750_900];
+        cold_m.referees.push(ref_id);
+        store.matches.insert(cold_match_id, cold_m);
+        save_store(snap, &store, 1_800_000_000);
+    });
+
+    let mut gm = make_session(ref_id, match_sys, true);
+    let empty_kw = HashMap::new();
+
+    // CleanupGrid & ResetMatch on cold arena remove DB wrecks/cans without waking cold_cleanup_sys
+    call_tm(&ctx, &mut gm, "CleanupGrid", &[PyRep::Integer(cold_match_id)], &empty_kw)
+        .await
+        .unwrap();
+    call_tm(&ctx, &mut gm, "ResetMatch", &[PyRep::Integer(cold_match_id)], &empty_kw)
+        .await
+        .unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&750_901));
+        assert!(!snap.items.contains_key(&750_902));
+        assert!(!snap.items.contains_key(&750_903));
+    });
+    assert!(ctx.systems.get_handle(cold_cleanup_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_cleanup_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+
+    let mut kw = HashMap::new();
+    kw.insert("teams".into(), PyRep::List(vec![PyRep::Integer(211), PyRep::Integer(212)]));
+    kw.insert(
+        "captains".into(),
+        PyRep::List(vec![PyRep::Integer(red_capt), PyRep::Integer(blue_capt)]),
+    );
+
+    call_tm(
+        &ctx,
+        &mut gm,
+        "CreateMatch",
+        &[
+            PyRep::Integer(20),
+            PyRep::Integer(match_id),
+            PyRep::Integer(500),
+            PyRep::Integer(600),
+            PyRep::Integer(0),
+            PyRep::Integer(2),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap();
+    assert!(ctx.systems.get_handle(cold_origin_sys).is_none());
+
+    // TeleportPlayers departs cold_origin_sys without waking cold_origin_sys
+    call_tm(&ctx, &mut gm, "UpdateFleetDetails", &[PyRep::Integer(match_id)], &empty_kw)
+        .await
+        .unwrap();
+    for cid in [red_capt, blue_capt] {
+        call_tm(
+            &ctx,
+            &mut gm,
+            "OverrideError",
+            &[
+                PyRep::Integer(match_id),
+                PyRep::Integer(cid),
+                PyRep::String(String::new()),
+            ],
+            &empty_kw,
+        )
+        .await
+        .unwrap();
+    }
+    call_tm(&ctx, &mut gm, "CompletePregameChecks", &[PyRep::Integer(match_id)], &empty_kw)
+        .await
+        .unwrap();
+    call_tm(
+        &ctx,
+        &mut gm,
+        "TeleportPlayers",
+        &[PyRep::Integer(match_id), PyRep::Integer(0), PyRep::Integer(0)],
+        &empty_kw,
+    )
+    .await
+    .unwrap();
+
+    assert!(ctx.systems.get_handle(cold_origin_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_origin_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+}

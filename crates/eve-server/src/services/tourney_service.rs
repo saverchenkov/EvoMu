@@ -298,11 +298,13 @@ pub async fn handle(
                 Ok(id) => id,
                 Err(e) => return Some(Err(e)),
             };
-            let ball_positions: std::collections::HashMap<i64, DVec3> = {
-                let sys_handle = ctx.systems.get_or_spawn(match_sys_id as u32);
-                let view = sys_handle.view();
-                view.balls.iter().map(|(&id, b)| (id, b.position)).collect()
-            };
+            let ball_positions: std::collections::HashMap<i64, DVec3> =
+                if let Some(sys_handle) = ctx.systems.get_handle(match_sys_id as u32) {
+                    let view = sys_handle.view();
+                    view.balls.iter().map(|(&id, b)| (id, b.position)).collect()
+                } else {
+                    std::collections::HashMap::new()
+                };
             let mut removed_item_ids = Vec::new();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
@@ -347,8 +349,9 @@ pub async fn handle(
                 Ok(PyRep::Bool(true))
             });
             if res.is_ok() && !removed_item_ids.is_empty() {
-                let sys_handle = ctx.systems.get_or_spawn(match_sys_id as u32);
-                for &iid in &removed_item_ids { let _ = sys_handle.remove_ball(iid).await; }
+                if let Some(sys_handle) = ctx.systems.get_handle(match_sys_id as u32) {
+                    for &iid in &removed_item_ids { let _ = sys_handle.remove_ball(iid).await; }
+                }
             }
             res
         }
@@ -719,8 +722,9 @@ pub async fn handle(
             });
             if res.is_ok() {
                 if !beacons_to_remove.is_empty() {
-                    let sys_handle = ctx.systems.get_or_spawn(match_sys as u32);
-                    for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
+                    if let Some(sys_handle) = ctx.systems.get_handle(match_sys as u32) {
+                        for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
+                    }
                 }
                 if let Some((rs, bs, st, r_ids, b_ids, refs)) = notify_info {
                     crate::services::notify_emitters_tournaments_anomalies::emit_tournament_match_state_change(
@@ -898,8 +902,9 @@ pub async fn handle(
                 Ok(PyRep::Bool(true))
             });
             if res.is_ok() && !beacons_to_remove.is_empty() {
-                let sys_handle = ctx.systems.get_or_spawn(match_sys as u32);
-                for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
+                if let Some(sys_handle) = ctx.systems.get_handle(match_sys as u32) {
+                    for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
+                }
             }
             res
         }
@@ -1096,7 +1101,9 @@ pub async fn handle(
                     let is_online = session.character_id == Some(cid) || ctx.is_character_online(cid, user_id);
                     if ship_id > 0 && stid > 0 {
                         if old_sys != match_sys as u32 {
-                            let _ = ctx.systems.get_or_spawn(old_sys).remove_ball(ship_id).await;
+                            if let Some(old_handle) = ctx.systems.get_handle(old_sys) {
+                                let _ = old_handle.remove_ball(ship_id).await;
+                            }
                         }
                         if sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().is_some() {
                             let _ = sys_handle.set_ball_position(ship_id, pos).await;

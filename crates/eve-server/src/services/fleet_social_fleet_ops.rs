@@ -172,21 +172,24 @@ async fn handle_send_broadcast(
             );
         }
     } else {
-        let sys = ctx.systems.get_or_spawn(sender_sys);
+        let sys_opt = ctx.systems.get_handle(sender_sys);
         let sender_ship = session.ship_id.unwrap_or(0);
-        let sender_pos = sys
-            .get_ball_snapshot(sender_ship)
-            .await
-            .ok()
-            .flatten()
-            .map(|(_, b)| b.position);
+        let sender_pos = if let Some(ref sys) = sys_opt {
+            sys.get_ball_snapshot(sender_ship)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.position)
+        } else {
+            None
+        };
         for (m_id, m_sys, m_ship) in members_info {
             if m_sys != sender_sys {
                 continue;
             }
             if location == 2 && m_id != char_id {
                 // Without a sender ball there is no bubble to share: only the sender sees it.
-                let Some(s_pos) = sender_pos else { continue };
+                let (Some(ref sys), Some(s_pos)) = (sys_opt.as_ref(), sender_pos) else { continue };
                 let in_bubble = sys
                     .get_ball_snapshot(m_ship)
                     .await
@@ -339,7 +342,51 @@ pub(super) async fn handle_fleet_ops(
                 Err(e) => return Some(Err(e)),
             };
 
-            let sys = ctx.systems.get_or_spawn(sys_id);
+            let Some(sys) = ctx.systems.get_handle(sys_id) else {
+                if let Err(e) = crate::services::space_nav_movement_guard::validate_pre_movement_locks(
+                    ctx,
+                    caller_ship_id,
+                    &crate::services::space_nav_movement_guard::MovementIntent::Warp { sys_id },
+                ) {
+                    return Some(Err(e));
+                }
+                if let Err(e) = crate::services::pve_ess_reserve_banks::check_ess_intrusion_bubble_restriction(
+                    ctx,
+                    sys_id,
+                    caller_ship_id,
+                    "warp",
+                )
+                .await
+                {
+                    return Some(Err(e));
+                }
+                if let Err(e) =
+                    crate::services::tourney_service::check_tourney_warp_restricted(ctx, sys_id, char_id)
+                {
+                    return Some(Err(e));
+                }
+                if let Err(e) = crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+                    ctx,
+                    char_id,
+                    caller_ship_id,
+                    sys_id,
+                    "warp",
+                    ctx.now_unix(),
+                ) {
+                    return Some(Err(e));
+                }
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    caller_ship_id,
+                    Some(char_id),
+                    if caller_docked { session.solar_system_id } else { Some(sys_id) },
+                    "fleet_warp",
+                    if caller_docked {
+                        "Caller ship is docked and cannot warp"
+                    } else {
+                        "Active ship is not spawned in space"
+                    },
+                )));
+            };
             if let Err(e) = crate::services::nav_warp_interdiction::validate_pre_warp_common(
                 ctx,
                 char_id,
@@ -773,14 +820,16 @@ pub(super) async fn handle_fleet_ops(
             let mut rows = Vec::with_capacity(members_info.len());
             for (cid, ship_type_id, sys_id, ship_id, wid, sid, role_num, takes_warp) in members_info
             {
-                let sys = ctx.systems.get_or_spawn(sys_id);
-                let pos = sys
-                    .get_ball_snapshot(ship_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|(_, b)| b.position)
-                    .unwrap_or(DVec3::ZERO);
+                let pos = if let Some(sys) = ctx.systems.get_handle(sys_id) {
+                    sys.get_ball_snapshot(ship_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|(_, b)| b.position)
+                        .unwrap_or(DVec3::ZERO)
+                } else {
+                    DVec3::ZERO
+                };
 
                 rows.push(vec![
                     PyRep::Integer(cid),
@@ -908,15 +957,16 @@ pub(super) async fn handle_fleet_ops(
                 Ok((candidates, skipped))
             });
             let (candidates, skipped) = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let cmd_pos = sys_handle.get_ball_snapshot(caller_ship_id).await.ok().flatten().map(|(_, b)| b.position);
             let mut regrouped = Vec::new();
-            for (m_cid, m_ship) in candidates {
-                let sub_pos = sys_handle.get_ball_snapshot(m_ship).await.ok().flatten().map(|(_, b)| b.position);
-                let on_grid = match (cmd_pos, sub_pos) { (Some(cp), Some(sp)) => cp.distance(sp) <= 500_000.0, _ => true };
-                if on_grid {
-                    let _ = sys_handle.set_movement_mode(m_ship, MovementMode::Follow { target_id: caller_ship_id, range: 1_000.0 }).await;
-                    regrouped.push(PyRep::Integer(m_cid));
+            if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+                let cmd_pos = sys_handle.get_ball_snapshot(caller_ship_id).await.ok().flatten().map(|(_, b)| b.position);
+                for (m_cid, m_ship) in candidates {
+                    let sub_pos = sys_handle.get_ball_snapshot(m_ship).await.ok().flatten().map(|(_, b)| b.position);
+                    let on_grid = match (cmd_pos, sub_pos) { (Some(cp), Some(sp)) => cp.distance(sp) <= 500_000.0, _ => true };
+                    if on_grid {
+                        let _ = sys_handle.set_movement_mode(m_ship, MovementMode::Follow { target_id: caller_ship_id, range: 1_000.0 }).await;
+                        regrouped.push(PyRep::Integer(m_cid));
+                    }
                 }
             }
             Some(Ok(PyRep::keyval([
@@ -1371,7 +1421,15 @@ pub(crate) async fn handle_fleet_warp(
     {
         return Some(Err(e));
     }
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        return Some(Err(BridgeRpcError::ship_not_in_space(
+            resolved_caller_ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "FleetWarp",
+            "Active ship is not spawned in space",
+        )));
+    };
     let caller_ship_id = resolved_caller_ship_id;
     let caller_pos = sys
         .get_ball_snapshot(caller_ship_id)

@@ -1284,3 +1284,74 @@ async fn nav_commands_happy_paths_and_cloak_mjfg_sync_exact_branch_mutants() {
     assert!((cs_mj3.mjfg_spool_remaining_s - 9.0).abs() < 1e-6);
     assert_eq!(cs_mj3.mjfg_sig_multiplier, Some(2.5));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_system_nav_handlers_and_tether_sync_do_not_wake_system_actor() {
+    let ctx = test_ctx();
+    let cold_sys = 30_000_142_u32;
+    let char_id = 96_999_i64;
+    let ship_id = 78_999_i64;
+
+    ctx.db
+        .provision_gm_account("nav_cold_pilot", "pw", char_id, "NavColdPilot");
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = cold_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        put_item(
+            snap,
+            ship_id,
+            588,
+            char_id,
+            i64::from(cold_sys),
+            InventoryFlag::None,
+            1,
+        );
+    });
+
+    let bound = bound_sys(cold_sys, char_id);
+    let mut sess = SessionState::new(745);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(cold_sys);
+    sess.ship_id = Some(ship_id);
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+
+    sync_tether(&ctx, char_id, cold_sys, ship_id).await;
+
+    let stop_err = handle_cmd_stop(&ctx, &sess, Some(&bound))
+        .await
+        .unwrap_err();
+    assert_eq!(stop_err.code, "ShipNotInSpace");
+
+    let dir_err = handle_cmd_goto_direction(
+        &ctx,
+        &sess,
+        Some(&bound),
+        &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(dir_err.code, "ShipNotInSpace");
+
+    if let Some(c) = ctx.sde.celestials_in_system(cold_sys).into_iter().next() {
+        assert!(resolve_system_target_position(&ctx, cold_sys, char_id, c.celestial_id)
+            .await
+            .is_some());
+    }
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+}

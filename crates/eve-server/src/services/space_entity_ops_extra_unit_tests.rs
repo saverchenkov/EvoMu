@@ -288,3 +288,102 @@ async fn entity_unanchor_behavior_debug_extra_fleet_members_and_shipping_unit_br
         "AccessDenied"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_system_entity_ops_do_not_wake_system_actor() {
+    let ctx = test_ctx();
+    let cold_sys = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let ship_id = 100_000_999_i64;
+    let bm_id = 66_999_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = cold_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(cold_sys),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.bookmarks.insert(
+            bm_id,
+            BookmarkRecord {
+                bookmark_id: bm_id,
+                owner_id: char_id,
+                label: "Cold Entity Safe".into(),
+                solar_system_id: cold_sys,
+                x: 2_000_000.0,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.fleets.insert(
+            899,
+            FleetRecord {
+                fleet_id: 899,
+                boss_id: char_id,
+                members: vec![char_id],
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = make_session(
+        char_id,
+        corp_id,
+        Some(cold_sys),
+        Some(ship_id),
+        service_roles::ROLE_PLAYER_DEFAULT,
+    );
+    sess.fleet_id = Some(899);
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+
+    let bm_err = call_ops(&ctx, &mut sess, "beyonce", "CmdGotoBookmark", &[PyRep::Integer(bm_id)])
+        .await
+        .unwrap_err();
+    assert_eq!(bm_err.code, "ShipNotInSpace");
+
+    let unit_err = call_ops(
+        &ctx,
+        &mut sess,
+        "entity",
+        "OpenShippingUnitStorage",
+        &[PyRep::Integer(999_888)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unit_err.code, "UnitNotInSpace");
+
+    let fleet_loc = call_ops(&ctx, &mut sess, "beyonce", "GetFleetLocationAndInfo", &[])
+        .await
+        .unwrap();
+    assert!(matches!(fleet_loc, PyRep::Dict(_)));
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+}
