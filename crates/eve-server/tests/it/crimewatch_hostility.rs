@@ -155,12 +155,16 @@ async fn test_plan_c7_sentry_scoop_and_same_grid_recall_and_abandon() {
 
     dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdReturnBay", &[PyRep::List(vec![PyRep::Integer(mob_ball_id)])], &kw).await.expect("CmdReturnBay skips out-of-range drone");
     assert_eq!(eve_server::services::drone_test_helpers::active_drone(&ctx, mob_ball_id).unwrap().activity_state, 0);
-    let oor_home = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdReturnHome", &[PyRep::List(vec![PyRep::Integer(mob_ball_id)])], &kw).await.expect("CmdReturnHome returns count of recalled drones");
-    assert_eq!(oor_home, PyRep::Integer(0));
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let oor_home = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdReturnHome", &[PyRep::List(vec![PyRep::Integer(mob_ball_id)])], &kw).await.expect("CmdReturnHome returns {}");
+    assert_eq!(oor_home, PyRep::Dict(Vec::new()));
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty(), "Out-of-range CmdReturnHome must emit no notifications");
     let _ = sys_handle.add_target_lock(ship_id, eve_destiny::TargetLock { target_id: dummy_target_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
+    let dummy_sh_before = sys_handle.get_combat_state(dummy_target_id).await.unwrap().unwrap().shield_hp;
     let engage_oor = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(mob_ball_id)]), PyRep::Integer(dummy_target_id)], &kw)
         .await.expect("CmdEngage skips out-of-range drone");
-    assert_eq!(dict_get(&engage_oor, "totalDamageDealt"), Some(&PyRep::Real(0.0)));
+    assert_eq!(engage_oor, PyRep::Dict(Vec::new()));
+    assert_eq!(sys_handle.get_combat_state(dummy_target_id).await.unwrap().unwrap().shield_hp, dummy_sh_before);
     assert_eq!(eve_server::services::drone_test_helpers::active_drone(&ctx, mob_ball_id).unwrap().activity_state, 0);
 
     let _ = sys_handle.spawn_ball(Ball {
@@ -375,8 +379,11 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
     let sub_balls: Vec<i64> = match launch_two { PyRep::List(v) => v.iter().filter_map(PyRep::as_i64).collect(), _ => panic!() };
     assert_eq!(sub_balls.len(), 2);
     let _ = sys_handle.add_target_lock(ship_id, eve_destiny::TargetLock { target_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
+    let hp_before_sub = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
     let sub_eng = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::Integer(target_id)], &kw).await.unwrap();
-    assert!(dict_get(&sub_eng, "totalDamageDealt").and_then(PyRep::as_f64).unwrap() > 0.0);
+    assert_eq!(sub_eng, PyRep::Dict(Vec::new()));
+    let hp_after_sub = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
+    assert!(hp_before_sub - hp_after_sub > 0.0);
     for bid in sub_balls {
         dispatch_combat_rpc(&ctx, &mut sess, "ship", "ScoopToDroneBay", &[PyRep::Integer(bid)], &kw).await.unwrap();
     }
@@ -387,14 +394,19 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
     let gecko_rt = eve_server::services::drone_test_helpers::active_drone(&ctx, gecko_ball_id).unwrap();
     assert_eq!(gecko_rt.bandwidth_used, 50.0);
     assert!(gecko_rt.damage_vector.em > 0.0 && gecko_rt.damage_vector.thermal > 0.0 && gecko_rt.damage_vector.kinetic > 0.0 && gecko_rt.damage_vector.explosive > 0.0);
+    let hp_before_gecko = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
     let gecko_eng1 = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::Integer(target_id)], &kw).await.unwrap();
-    let gecko_volley = dict_get(&gecko_eng1, "totalDamageDealt").and_then(PyRep::as_f64).unwrap();
+    assert_eq!(gecko_eng1, PyRep::Dict(Vec::new()));
+    let hp_after_gecko = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
+    let gecko_volley = hp_before_gecko - hp_after_gecko;
     assert!(gecko_volley > 0.0);
     // Spamming CmdEngage at the same clock timestamp is rate-limited by SDE cycle duration (`attr 51`) -> 0 extra damage
     let gecko_eng_spam = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::Integer(target_id)], &kw).await.unwrap();
-    assert_eq!(dict_get(&gecko_eng_spam, "totalDamageDealt").and_then(PyRep::as_f64), Some(0.0));
+    assert_eq!(gecko_eng_spam, PyRep::Dict(Vec::new()));
+    let hp_after_spam = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
+    assert!((hp_after_gecko - hp_after_spam).abs() < 1e-6);
     // Advancing clock by 4s (`attr 51 == 4000 ms`) and ticking fires the next cycle volley
-    let hp_before_tick = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
+    let hp_before_tick = hp_after_spam;
     ctx.advance_secs(4);
     eve_server::services::combat_crimewatch::combat_npcs_drones::step_engaged_drones(&ctx, ctx.now_unix()).await;
     let hp_after_tick = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
@@ -404,8 +416,11 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
     // 2. Compare combat attack cycle (`entity.CmdEngage`) of unmutated vs Abyssal mutated `Hobgoblin II` (2456) and `Augmented Hammerhead` (28266).
     let base_launch = dispatch_combat_rpc(&ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(base_hob_id)])], &kw).await.expect("Launch unmutated Hobgoblin II");
     let base_ball_id = match base_launch { PyRep::List(v) => v[0].as_i64().unwrap(), _ => panic!() };
+    let hp_before_base = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
     let base_eng = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(base_ball_id)]), PyRep::Integer(target_id)], &kw).await.expect("Unmutated Hobgoblin II engages target");
-    let base_dmg = dict_get(&base_eng, "totalDamageDealt").and_then(PyRep::as_f64).unwrap();
+    assert_eq!(base_eng, PyRep::Dict(Vec::new()));
+    let hp_after_base = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
+    let base_dmg = hp_before_base - hp_after_base;
     assert!(base_dmg > 0.0);
     dispatch_combat_rpc(&ctx, &mut sess, "ship", "ScoopToDroneBay", &[PyRep::Integer(base_ball_id)], &kw).await.unwrap();
 
@@ -422,11 +437,16 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
     let mut_cs = sys_handle.get_combat_state(mut_ball_id).await.unwrap().unwrap();
     assert_eq!((mut_cs.max_shield_hp, mut_cs.max_armor_hp, mut_cs.max_structure_hp), (1200.0, 950.0, 800.0));
 
+    let hp_before_aug = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
     let aug_eng = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(aug_ball_id)]), PyRep::Integer(target_id)], &kw).await.unwrap();
-    assert!(dict_get(&aug_eng, "totalDamageDealt").and_then(PyRep::as_f64).unwrap() > 0.0, "Augmented Hammerhead must deal split combat damage");
+    assert_eq!(aug_eng, PyRep::Dict(Vec::new()));
+    let hp_after_aug = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
+    assert!(hp_before_aug - hp_after_aug > 0.0, "Augmented Hammerhead must deal split combat damage");
 
     let mut_eng = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(mut_ball_id)]), PyRep::Integer(target_id)], &kw).await.expect("Mutated Hobgoblin II engages target");
-    let mut_dmg = dict_get(&mut_eng, "totalDamageDealt").and_then(PyRep::as_f64).unwrap();
+    assert_eq!(mut_eng, PyRep::Dict(Vec::new()));
+    let hp_after_mut = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
+    let mut_dmg = hp_after_aug - hp_after_mut;
     assert!((mut_dmg - base_dmg * 2.25).abs() < 1e-2, "Mutated drone with damageMultiplier=2.25 must deal 2.25x base damage");
 
     let (applied, destroyed) = apply_damage_to_drone_in_space(&ctx, sys_id, mut_ball_id, DamageVector { em: 500.0, thermal: 0.0, kinetic: 0.0, explosive: 0.0 }).await;
@@ -453,10 +473,15 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
     let _ = sys_handle.add_target_lock(ship_id, eve_destiny::TargetLock { target_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
     let launch_pair = dispatch_combat_rpc(&ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(base_hob_id), PyRep::Integer(track_hob_id)])], &kw).await.unwrap();
     let (b_ball, t_ball) = match launch_pair { PyRep::List(v) => (v[0].as_i64().unwrap(), v[1].as_i64().unwrap()), _ => panic!() };
+    let hp_before_b = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
     let b_eng = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(b_ball)]), PyRep::Integer(target_id)], &kw).await.unwrap();
+    assert_eq!(b_eng, PyRep::Dict(Vec::new()));
+    let hp_after_b = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
     let t_eng = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(t_ball)]), PyRep::Integer(target_id)], &kw).await.unwrap();
-    let b_moving_dmg = dict_get(&b_eng, "totalDamageDealt").and_then(PyRep::as_f64).unwrap();
-    let t_moving_dmg = dict_get(&t_eng, "totalDamageDealt").and_then(PyRep::as_f64).unwrap();
+    assert_eq!(t_eng, PyRep::Dict(Vec::new()));
+    let hp_after_t = sys_handle.get_combat_state(target_id).await.unwrap().unwrap().shield_hp;
+    let b_moving_dmg = hp_before_b - hp_after_b;
+    let t_moving_dmg = hp_after_b - hp_after_t;
     assert!(b_moving_dmg < base_dmg * 0.75, "Fast transversal target must reduce unmutated drone damage via tracking formula");
     assert!(t_moving_dmg > b_moving_dmg * 1.25, "Mutated trackingSpeed (4.5 vs SDE base) with identical damageMultiplier must deal >25% higher combat damage on fast target (got {t_moving_dmg} vs {b_moving_dmg})");
 }

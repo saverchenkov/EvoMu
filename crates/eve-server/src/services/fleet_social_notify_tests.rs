@@ -455,3 +455,63 @@ async fn stream_fleet_watchlist_damage_skips_docked_target_and_scopes_watcher_wi
         }
     }
 }
+
+#[tokio::test]
+async fn on_fleet_member_changed_validates_all_nine_role_hierarchy_transitions() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let (fleet_id, _) = seed_multi_member_fleet(&ctx).await;
+    let boss_id = 90_000_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut acct) = snap.accounts.values().next().cloned() {
+            acct.user_id = boss_id as u64;
+            acct.username = "fleet_notify_boss_9".into();
+            snap.accounts.insert(acct.username.clone(), acct);
+        }
+    });
+    ctx.db
+        .acquire_online_lock(boss_id as u64, 902, Some(boss_id), true, 1_700_000_000)
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(boss_id);
+
+    let states = [
+        ("FC", FleetRole::FleetCommander, None, None),
+        ("WC", FleetRole::WingCommander, Some(710_001), None),
+        ("Squad", FleetRole::SquadMember, Some(710_001), Some(720_001)),
+    ];
+    for (old_label, old_role, old_wing, old_squad) in states {
+        let old = mk_member(90_000_002, old_role, old_wing, old_squad);
+        for (new_label, new_role, new_wing, new_squad) in states {
+            let new = mk_member(90_000_002, new_role, new_wing, new_squad);
+            emit_member_changed(&ctx, fleet_id, &old, &new, false);
+            let notifs = ctx.drain_notifications_for_char(boss_id);
+            let ev = notifs
+                .iter()
+                .find(|n| n.event == "OnFleetMemberChanged")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected OnFleetMemberChanged for {old_label} -> {new_label}, got {notifs:?}"
+                    )
+                });
+            assert_eq!(
+                ev.args[2],
+                old_wing.map(PyRep::Integer).unwrap_or(PyRep::None),
+                "{old_label} -> {new_label} old_wing"
+            );
+            assert_eq!(
+                ev.args[3],
+                old_squad.map(PyRep::Integer).unwrap_or(PyRep::None),
+                "{old_label} -> {new_label} old_squad"
+            );
+            assert_eq!(
+                ev.args[7],
+                new_wing.map(PyRep::Integer).unwrap_or(PyRep::None),
+                "{old_label} -> {new_label} new_wing"
+            );
+            assert_eq!(
+                ev.args[8],
+                new_squad.map(PyRep::Integer).unwrap_or(PyRep::None),
+                "{old_label} -> {new_label} new_squad"
+            );
+        }
+    }
+}

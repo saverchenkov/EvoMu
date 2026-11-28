@@ -2,7 +2,7 @@
   "version": 2,
   "counters": {
     "rpc_rules": {
-      "crates/eve-server/src/router/client_compat.rs": 6
+      "crates/eve-server/src/router/client_compat.rs": 5
     },
     "suppress_rules": {
       "crates/eve-server/src/router/client_compat.rs": 5
@@ -12,7 +12,7 @@
     },
     "destiny_rewrites": {},
     "production_lines": {
-      "crates/eve-server/src/router/client_compat.rs": 1174
+      "crates/eve-server/src/router/client_compat.rs": 1162
     },
     "sequencer_set_state_rewrites": {
       "crates/eve-server/src/outbound_sequencer.rs": 18
@@ -23,7 +23,7 @@
     },
     "direct_layer_test_calls": {
       "crates/eve-server/src/macho_listener_deep_extra_unit_tests.rs": 2,
-      "crates/eve-server/src/router/client_compat_cov_unit_tests.rs": 27,
+      "crates/eve-server/src/router/client_compat_cov_unit_tests.rs": 26,
       "crates/eve-server/src/router/client_compat_extra_tests.rs": 58,
       "crates/eve-server/src/router/notify_registry_tests.rs": 1,
       "crates/eve-server/src/services/w4_gh758_804_mutant_killers_unit_tests.rs": 2,
@@ -32,7 +32,7 @@
     "service_caller_trace_comparisons": {},
     "service_caller_trace_params": {}
   },
-  "max_transport_differing_replies": 22,
+  "max_transport_differing_replies": 21,
   "known_rules": [
     "notify:DoDestinyUpdates",
     "notify:OnChannelJoined",
@@ -74,10 +74,6 @@
     "rpc:dungeonInstanceCacheMgr.GetIceBeltInstances",
     "rpc:dungeonInstanceCacheMgr.GetOreAnomalyInstances",
     "rpc:dungeonInstanceCacheMgr.GetSignatureInstances",
-    "rpc:entity.CmdEngage",
-    "rpc:entity.CmdReturnAndOrbit",
-    "rpc:entity.CmdReturnBay",
-    "rpc:entity.CmdReturnHome",
     "suppress:DoDestinyUpdate",
     "suppress:OnCombatMessage",
     "suppress:OnDamageStateChange",

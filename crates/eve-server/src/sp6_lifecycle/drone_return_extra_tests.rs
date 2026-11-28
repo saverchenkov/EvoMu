@@ -2127,7 +2127,7 @@ async fn scoop_claim_blocks_engage_return_home_assist_guard_and_mining() {
     wait_for_scoop_claim(&sys_handle, d_combat).await;
     let _ = ctx.drain_notifications_for_char(owner_char);
     handle_npcs_drones(&ctx, &mut owner_sess.clone(), "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(d_combat)]), PyRep::Integer(npc_target)], &kw).await.unwrap().unwrap();
-    assert_eq!(handle_npcs_drones(&ctx, &mut owner_sess.clone(), "entity", "CmdReturnHome", &[PyRep::List(vec![PyRep::Integer(d_combat)])], &kw).await.unwrap().unwrap(), PyRep::Integer(0));
+    assert_eq!(handle_npcs_drones(&ctx, &mut owner_sess.clone(), "entity", "CmdReturnHome", &[PyRep::List(vec![PyRep::Integer(d_combat)])], &kw).await.unwrap().unwrap(), PyRep::Dict(Vec::new()));
     for m in ["CmdAssist", "CmdGuard"] { assert_eq!(handle_npcs_drones(&ctx, &mut owner_sess.clone(), "entity", m, &[PyRep::Integer(ally_char), PyRep::List(vec![PyRep::Integer(d_combat)])], &kw).await.unwrap().unwrap().dict_get("droneCount").and_then(PyRep::as_i64), Some(0)); }
     assert_eq!((sys_handle.get_combat_state(npc_target).await.unwrap().unwrap().shield_hp, drone_test_helpers::active_drone(&ctx, d_combat).unwrap().activity_state), (500.0, 0));
     assert_no_notifs(&ctx);

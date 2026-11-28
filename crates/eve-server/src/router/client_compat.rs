@@ -245,18 +245,6 @@ pub fn normalize_macho_rpc_reply_at(
         if let Ok(rep) = rpc_res {
             return Ok(normalize_agent_do_action_rep(rep));
         }
-    } else if service == "entity"
-        && matches!(
-            method,
-            "CmdEngage" | "CmdReturnHome" | "CmdReturnAndOrbit" | "CmdReturnBay"
-        )
-    {
-        if let Ok(rep) = rpc_res {
-            if matches!(rep, PyRep::Dict(_)) {
-                return Ok(rep);
-            }
-            return Ok(PyRep::Dict(Vec::new()));
-        }
     }
     rpc_res
 }

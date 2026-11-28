@@ -1756,7 +1756,16 @@ fn tx_multi_player_isolation_on_fault_and_panic() {
             ch.balance = IskCents(ch.balance.0 + 500_000);
             ch.version += 1;
         }
-        wtx.effects.notify_character(cid_a, "OnAccountChange", "charid", vec![]);
+        wtx.effects.notify_character(
+            cid_a,
+            "OnAccountChange",
+            "charid",
+            vec![
+                eve_proto::PyRep::String("cash".into()),
+                eve_proto::PyRep::Integer(cid_a),
+                eve_proto::PyRep::Real((bal_a_init.0 + 500_000) as f64 / 100.0),
+            ],
+        );
         wtx.effects.notify_character(cid_b, "OnItemChange", "charid", vec![]);
         Ok(())
     });
@@ -1768,7 +1777,16 @@ fn tx_multi_player_isolation_on_fault_and_panic() {
             ch.balance = IskCents(1);
             ch.version += 1;
         }
-        wtx.effects.notify_character(cid_a, "OnAccountChange", "charid", vec![]);
+        wtx.effects.notify_character(
+            cid_a,
+            "OnAccountChange",
+            "charid",
+            vec![
+                eve_proto::PyRep::String("cash".into()),
+                eve_proto::PyRep::Integer(cid_a),
+                eve_proto::PyRep::Real(0.01),
+            ],
+        );
         wtx.effects.notify_character(cid_b, "OnItemChange", "charid", vec![]);
         panic!("simulated player A rpc handler panic");
     });
@@ -1783,7 +1801,16 @@ fn tx_multi_player_isolation_on_fault_and_panic() {
             ch.balance = IskCents(ch.balance.0 + 42_000);
             ch.version += 1;
         }
-        wtx.effects.notify_character(cid_b, "OnAccountChange", "charid", vec![]);
+        wtx.effects.notify_character(
+            cid_b,
+            "OnAccountChange",
+            "charid",
+            vec![
+                eve_proto::PyRep::String("cash".into()),
+                eve_proto::PyRep::Integer(cid_b),
+                eve_proto::PyRep::Real((bal_b_init.0 + 42_000) as f64 / 100.0),
+            ],
+        );
         Ok(())
     });
     assert!(ok_b.is_ok());
