@@ -2858,13 +2858,19 @@ async fn zero_anomaly_system_read_paths_stay_readonly_after_initialization() {
     });
     assert_eq!(sig_ids_after, sig_ids_before);
 
-    // Baseline comparison: reset probe to IDLE and insert one active anomaly; RequestScans must
-    // execute the exact same commit count (no extra ensure_system_signatures_and_anomalies write).
+    // Baseline comparison: reset probe to IDLE, clear the scan progress/marks written by the
+    // zero-anomaly RequestScans so persisted scan-progress writes match identically, and insert one
+    // active anomaly; RequestScans must execute the exact same commit count (no extra
+    // ensure_system_signatures_and_anomalies write).
     if let Some(p) = ctx.active_scanner_probes.write().unwrap().get_mut(&890_500_011) {
         p.state = PROBE_STATE_IDLE;
     }
     sync_scanner_probes_to_db(&ctx);
     ctx.db.with_mut_snapshot(|snap| {
+        snap.character_scan_progress
+            .retain(|(cid, sid, _), _| !(*cid == char_id && *sid == sys_id));
+        snap.scanned_signatures
+            .retain(|(cid, sid, _)| !(*cid == char_id && *sid == sys_id));
         snap.cosmic_anomalies.insert(
             sys_id,
             vec![eve_db::CosmicAnomalyRecord {
