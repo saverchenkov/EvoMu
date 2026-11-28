@@ -659,7 +659,10 @@ fn make_dummy_system_handle(cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>) ->
         target_lock_completed_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
-        actor_flush_thread: Arc::new(std::sync::Mutex::new(None)),
+        post_unlock_actions_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        post_unlock_fallback_drain_lock: Arc::new(std::sync::Mutex::new(())),
+        post_unlock_fallback_owner_tid: Arc::new(std::sync::Mutex::new(None)),
+        worker_awaiting_actor_cmd: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         published_live: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cooldown_persist_gate: Arc::new(super::super::CooldownPersistGate::default()),
     };
@@ -2228,6 +2231,12 @@ async fn arch_1342_4c_f02_closed_post_unlock_deact_hook_guards_actor_flush_threa
     .await
     .unwrap();
 
+    let actor_tid = Arc::new(std::sync::OnceLock::new());
+    let actor_tid_cap = Arc::clone(&actor_tid);
+    assert!(h.try_update_combat_state(alive_ship_id, move |_| {
+        let _ = actor_tid_cap.set(std::thread::current().id());
+    }));
+
     let hook_done = Arc::new(AtomicBool::new(false));
     let flush_thread_ok = Arc::new(AtomicBool::new(false));
     let ewar_ok = Arc::new(AtomicBool::new(false));
@@ -2235,7 +2244,7 @@ async fn arch_1342_4c_f02_closed_post_unlock_deact_hook_guards_actor_flush_threa
     let second_ewar_empty = Arc::new(AtomicBool::new(false));
     let removed_destiny_false = Arc::new(AtomicBool::new(false));
     let alive_destiny_true_and_visible = Arc::new(AtomicBool::new(false));
-    let (hd, ftok, eok, evc, see, rdf, adtv, h_hook) = (
+    let (hd, ftok, eok, evc, see, rdf, adtv, h_hook, actor_tid_hook) = (
         Arc::clone(&hook_done),
         Arc::clone(&flush_thread_ok),
         Arc::clone(&ewar_ok),
@@ -2244,9 +2253,17 @@ async fn arch_1342_4c_f02_closed_post_unlock_deact_hook_guards_actor_flush_threa
         Arc::clone(&removed_destiny_false),
         Arc::clone(&alive_destiny_true_and_visible),
         h.clone(),
+        Arc::clone(&actor_tid),
     );
     ctx.systems.set_module_deactivation_hook(Arc::new(move |_sid, _cid, _cyc| {
-        ftok.store(h_hook.is_on_actor_flush_thread(), Ordering::Release);
+        let cur_tid = std::thread::current().id();
+        let on_fallback = h_hook.is_on_post_unlock_fallback_thread()
+            && std::thread::current()
+                .name()
+                .is_some_and(|n| n.starts_with("post-unlock-fallback-"))
+            && tokio::runtime::Handle::try_current().is_err()
+            && actor_tid_hook.get() != Some(&cur_tid);
+        ftok.store(on_fallback, Ordering::Release);
         if let Ok(snap) = h_hook.flush_module_ewar_sync(ship_id, module_id, false) {
             if !snap.started_targets.is_empty() {
                 eok.store(true, Ordering::Release);
@@ -2280,7 +2297,7 @@ async fn arch_1342_4c_f02_closed_post_unlock_deact_hook_guards_actor_flush_threa
 
     let started = std::time::Instant::now();
     h.try_remove_ball(ship_id);
-    assert!(started.elapsed() < std::time::Duration::from_secs(2), "actor flush hook must not self-deadlock");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "off-actor fallback hook must not self-deadlock");
     assert!(hook_done.load(Ordering::Acquire));
     assert!(flush_thread_ok.load(Ordering::Acquire));
     assert!(ewar_ok.load(Ordering::Acquire));
@@ -2288,7 +2305,7 @@ async fn arch_1342_4c_f02_closed_post_unlock_deact_hook_guards_actor_flush_threa
     assert!(second_ewar_empty.load(Ordering::Acquire));
     assert!(removed_destiny_false.load(Ordering::Acquire));
     assert!(alive_destiny_true_and_visible.load(Ordering::Acquire));
-    assert!(!h.is_on_actor_flush_thread());
+    assert!(!h.is_on_post_unlock_callback_thread());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2654,10 +2671,9 @@ async fn arch_1342_4c_r2_p1_03_closed_worker_direct_flush_panic_keeps_actor_aliv
         .unwrap();
     rm_rx.await.expect("batch_deferred_db_replies must still deliver after direct flush panic");
     assert!(h.command_panics.load(Ordering::Acquire) > panics_before);
-    assert!(!h.is_on_actor_flush_thread());
     assert!(!h.cmd_sender().is_closed());
 
-    // Also verify `flush_post_unlock_actions_on_actor` catches individual panics without killing actor
+    // Also verify off-actor `post_unlock_actions` fallback catches individual panics without killing actor
     // and still executes subsequent queued actions.
     let panics_mid = h.command_panics.load(Ordering::Acquire);
     let second_action_ran = Arc::new(AtomicBool::new(false));
@@ -2671,5 +2687,88 @@ async fn arch_1342_4c_r2_p1_03_closed_worker_direct_flush_panic_keeps_actor_aliv
     assert!(h.query_current_tick().await.is_ok());
     assert!(second_action_ran.load(Ordering::Acquire));
     assert!(h.command_panics.load(Ordering::Acquire) > panics_mid);
-    assert!(!h.is_on_actor_flush_thread());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4d5_post_unlock_actions_callback_runs_on_worker_via_mailbox_mt_and_ct() {
+    async fn run_case(ctx: ServerContext) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let sys_id = 30_000_142_u32;
+        let (char_id, ship_id, target_id, mod_id) =
+            (90_000_701_i64, 799_711_i64, 799_712_i64, 799_713_i64);
+        let h = ctx.systems.get_or_spawn(sys_id);
+        h.try_spawn_ball_with_meta(
+            make_ball(ship_id, 587, DVec3::ZERO),
+            make_combat_state(100.0, 100.0, 100.0, 100.0),
+            SlimItemMeta { char_id: Some(char_id), ..Default::default() },
+        );
+        h.record_active_ewar_start_sync(ship_id, mod_id, target_id, "web").unwrap();
+
+        let actor_tid = Arc::new(std::sync::OnceLock::new());
+        let actor_tid_cap = Arc::clone(&actor_tid);
+        assert!(h.try_update_combat_state(ship_id, move |_| {
+            let _ = actor_tid_cap.set(std::thread::current().id());
+        }));
+
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let ran_on_worker = Arc::new(AtomicBool::new(false));
+        let second_ran = Arc::new(AtomicBool::new(false));
+        let (row_c, sec_c, h_cb, actor_tid_c) = (
+            Arc::clone(&ran_on_worker),
+            Arc::clone(&second_ran),
+            h.clone(),
+            Arc::clone(&actor_tid),
+        );
+        let started = std::time::Instant::now();
+        h.enqueue_post_unlock_action(Box::new(move || {
+            let cur_tid = std::thread::current().id();
+            let on_worker = h_cb.is_on_post_unlock_worker_thread()
+                && h_cb.post_unlock_worker_thread_id.get() == Some(&cur_tid)
+                && actor_tid_c.get() != Some(&cur_tid)
+                && tokio::runtime::Handle::try_current().is_err()
+                && eve_db::lock_rank::held_lock_ranks().is_empty();
+            let ewar_snap = h_cb.flush_module_ewar_sync(ship_id, mod_id, false).unwrap();
+            let destiny_ok = h_cb.try_emit_destiny_event(
+                ship_id,
+                DestinyEvent::SetSpeedFraction { ball_id: ship_id, fraction: 0.42 },
+            );
+            let view = h_cb.view();
+            let view_ok = !view.ewar.active_ewar_starts.contains_key(&(ship_id, mod_id))
+                && view.ball(ship_id).is_some_and(|b| (b.speed_fraction - 0.42).abs() < 1e-6);
+            row_c.store(
+                on_worker && !ewar_snap.started_targets.is_empty() && destiny_ok && view_ok,
+                Ordering::Release,
+            );
+        }));
+        h.enqueue_post_unlock_action(Box::new(move || {
+            sec_c.store(true, Ordering::Release);
+            let _ = done_tx.send(());
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(2), done_rx)
+            .await
+            .expect("post_unlock_actions callback must complete without deadlock")
+            .expect("done_tx must fire");
+        assert!(h.wait_for_post_unlock_barrier().await);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(ran_on_worker.load(Ordering::Acquire));
+        assert!(second_ran.load(Ordering::Acquire));
+        assert_eq!(h.command_panics.load(Ordering::Acquire), 0);
+    }
+
+    run_case(test_ctx()).await;
+
+    let ct_join = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            run_case(test_ctx()).await;
+        });
+    })
+    .join();
+    assert!(
+        ct_join.is_ok(),
+        "CurrentThread post_unlock_actions callback test must complete without deadlock"
+    );
 }

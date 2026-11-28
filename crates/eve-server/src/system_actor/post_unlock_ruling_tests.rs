@@ -2569,8 +2569,8 @@ async fn track_4d2_ct_actor_driver_drop_from_own_worker_and_post_unlock_actions_
     let _ = h_a;
     ct_thread_a.join().expect("join CurrentThread runtime thread A");
 
-    // Part B: Cloned `SystemHandle` moved into `post_unlock_actions`, executed by actor on
-    // `CtActorDriver` worker thread after external `SystemRegistry` + `SystemHandle` drop.
+    // Part B: Cloned `SystemHandle` moved into `post_unlock_actions`, executed on the
+    // `post_unlock_worker` OS thread after external `SystemRegistry` + `SystemHandle` drop.
     let part_b_start = std::time::Instant::now();
     let reg_b = Arc::new(SystemRegistry::with_sde(Arc::clone(&ctx.sde)));
     let (h_b, drop_rt_tx_b, join_b) = {
@@ -2602,22 +2602,22 @@ async fn track_4d2_ct_actor_driver_drop_from_own_worker_and_post_unlock_actions_
             .expect("CurrentThread attaches driver"),
     );
     h_b.enqueue_post_unlock_action(Box::new(move || {
-        // Confirm execution has already entered `CtActorDriver`'s worker thread, then wait briefly
+        // Confirm execution has already entered `post_unlock_worker`, then wait briefly
         // so external `h_b` and `reg_b` drop first and `h_b_captured` is the last strong ref.
         let _ = entered_tx.send(());
         let _ = ready_rx.recv();
         drop(h_b_captured);
         let _ = action_tx.send(());
     }));
-    // Dispatch non-blocking wake command so `flush_post_unlock_actions_on_actor` executes on
-    // `CtActorDriver`'s worker thread without waiting on a synchronous actor reply.
+    // Dispatch non-blocking wake command alongside `PostUnlockMsg::FlushActions` so `post_unlock_worker`
+    // enters cleanly without waiting on a synchronous actor reply.
     let (tick_tx, _tick_rx) = tokio::sync::oneshot::channel();
     h_b.cmd_sender()
         .try_send(crate::system_actor::SystemCommand::CurrentTick { reply: tick_tx })
         .expect("enqueue non-blocking CurrentTick wake command");
     tokio::time::timeout(Duration::from_secs(2), entered_rx)
         .await
-        .expect("post_unlock_actions closure must enter on CtActorDriver worker thread")
+        .expect("post_unlock_actions closure must enter on post_unlock_worker thread")
         .expect("entered_tx must fire");
     drop(h_b);
     drop(reg_b);

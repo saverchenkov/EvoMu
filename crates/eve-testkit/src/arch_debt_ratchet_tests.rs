@@ -275,9 +275,9 @@ mod tests {
     assert!(ext_live.files.is_empty());
 
     let sync_live = &live.patterns["system_handle_sync_lock_helpers"];
-    assert!(!sync_live.zero_required);
+    assert!(sync_live.zero_required);
     assert_eq!(sync_live.owning_issue, Some(1342));
-    assert!(sync_live.files.keys().all(|p| p.starts_with("system_actor")));
+    assert!(sync_live.files.is_empty());
 
     let err = live
         .assert_ratchet(&report)

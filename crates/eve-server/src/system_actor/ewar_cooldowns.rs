@@ -913,6 +913,17 @@ impl SystemHandle {
             .is_some_and(|&tid| tid == std::thread::current().id())
     }
 
+    pub(in crate::system_actor) fn is_on_post_unlock_fallback_thread(&self) -> bool {
+        self.post_unlock_fallback_owner_tid
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some_and(|tid| tid == std::thread::current().id())
+    }
+
+    pub(in crate::system_actor) fn is_on_post_unlock_callback_thread(&self) -> bool {
+        self.is_on_post_unlock_worker_thread() || self.is_on_post_unlock_fallback_thread()
+    }
+
     fn dispatch_worker_ewar_sync(
         &self,
         op: super::post_unlock::WorkerEwarSyncOp,
@@ -948,23 +959,6 @@ impl SystemHandle {
             return Err(format!(
                 "refusing flush_module_ewar_sync on system {} while holding ranked locks",
                 self.solar_system_id
-            ));
-        }
-        if self.is_on_actor_flush_thread() {
-            if self.cmd_tx.is_closed() {
-                return Err(format!("system {} actor closed", self.solar_system_id));
-            }
-            return Ok(super::ball_ops::run_direct_ball_op_on_current_thread(
-                self,
-                false,
-                |ctx| {
-                    flush_module_ewar_in_state(
-                        &mut ctx.actor_st.ewar_state,
-                        source_ship_id,
-                        source_module_id,
-                        allow_db_source_fallback,
-                    )
-                },
             ));
         }
         if self.is_on_post_unlock_worker_thread() {
@@ -1037,22 +1031,6 @@ impl SystemHandle {
             return Err(format!(
                 "refusing remove_remote_assistance_by_module_sync on system {} while holding ranked locks",
                 self.solar_system_id
-            ));
-        }
-        if self.is_on_actor_flush_thread() {
-            if self.cmd_tx.is_closed() {
-                return Err(format!("system {} actor closed", self.solar_system_id));
-            }
-            return Ok(super::ball_ops::run_direct_ball_op_on_current_thread(
-                self,
-                false,
-                |ctx| {
-                    remove_remote_assistance_by_module_in_state(
-                        &mut ctx.actor_st.ewar_state,
-                        source_ship_id,
-                        source_module_id,
-                    )
-                },
             ));
         }
         if self.is_on_post_unlock_worker_thread() {
@@ -1165,6 +1143,20 @@ impl SystemHandle {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(action);
+        if self
+            .post_unlock_tx
+            .send(super::post_unlock::PostUnlockMsg::FlushActions)
+            .is_err()
+        {
+            super::post_unlock::spawn_actions_fallback_thread(
+                self.solar_system_id,
+                Arc::clone(&self.post_unlock_actions),
+                Arc::clone(&self.post_unlock_actions_in_flight),
+                Arc::clone(&self.post_unlock_fallback_drain_lock),
+                Arc::clone(&self.post_unlock_fallback_owner_tid),
+                Arc::clone(&self.command_panics),
+            );
+        }
     }
 
     pub(in crate::system_actor) fn apply_loading_cooldown_transitions_sync(
@@ -1572,7 +1564,7 @@ fn flush_post_unlock_actions_inner(
         for action in batch {
             if let Some((solar_system_id, command_panics)) = panic_ctx {
                 if let Err(panic_payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
-                    let panic_count = command_panics.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let panic_count = command_panics.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                     let msg = panic_payload
                         .downcast_ref::<&str>()
                         .copied()

@@ -1064,9 +1064,10 @@ pub(in crate::system_actor) fn dispatch_actor_sync_try_queued_with_timeout<P, T:
     make_cmd: impl FnOnce(P, oneshot::Sender<T>) -> SystemCommand,
     _direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
 ) -> TryQueuedReply<T> {
-    if handle.cmd_tx.is_closed() || handle.is_on_actor_flush_thread() {
+    if handle.cmd_tx.is_closed() {
         return TryQueuedReply::FullOrClosed;
     }
+    let _worker_await_guard = ball_ops::WorkerAwaitingActorCmdGuard::enter(handle);
     match tokio::runtime::Handle::try_current() {
         Ok(rt_handle) => match rt_handle.runtime_flavor() {
             tokio::runtime::RuntimeFlavor::CurrentThread => {
@@ -1150,10 +1151,6 @@ pub(in crate::system_actor) fn dispatch_cmd_tx_sync_reply<T: Send + 'static>(
 }
 
 impl SystemHandle {
-    pub(in crate::system_actor) fn is_on_actor_flush_thread(&self) -> bool {
-        self.actor_flush_thread.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|id| id == std::thread::current().id())
-    }
-
     fn dispatch_fire_or_sync<P, T: Send + 'static>(
         &self,
         label: &str,
@@ -1162,7 +1159,7 @@ impl SystemHandle {
         make_cmd: impl FnOnce(P, oneshot::Sender<T>) -> SystemCommand,
         direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
     ) -> T {
-        if !held_lock_ranks().is_empty() || self.is_on_actor_flush_thread() {
+        if !held_lock_ranks().is_empty() {
             let (tx, _rx) = oneshot::channel();
             let _ = self.cmd_tx.try_send(make_cmd(payload, tx));
             return default;
@@ -1180,14 +1177,6 @@ impl SystemHandle {
     ) -> bool {
         if !held_lock_ranks().is_empty() {
             return false;
-        }
-        if self.is_on_actor_flush_thread() {
-            if self.cmd_tx.is_closed() {
-                return false;
-            }
-            return ball_ops::run_direct_ball_op_on_current_thread(self, false, |ctx| {
-                direct_fn(ctx, payload)
-            });
         }
         ball_ops::dispatch_actor_sync_reply_with_deadline(self, label, ACTOR_CMD_TIMEOUT, payload, make_cmd, direct_fn)
             .unwrap_or(false)
@@ -1224,7 +1213,7 @@ impl SystemHandle {
         if self.cmd_tx.is_closed() || self.get_ball_position_sync(ball_id).is_none() {
             return TryRepairCombatOutcome::NotPresent;
         }
-        if !held_lock_ranks().is_empty() || self.is_on_actor_flush_thread() {
+        if !held_lock_ranks().is_empty() {
             return TryRepairCombatOutcome::NeedsAsyncFallback;
         }
         let wait_for_post_unlock = post_unlock::caller_can_wait_for_handle(self);
@@ -1245,7 +1234,7 @@ impl SystemHandle {
     }
 
     pub fn try_set_ball_position(&self, ball_id: BallId, position: DVec3) {
-        let can_wait = held_lock_ranks().is_empty() && !self.is_on_actor_flush_thread() && post_unlock::caller_can_wait_for_handle(self);
+        let can_wait = post_unlock::caller_can_wait_for_handle(self);
         self.dispatch_fire_or_sync(
             "SetBallPositionSync",
             (),
@@ -1301,7 +1290,7 @@ impl SystemHandle {
     }
 
     fn try_remove_ball_impl(&self, ball_id: BallId, emit_destruction_fx: bool) {
-        let can_wait = held_lock_ranks().is_empty() && !self.is_on_actor_flush_thread() && post_unlock::caller_can_wait_for_handle(self);
+        let can_wait = post_unlock::caller_can_wait_for_handle(self);
         let rx_count = self.event_tx.receiver_count();
         self.dispatch_fire_or_sync(
             "RemoveBallSync",
@@ -1315,7 +1304,7 @@ impl SystemHandle {
     }
 
     pub fn cancel_ship_nanite_repairs_sync(&self, ship_id: BallId, refund_paste: bool) {
-        if !held_lock_ranks().is_empty() || self.is_on_actor_flush_thread() {
+        if !held_lock_ranks().is_empty() {
             if let Err(err) = self.cmd_tx.try_send(SystemCommand::CancelShipNaniteRepairs { ship_id, refund_paste }) {
                 tracing::warn!(solar_system_id = self.solar_system_id, ship_id, error = %err, "Failed to enqueue CancelShipNaniteRepairs under held lock");
             }
@@ -1367,14 +1356,6 @@ impl SystemHandle {
         if !held_lock_ranks().is_empty() {
             return false;
         }
-        if self.is_on_actor_flush_thread() {
-            if self.cmd_tx.is_closed() {
-                return false;
-            }
-            return ball_ops::run_direct_ball_op_on_current_thread(self, false, |ctx| {
-                ctx.ballpark.queue_set_state(observer_ball_id)
-            });
-        }
         ball_ops::dispatch_actor_sync_reply_with_deadline(
             self,
             "PushSetState",
@@ -1394,7 +1375,7 @@ impl SystemHandle {
 
     /// Registers or clears a sim-clock-governed module reload deadline on the system actor (`#1081`).
     pub fn try_track_module_reload_sim(&self, module_id: i64, ship_id: BallId, remaining_sim_s: f64) {
-        if !held_lock_ranks().is_empty() || self.is_on_actor_flush_thread() {
+        if !held_lock_ranks().is_empty() {
             let _ = self.cmd_tx.try_send(SystemCommand::TrackModuleReloadSim { module_id, ship_id, remaining_sim_s });
             return;
         }
@@ -1462,14 +1443,6 @@ impl SystemHandle {
     pub fn try_apply_direct_combat_damage(&self, ball_id: BallId, damage: f64) -> Option<bool> {
         if !held_lock_ranks().is_empty() {
             return None;
-        }
-        if self.is_on_actor_flush_thread() {
-            if self.cmd_tx.is_closed() {
-                return None;
-            }
-            return ball_ops::run_direct_ball_op_on_current_thread(self, false, |ctx| {
-                apply_direct_combat_damage_in_ctx(ctx, ball_id, damage)
-            });
         }
         ball_ops::dispatch_actor_sync_reply_with_deadline(
             self,
@@ -1575,7 +1548,7 @@ impl SystemHandle {
         self.mutate_warp_state_op(WarpStateMutOp::ClearReturnAndPending { ball_id });
     }
     pub fn consume_warp_finished(&self, ball_id: BallId) -> bool {
-        if !held_lock_ranks().is_empty() || self.is_on_actor_flush_thread() {
+        if !held_lock_ranks().is_empty() {
             return false;
         }
         ball_ops::dispatch_actor_sync_reply_with_deadline(

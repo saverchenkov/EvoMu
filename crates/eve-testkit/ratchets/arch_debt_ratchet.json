@@ -959,13 +959,11 @@
       "files": {}
     },
     "system_handle_sync_lock_helpers": {
-      "zero_required": false,
+      "zero_required": true,
       "owning_issue": 1342,
       "regex": "\\b(?:ballpark|actor_state)\\s*\\.\\s*(?:read|write|try_read|try_write|lock)\\s*\\(",
-      "description": "Remaining sync ballpark/actor_state lock acquisitions (.read/.write/.try_read/.try_write/.lock) after Track 4C mailbox-backed sync writers and RT-101 retirement (#1342).",
-      "files": {
-        "system_actor/ball_ops.rs": 1
-      }
+      "description": "Zero sync ballpark/actor_state lock acquisitions (.read/.write/.try_read/.try_write/.lock) after Track 4D-5 retired actor_flush_thread (#1342).",
+      "files": {}
     },
     "handwritten_item_change_emitters": {
       "zero_required": true,

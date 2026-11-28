@@ -1355,14 +1355,6 @@ impl SystemHandle {
         if !eve_db::lock_rank::held_lock_ranks().is_empty() {
             return false;
         }
-        if self.is_on_actor_flush_thread() {
-            if self.cmd_tx.is_closed() {
-                return false;
-            }
-            return super::ball_ops::run_direct_ball_op_on_current_thread(self, false, |ctx| {
-                super::handle_cmds::mutate_external_active_module_in_ctx(ctx, op)
-            });
-        }
         super::ball_ops::dispatch_actor_sync_reply_with_deadline(
             self,
             "MutateExternalActiveModule",

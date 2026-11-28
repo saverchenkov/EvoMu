@@ -2306,8 +2306,11 @@ pub struct SystemHandle {
     pub(crate) target_lock_completed_hook: Arc<RankedRwLock<Option<super::TargetLockCompletedHook>, RANK_LEAF>>,
     pub(crate) system_step_hook: Arc<RankedRwLock<Option<super::SystemStepHook>, RANK_LEAF>>,
     pub(crate) post_unlock_actions: Arc<RankedMutex<Vec<super::PostUnlockHookAction>, RANK_LEAF>>,
-    pub(in crate::system_actor) actor_flush_thread:
+    pub(in crate::system_actor) post_unlock_actions_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    pub(in crate::system_actor) post_unlock_fallback_drain_lock: Arc<std::sync::Mutex<()>>,
+    pub(in crate::system_actor) post_unlock_fallback_owner_tid:
         Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
+    pub(in crate::system_actor) worker_awaiting_actor_cmd: Arc<std::sync::atomic::AtomicUsize>,
     pub(in crate::system_actor) published_live: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) cooldown_persist_gate: Arc<super::CooldownPersistGate>,
 }

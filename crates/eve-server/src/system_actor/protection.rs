@@ -1200,19 +1200,6 @@ impl SystemHandle {
         if !eve_db::lock_rank::held_lock_ranks().is_empty() {
             return false;
         }
-        if self.is_on_actor_flush_thread() {
-            if self.cmd_tx.is_closed() {
-                return false;
-            }
-            return super::ball_ops::run_direct_ball_op_on_current_thread(self, false, |ctx| {
-                let known =
-                    super::cycles_tackle::apply_destiny_event_in_actor(ctx.ballpark, ball_id, event);
-                if known {
-                    sync_ball_protection_in_actor(ctx.ballpark, ctx.actor_st, ball_id);
-                }
-                known
-            });
-        }
         match super::handle_cmds::dispatch_actor_sync_try_queued_with_timeout(
             self,
             std::time::Duration::from_millis(150),

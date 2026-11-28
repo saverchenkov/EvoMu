@@ -191,7 +191,7 @@ pub(crate) fn handle_apply_ecm_burst(
 
 impl super::SystemHandle {
     pub fn try_remove_module_cycle(&self, ship_id: BallId, module_id: i64) {
-        if !eve_db::lock_rank::held_lock_ranks().is_empty() || self.is_on_actor_flush_thread() {
+        if !eve_db::lock_rank::held_lock_ranks().is_empty() {
             let (tx, _rx) = tokio::sync::oneshot::channel();
             let _ = self.cmd_tx.try_send(SystemCommand::TryRemoveModuleCycle {
                 ship_id,

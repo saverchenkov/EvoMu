@@ -1419,9 +1419,8 @@ impl SystemHandle {
     /// system's ordered `post_unlock_worker` (`W1`, `W2`, `W3`, `W6`, `#1170`, `#919`).
     ///
     /// Requires no ranked locks held by the caller (panics under held locks). When invoked from
-    /// the post-unlock worker (`wait_for_post_unlock == false`), SQLite persistence runs
-    /// asynchronously on the worker and this returns `0` without blocking (invocations on
-    /// `actor_flush_thread`, where the worker is closed, refuse enqueueing and return `0`).
+    /// the post-unlock worker or off-actor fallback (`wait_for_post_unlock == false`), SQLite
+    /// persistence runs asynchronously without blocking.
     pub fn flush_dirty_condition_checkpoint_sync(&self) -> usize {
         let wait_for_post_unlock = post_unlock::caller_can_wait_for_handle(self);
         let written_direct = Arc::new(std::sync::atomic::AtomicUsize::new(0));
