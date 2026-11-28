@@ -3591,27 +3591,41 @@ async fn stale_gen1_actor_exit_does_not_steal_gen2_transitions_or_tidi_mode() {
     let cmd_tx1 = h1.cmd_tx.clone();
     drop(h1);
 
-    // Start `stop_system` so `shutdown_tidi_mode` is recorded, then abort the stop task to trigger
-    // `StopTaskCleanupGuard::drop` -> `Cold` while gen-1 actor is still parked.
-    let reg_stop1 = Arc::clone(&reg);
-    let stop1 = tokio::spawn(async move { reg_stop1.stop_system(jita).await });
+    // Helper to trigger `StopTaskCleanupGuard::drop` -> `Cold` by spawning `run_stop_system_task`
+    // onto an ephemeral `CurrentThread` runtime and dropping that runtime while the actor stays
+    // parked on the main `multi_thread` test runtime.
+    let abort_stop_via_ephemeral_rt =
+        |reg: &Arc<SystemRegistry>, gate: &Arc<crate::system_actor::CooldownPersistGate>| {
+            let reg_ab = Arc::clone(reg);
+            let gate_ab = Arc::clone(gate);
+            std::thread::spawn(move || {
+                let stop_rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                stop_rt.block_on(async {
+                    let _caller = tokio::spawn({
+                        let reg = Arc::clone(&reg_ab);
+                        async move { reg.stop_system(jita).await }
+                    });
+                    for _ in 0..200 {
+                        if gate_ab.inner.lock().unwrap().shutdown_tidi_mode.is_some() {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                    assert!(gate_ab.inner.lock().unwrap().shutdown_tidi_mode.is_some());
+                });
+                drop(stop_rt);
+            })
+            .join()
+            .unwrap();
+        };
+
+    // Start `stop_system` on an ephemeral runtime so `shutdown_tidi_mode` is recorded, then drop
+    // that runtime to trigger `StopTaskCleanupGuard::drop` -> `Cold` while gen-1 actor stays parked.
     let gate = reg.cooldown_persist_gate(jita);
-    for _ in 0..200 {
-        let recorded = gate.inner.lock().unwrap().shutdown_tidi_mode.is_some();
-        if recorded {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    assert!(gate.inner.lock().unwrap().shutdown_tidi_mode.is_some());
-    stop1.abort();
-    assert!(stop1.await.unwrap_err().is_cancelled());
-    for _ in 0..200 {
-        if gate.inner.lock().unwrap().phase == CooldownGatePhase::Cold {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    abort_stop_via_ephemeral_rt(&reg, &gate);
     assert_eq!(gate.inner.lock().unwrap().phase, CooldownGatePhase::Cold);
 
     // Start gen-2 paused in `Loading`, queue `k2`, and record `shutdown_tidi_mode`-equivalent
@@ -3689,22 +3703,8 @@ async fn stale_gen1_actor_exit_does_not_steal_gen2_transitions_or_tidi_mode() {
     let cmd_tx2 = h2.cmd_tx.clone();
     drop(h2);
 
-    let reg_stop2 = Arc::clone(&reg);
-    let stop2 = tokio::spawn(async move { reg_stop2.stop_system(jita).await });
-    for _ in 0..200 {
-        if gate.inner.lock().unwrap().shutdown_tidi_mode.is_some() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    stop2.abort();
-    assert!(stop2.await.unwrap_err().is_cancelled());
-    for _ in 0..200 {
-        if gate.inner.lock().unwrap().phase == CooldownGatePhase::Cold {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    abort_stop_via_ephemeral_rt(&reg, &gate);
+    assert_eq!(gate.inner.lock().unwrap().phase, CooldownGatePhase::Cold);
 
     let h3 = reg
         .wake_for_session_arrival_async(jita, SessionArrivalWakeReason::Undock)
