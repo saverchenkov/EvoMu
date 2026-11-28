@@ -335,11 +335,21 @@ async fn kill_npc_with_weapons(ctx: &ServerContext, p: &mut LivePilot, weapon_id
                 }
                 Err(e) if e.code == "TargetNotLocked" => {
                     match rpc(ctx, &mut p.sess, "dogmaIM", "AddTarget", &[int(npc_id)]).await {
-                        Ok(lock_rep) => assert_eq!(
-                            lock_rep.dict_get("targetID"),
-                            Some(&int(npc_id)),
-                            "AddTarget must lock NPC {npc_id}: {lock_rep:?}"
-                        ),
+                        Ok(lock_rep) => match &lock_rep {
+                            PyRep::Tuple(parts) if parts.len() == 2 => match (&parts[0], &parts[1]) {
+                                (PyRep::Integer(1), PyRep::List(ids)) => {
+                                    assert!(ids.is_empty(), "pending AddTarget must return (1, []): {lock_rep:?}");
+                                }
+                                (PyRep::Integer(0), PyRep::List(ids)) => {
+                                    assert!(
+                                        ids.contains(&int(npc_id)),
+                                        "AddTarget must list locked NPC {npc_id}: {lock_rep:?}"
+                                    );
+                                }
+                                _ => panic!("AddTarget must return (1, []) or (0, [targets]): {lock_rep:?}"),
+                            },
+                            _ => panic!("AddTarget must return 2-tuple: {lock_rep:?}"),
+                        },
                         Err(e) if matches!(e.code.as_str(), "TargetingFailed" | "TargetInvulnerable") => {}
                         Err(e) => panic!("dogmaIM.AddTarget({npc_id}) unexpected error: {e:?}"),
                     }

@@ -4,6 +4,15 @@
 
 use super::*;
 
+/// Builds the canonical V24 `(flag, targetList)` 2-tuple reply for `dogmaIM.AddTarget`:
+/// `(0, locked_ids)` when `target_id` is already locked, or `(1, [])` while an async lock is in flight.
+fn add_target_reply(locked: bool, locked_ids: Vec<PyRep>) -> PyRep {
+    PyRep::Tuple(vec![
+        PyRep::Integer(i64::from(!locked)),
+        PyRep::List(if locked { locked_ids } else { Vec::new() }),
+    ])
+}
+
 /// Resolves a player-facing entity/target name from custom item names, structures,
 /// characters, or SDE item type names, falling back to `"Target"`.
 pub(crate) fn resolve_target_display_name(ctx: &ServerContext, target_id: i64) -> String {
@@ -1900,20 +1909,9 @@ pub(crate) async fn handle_dogma_im(
                         .filter(|l| l.locked)
                         .map(|l| PyRep::Integer(l.target_id))
                         .collect();
-                    return Some(Ok(PyRep::keyval([
-                        ("targetID", PyRep::Integer(target_id)),
-                        ("targetIDs", PyRep::List(locked_ids)),
-                        ("locked", PyRep::Bool(true)),
-                        ("lockTimeMs", PyRep::Real(0.0)),
-                        ("passiveLock", PyRep::Bool(has_active_passive_targeter)),
-                    ])));
+                    return Some(Ok(add_target_reply(true, locked_ids)));
                 }
-                return Some(Ok(PyRep::keyval([
-                    ("targetID", PyRep::Integer(target_id)),
-                    ("locked", PyRep::Bool(false)),
-                    ("lockTimeMs", PyRep::Real(existing.remaining_lock_ms.max(0.0))),
-                    ("passiveLock", PyRep::Bool(has_active_passive_targeter)),
-                ])));
+                return Some(Ok(add_target_reply(false, Vec::new())));
             } else if current_locks.len() >= max_locked {
                 return Some(Err(target_lock_cap_rpc_error_with_ids(
                     Some(ship_id),
@@ -1975,12 +1973,7 @@ pub(crate) async fn handle_dogma_im(
                 }
             }
 
-            Some(Ok(PyRep::keyval([
-                ("targetID", PyRep::Integer(target_id)),
-                ("locked", PyRep::Bool(false)),
-                ("lockTimeMs", PyRep::Real(lock_time_ms)),
-                ("passiveLock", PyRep::Bool(has_active_passive_targeter)),
-            ])))
+            Some(Ok(add_target_reply(false, Vec::new())))
         }
 
         ("dogmaIM", "RemoveTarget") => {

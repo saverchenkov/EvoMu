@@ -129,7 +129,21 @@ async fn follow_target_if_alive(ctx: &ServerContext, p: &mut LivePilot, target_i
 
 async fn add_target_if_lockable(ctx: &ServerContext, sess: &mut SessionState, target_id: i64) {
     match rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await {
-        Ok(rep) => assert_eq!(rep.dict_get("targetID"), Some(&PyRep::Integer(target_id)), "AddTarget reply: {rep:?}"),
+        Ok(rep) => match &rep {
+            PyRep::Tuple(parts) if parts.len() == 2 => match (&parts[0], &parts[1]) {
+                (PyRep::Integer(1), PyRep::List(ids)) => {
+                    assert!(ids.is_empty(), "pending AddTarget must return (1, []): {rep:?}");
+                }
+                (PyRep::Integer(0), PyRep::List(ids)) => {
+                    assert!(
+                        ids.contains(&PyRep::Integer(target_id)),
+                        "locked AddTarget must list {target_id}: {rep:?}"
+                    );
+                }
+                _ => panic!("AddTarget reply must be (1, []) or (0, [targets]): {rep:?}"),
+            },
+            _ => panic!("AddTarget reply must be 2-tuple: {rep:?}"),
+        },
         Err(e) if matches!(e.code.as_str(), "TargetingFailed" | "TargetInvulnerable") => {}
         Err(e) => panic!("dogmaIM.AddTarget({target_id}) failed: {e:?}"),
     }

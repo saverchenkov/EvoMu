@@ -278,7 +278,7 @@ async fn test_rpc_dogma_im_info_targeting_and_probes() {
     board_in_space(&ctx, &mut s2, C2, 881_002, 606, JITA, DVec3::new(2_000.0, 0.0, 0.0)).await;
 
     let add_res = rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(881_002)]).await;
-    assert!(format!("{add_res:?}").contains("881002"));
+    assert_eq!(add_res, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
     assert_eq!(rpc(&ctx, &mut s1, "dogmaIM", "GetTargets", &[]).await, PyRep::List(vec![PyRep::Integer(881_002)]));
     assert_eq!(rpc(&ctx, &mut s1, "dogmaIM", "GetTargeters", &[]).await, PyRep::List(vec![]));
 

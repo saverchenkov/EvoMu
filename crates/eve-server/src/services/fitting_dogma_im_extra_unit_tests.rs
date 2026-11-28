@@ -1827,24 +1827,27 @@ async fn mutants_cov_item_get_info_triage_targeting_passive_and_weapon_banks() {
         panic!("expected Dict from GetLayerDamageValuesByItems");
     }
 
-    // 2. AddTarget without passive targeter -> yellow-box notification sent, passiveLock=false, max_locked=1 enforced
+    // 2. AddTarget without passive targeter -> yellow-box notification sent, canonical (1, []), max_locked=1 enforced
     let _ = ctx.db.acquire_online_lock(target_char_id as u64, 1, Some(target_char_id), false, ctx.now_unix());
     ctx.pending_notifications.write().unwrap().remove(&target_char_id);
     let first_lock = call_dogma_im(&ctx, &mut sess, None, "AddTarget", &[PyRep::Integer(tp_target_id)]).await.unwrap();
-    assert_eq!(first_lock.dict_get("locked").and_then(PyRep::as_bool), Some(false));
-    assert_eq!(first_lock.dict_get("passiveLock").and_then(PyRep::as_bool), Some(false));
+    assert_eq!(first_lock, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
+    let first_locks = sys.get_target_locks(ship_id).await.unwrap();
+    assert!(
+        first_locks.iter().any(|l| l.target_id == tp_target_id && !l.locked && l.remaining_lock_ms > 0.0),
+        "first AddTarget must persist pending target lock: {first_locks:?}"
+    );
     assert!(
         ctx.pending_notifications.read().unwrap().get(&target_char_id).is_some_and(|v| !v.is_empty()),
         "non-passive AddTarget must notify target"
     );
-    // Duplicate AddTarget while locking returns locked=false & positive lockTimeMs
+    // Duplicate AddTarget while locking returns canonical (1, []) with pending lock preserved
     let relock_pending = call_dogma_im(&ctx, &mut sess, None, "AddTarget", &[PyRep::Integer(tp_target_id)]).await.unwrap();
-    assert_eq!(relock_pending.dict_get("locked").and_then(PyRep::as_bool), Some(false));
-    // Complete lock -> duplicate AddTarget returns locked=true, targetIDs containing target, lockTimeMs=0.0
+    assert_eq!(relock_pending, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
+    // Complete lock -> duplicate AddTarget returns canonical (0, [tp_target_id])
     let _ = sys.add_target_lock(ship_id, TargetLock { target_id: tp_target_id, lock_time_ms: 1000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
     let relock_done = call_dogma_im(&ctx, &mut sess, None, "AddTarget", &[PyRep::Integer(tp_target_id)]).await.unwrap();
-    assert_eq!(relock_done.dict_get("locked").and_then(PyRep::as_bool), Some(true));
-    assert_eq!(relock_done.dict_get("lockTimeMs").and_then(PyRep::as_f64), Some(0.0));
+    assert_eq!(relock_done, PyRep::Tuple(vec![PyRep::Integer(0), PyRep::List(vec![PyRep::Integer(tp_target_id)])]));
     assert_eq!(
         call_dogma_im(&ctx, &mut sess, None, "AddTarget", &[PyRep::Integer(tgt_base)]).await.unwrap_err().code,
         "TargetingFailed"
@@ -1875,7 +1878,7 @@ async fn mutants_cov_item_get_info_triage_targeting_passive_and_weapon_banks() {
     );
     let _ = call_dogma_im(&ctx, &mut sess, None, "ClearTargets", &[]).await.unwrap();
 
-    // 4. Active Passive Targeter (group 82) -> passiveLock=true and suppresses target OnCombatTargetsChanged notification
+    // 4. Active Passive Targeter (group 82) -> canonical (1, []) and suppresses target OnTarget targetedBy notification
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_online_states.insert(passive_id, true);
         snap.module_active_states.insert(passive_id);
@@ -1883,7 +1886,7 @@ async fn mutants_cov_item_get_info_triage_targeting_passive_and_weapon_banks() {
     ctx.invalidate_ship_fitting(ship_id);
     ctx.pending_notifications.write().unwrap().remove(&target_char_id);
     let passive_res = call_dogma_im(&ctx, &mut sess, None, "AddTarget", &[PyRep::Integer(tp_target_id)]).await.unwrap();
-    assert_eq!(passive_res.dict_get("passiveLock").and_then(PyRep::as_bool), Some(true));
+    assert_eq!(passive_res, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
     assert!(
         !ctx.pending_notifications.read().unwrap().get(&target_char_id).is_some_and(|v| !v.is_empty()),
         "passive targeter must suppress yellow-box notification"
@@ -2603,6 +2606,164 @@ async fn test_issue_1047_ship_stance_mgr_resolves_v24_indices_all_hulls_and_reje
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.ship_fit_inputs.contains_key(&rifter_id));
     });
+}
+
+#[tokio::test]
+async fn add_target_returns_canonical_v24_tuple_across_direct_and_wire_transports() {
+    use eve_destiny::{Ball, CombatState, DVec3, MovementMode, SlimItemMeta, TargetLock};
+
+    let char_id = 96_550_001i64;
+    let corp_id = 98_550_001i64;
+    let sys_id = 30_000_142u32;
+    let ship_id = 96_550_100i64;
+    let target1_id = 96_550_201i64;
+    let target2_id = 96_550_202i64;
+    let kw = HashMap::new();
+
+    let mut replies = Vec::new();
+    for (idx, caller_trace) in [None, Some("machoNet:26000")].into_iter().enumerate() {
+        let ctx = ServerContext::with_sde_and_repository(
+            shared_sde(),
+            Arc::new(WorldRepository::with_demo_seed()),
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.accounts.insert(
+                format!("u_add_target_parity_{idx}"),
+                AccountRecord {
+                    user_id: char_id as u64,
+                    username: format!("u_add_target_parity_{idx}"),
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+            let mut ch = snap.characters.values().next().cloned().expect("seed char");
+            ch.character_id = char_id;
+            ch.user_id = char_id as u64;
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+            snap.characters.insert(char_id, ch);
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 587,
+                    owner_id: char_id,
+                    location_id: i64::from(sys_id),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        });
+
+        let sys = ctx.systems.get_or_spawn(sys_id);
+        for (bid, oid, pos) in [
+            (ship_id, char_id, DVec3::ZERO),
+            (target1_id, 1, DVec3::new(2_000.0, 0.0, 0.0)),
+            (target2_id, 1, DVec3::new(2_500.0, 0.0, 0.0)),
+        ] {
+            sys.spawn_ball_with_meta(
+                Ball {
+                    id: bid,
+                    type_id: 587,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState::default(),
+                SlimItemMeta {
+                    owner_id: oid,
+                    char_id: (oid == char_id).then_some(char_id),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("spawn ball");
+        }
+
+        let mut sess = make_session(char_id, corp_id, Some(sys_id), None, Some(ship_id));
+        sess.session_id = 96_550 + idx as u64;
+
+        let started = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "dogmaIM",
+                None,
+                "AddTarget",
+                &[PyRep::Integer(target1_id)],
+                &kw,
+                caller_trace,
+            )
+            .await
+            .expect("async AddTarget start");
+        assert_eq!(started, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
+
+        let pending = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "dogmaIM",
+                None,
+                "AddTarget",
+                &[PyRep::Integer(target1_id)],
+                &kw,
+                caller_trace,
+            )
+            .await
+            .expect("pending AddTarget re-call");
+        assert_eq!(pending, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
+
+        for tid in [target1_id, target2_id] {
+            sys.add_target_lock(
+                ship_id,
+                TargetLock {
+                    target_id: tid,
+                    lock_time_ms: 1_000.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(50_000.0),
+                },
+            )
+            .await
+            .expect("add_target_lock");
+        }
+        let already_locked = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "dogmaIM",
+                None,
+                "AddTarget",
+                &[PyRep::Integer(target1_id)],
+                &kw,
+                caller_trace,
+            )
+            .await
+            .expect("already-locked AddTarget re-call");
+        assert_eq!(
+            already_locked,
+            PyRep::Tuple(vec![
+                PyRep::Integer(0),
+                PyRep::List(vec![PyRep::Integer(target1_id), PyRep::Integer(target2_id)]),
+            ])
+        );
+        replies.push((started, pending, already_locked));
+    }
+
+    assert_eq!(
+        replies[0], replies[1],
+        "AddTarget replies must match identically across caller_trace=None and Some(\"machoNet:26000\")"
+    );
 }
 
 

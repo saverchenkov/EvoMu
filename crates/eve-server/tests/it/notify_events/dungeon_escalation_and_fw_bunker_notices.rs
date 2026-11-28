@@ -263,7 +263,21 @@ async fn destroy_npc_ball(
             let lock_rep = rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(npc_id)])
                 .await
                 .expect("AddTarget on live NPC must succeed");
-            assert_eq!(lock_rep.dict_get("targetID"), Some(&PyRep::Integer(npc_id)));
+            match &lock_rep {
+                PyRep::Tuple(parts) if parts.len() == 2 => match (&parts[0], &parts[1]) {
+                    (PyRep::Integer(1), PyRep::List(ids)) => {
+                        assert!(ids.is_empty(), "pending AddTarget must return (1, []): {lock_rep:?}");
+                    }
+                    (PyRep::Integer(0), PyRep::List(ids)) => {
+                        assert!(
+                            ids.contains(&PyRep::Integer(npc_id)),
+                            "locked AddTarget must list {npc_id}: {lock_rep:?}"
+                        );
+                    }
+                    _ => panic!("AddTarget must return (1, []) or (0, [targets]): {lock_rep:?}"),
+                },
+                _ => panic!("AddTarget must return 2-tuple: {lock_rep:?}"),
+            }
             for idx in 0..6_i64 {
                 let gid = gun_base + idx * 2;
                 let deact_loop = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String(effect_name.into())]).await;
