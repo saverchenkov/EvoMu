@@ -191,6 +191,7 @@ async fn officer_commander_mordu_sde_drops_and_finalize_cycle_destroyed_npcs() {
         ent.threat_table.insert(ship_id, 500.0);
         rt.destroyed_npc_cache.insert(950_002, ent);
     });
+    let _ = ctx.systems.get_or_spawn(sys_id);
     let prev_next_id = ctx.db.with_snapshot(|snap| snap.next_entity_id);
     finalize_cycle_destroyed_npcs(&ctx, sys_id).await;
     with_combat_runtime(&ctx, |rt| {
