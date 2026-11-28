@@ -1037,6 +1037,8 @@ fn merge_persisted_3way(
         ess_reserve_bank_thefts: db.ess_reserve_bank_thefts.clone(),
         ess_main_bank_thefts: db.ess_main_bank_thefts.clone(),
         tsb_self_penalty_until: db.tsb_self_penalty_until.clone(),
+        lance_caster_lock_until: db.lance_caster_lock_until.clone(),
+        lance_victim_debuff_until: db.lance_victim_debuff_until.clone(),
         recently_destroyed_item_ids: db.recently_destroyed_item_ids.clone(),
         extended_runtime_json,
     }

@@ -1370,8 +1370,23 @@ fn capture_target_b_runtime(fix: &MatrixFixture) -> TargetBRuntimeSlice {
             .map(|(&pid, _)| pid)
             .collect()
     };
-    let (entosis_links_count, entosis_cycles_count) = fix.ctx.db.with_snapshot(|snap| {
+    let (
+        lance_caster_locks_count,
+        lance_victim_debuffs_count,
+        entosis_links_count,
+        entosis_cycles_count,
+    ) = fix.ctx.db.with_snapshot(|snap| {
         (
+            snap.combat_crimewatch_state
+                .lance_caster_lock_until
+                .keys()
+                .filter(|sid| b_ships.contains(sid))
+                .count(),
+            snap.combat_crimewatch_state
+                .lance_victim_debuff_until
+                .keys()
+                .filter(|sid| b_ships.contains(sid))
+                .count(),
             snap.sov_runtime
                 .entosis_active_links
                 .iter()
@@ -1392,8 +1407,8 @@ fn capture_target_b_runtime(fix: &MatrixFixture) -> TargetBRuntimeSlice {
         let ts = fix.ctx.tactical_state.read().expect("tactical_state");
         (
             ts.remote_assistance.iter().filter(|(&(_, sid), _)| b_ships.contains(&sid)).count(),
-            ts.lance_caster_lock_until.iter().filter(|(&(_, sid), _)| b_ships.contains(&sid)).count(),
-            ts.lance_victim_debuff_until.iter().filter(|(&(_, sid), _)| b_ships.contains(&sid)).count(),
+            lance_caster_locks_count,
+            lance_victim_debuffs_count,
             entosis_links_count,
             entosis_cycles_count,
         )
