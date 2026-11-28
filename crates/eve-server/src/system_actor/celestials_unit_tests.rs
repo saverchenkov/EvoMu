@@ -3487,3 +3487,154 @@ async fn arch_1342_4d5_current_thread_last_handle_drop_on_fallback_during_shutdo
     }
     assert_eq!(driver_weak.strong_count(), 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4d5_shutdown_worker_drain_owner_reentrancy_no_deadlock() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Part A: `PostUnlockMsg::Work` draining inside `PostUnlockMsg::Shutdown` enters
+    // `FallbackOwnerGuard`, so re-entrant `drain_closed_worker_blocking` returns immediately
+    // both standalone and after `enqueue_post_unlock_action` spawns a waiting fallback runner.
+    let ctx1 = test_ctx();
+    let h1 = ctx1.systems.get_or_spawn(30_000_142);
+
+    let (act1_entered_tx, act1_entered_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (act1_release_tx, act1_release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let act1_release_rx = Arc::new(std::sync::Mutex::new(act1_release_rx));
+    h1.enqueue_post_unlock_action(Box::new(move || {
+        let _ = act1_entered_tx.send(());
+        let _ = act1_release_rx.lock().unwrap().recv();
+    }));
+    tokio::task::spawn_blocking(move || {
+        act1_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("action 1 entered worker");
+    })
+    .await
+    .unwrap();
+
+    let (work_done_tx, work_done_rx) = tokio::sync::oneshot::channel::<()>();
+    let nested_a = Arc::new(AtomicBool::new(false));
+    let nested_a_cl = Arc::clone(&nested_a);
+    let h1_cb = h1.clone();
+    h1.post_unlock_tx
+        .send(crate::system_actor::post_unlock::PostUnlockMsg::Shutdown)
+        .unwrap();
+    h1.post_unlock_tx
+        .send(crate::system_actor::post_unlock::PostUnlockMsg::Work(
+            crate::system_actor::post_unlock::PostUnlockWorkItem {
+                db_opt: None,
+                sde_opt: None,
+                ops: crate::system_actor::post_unlock::PostUnlockOps::default(),
+                replies: vec![Box::new(move || {
+                    assert!(h1_cb.post_unlock_tx.is_closed());
+                    assert!(h1_cb.post_unlock_fallback.is_current_thread_owner());
+                    h1_cb.post_unlock_fallback.drain_closed_worker_blocking(
+                        h1_cb.solar_system_id,
+                        &h1_cb.post_unlock_actions,
+                        &h1_cb.post_unlock_actions_in_flight,
+                        &h1_cb.command_panics,
+                    );
+                    let nested_inner = Arc::clone(&nested_a_cl);
+                    h1_cb.enqueue_post_unlock_action(Box::new(move || {
+                        nested_inner.store(true, Ordering::Release);
+                    }));
+                    h1_cb.post_unlock_fallback.drain_closed_worker_blocking(
+                        h1_cb.solar_system_id,
+                        &h1_cb.post_unlock_actions,
+                        &h1_cb.post_unlock_actions_in_flight,
+                        &h1_cb.command_panics,
+                    );
+                    let _ = work_done_tx.send(());
+                })],
+                in_flight_guard: None,
+                work_seq: 0,
+            },
+        ))
+        .unwrap();
+    act1_release_tx.send(()).unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), work_done_rx)
+        .await
+        .expect("Shutdown Work callback re-entrant drain must not deadlock")
+        .unwrap();
+    assert!(!h1.wait_for_post_unlock_barrier().await);
+    assert!(nested_a.load(Ordering::Acquire));
+    assert_eq!(h1.post_unlock_actions_in_flight.load(Ordering::SeqCst), 0);
+    assert!(!h1.post_unlock_fallback.is_current_thread_owner());
+
+    // Part B: `PostUnlockMsg::FlushActions` draining inside `PostUnlockMsg::Shutdown` likewise
+    // skips re-entrant `drain_closed_worker_blocking` both standalone and with a queued fallback runner.
+    let ctx2 = test_ctx();
+    let h2 = ctx2.systems.get_or_spawn(30_000_144);
+    let (pause_entered_tx, pause_entered_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (pause_release_tx, pause_release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let pause_release_rx = Arc::new(std::sync::Mutex::new(pause_release_rx));
+    h2.post_unlock_tx
+        .send(crate::system_actor::post_unlock::PostUnlockMsg::Work(
+            crate::system_actor::post_unlock::PostUnlockWorkItem {
+                db_opt: None,
+                sde_opt: None,
+                ops: crate::system_actor::post_unlock::PostUnlockOps::default(),
+                replies: vec![Box::new(move || {
+                    let _ = pause_entered_tx.send(());
+                    let _ = pause_release_rx.lock().unwrap().recv();
+                })],
+                in_flight_guard: None,
+                work_seq: 0,
+            },
+        ))
+        .unwrap();
+    tokio::task::spawn_blocking(move || {
+        pause_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("pause Work reply entered worker");
+    })
+    .await
+    .unwrap();
+
+    let (flush_done_tx, flush_done_rx) = tokio::sync::oneshot::channel::<()>();
+    let nested_b = Arc::new(AtomicBool::new(false));
+    let nested_b_cl = Arc::clone(&nested_b);
+    let h2_cb = h2.clone();
+    h2.post_unlock_actions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(Box::new(move || {
+            assert!(h2_cb.post_unlock_tx.is_closed());
+            assert!(h2_cb.post_unlock_fallback.is_current_thread_owner());
+            h2_cb.post_unlock_fallback.drain_closed_worker_blocking(
+                h2_cb.solar_system_id,
+                &h2_cb.post_unlock_actions,
+                &h2_cb.post_unlock_actions_in_flight,
+                &h2_cb.command_panics,
+            );
+            let nested_inner = Arc::clone(&nested_b_cl);
+            h2_cb.enqueue_post_unlock_action(Box::new(move || {
+                nested_inner.store(true, Ordering::Release);
+            }));
+            h2_cb.post_unlock_fallback.drain_closed_worker_blocking(
+                h2_cb.solar_system_id,
+                &h2_cb.post_unlock_actions,
+                &h2_cb.post_unlock_actions_in_flight,
+                &h2_cb.command_panics,
+            );
+            let _ = flush_done_tx.send(());
+        }));
+    h2.post_unlock_tx
+        .send(crate::system_actor::post_unlock::PostUnlockMsg::Shutdown)
+        .unwrap();
+    h2.post_unlock_tx
+        .send(crate::system_actor::post_unlock::PostUnlockMsg::FlushActions)
+        .unwrap();
+    pause_release_tx.send(()).unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), flush_done_rx)
+        .await
+        .expect("Shutdown FlushActions callback re-entrant drain must not deadlock")
+        .unwrap();
+    assert!(!h2.wait_for_post_unlock_barrier().await);
+    assert!(nested_b.load(Ordering::Acquire));
+    assert_eq!(h2.post_unlock_actions_in_flight.load(Ordering::SeqCst), 0);
+    assert!(!h2.post_unlock_fallback.is_current_thread_owner());
+}

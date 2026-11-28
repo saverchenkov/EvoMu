@@ -2730,6 +2730,8 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
                         .drain_lock
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
+                    let _shutdown_owner_guard =
+                        FallbackOwnerGuard::enter(Arc::clone(&fallback.owner_tid));
                     fallback.worker_draining.store(true, Ordering::SeqCst);
                     let _draining_guard = WorkerDrainingGuard(&fallback.worker_draining);
                     post_unlock_rx.close();
