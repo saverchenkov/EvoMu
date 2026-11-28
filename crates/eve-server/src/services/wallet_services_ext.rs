@@ -1383,16 +1383,14 @@ fn handle_trade_action(
                                 manifest_error: false,
                             },
                         );
-                        let offered_money = if party == tr.char_a {
-                            tr.money_b_cents
-                        } else {
-                            tr.money_a_cents
-                        };
                         ctx.emit_typed(
                             NotificationTarget::Character(party),
                             crate::router::notify_registry::OnTradeMoneyOffer {
                                 container_id: tr.trade_id,
-                                money: IskCents(offered_money).to_wire_f64(),
+                                money: [
+                                    IskCents(tr.money_a_cents).to_wire_f64(),
+                                    IskCents(tr.money_b_cents).to_wire_f64(),
+                                ],
                             },
                         );
                     }
@@ -1404,16 +1402,11 @@ fn handle_trade_action(
                                 manifest_error: false,
                             },
                         );
-                        let partner_accepted = if party == tr.char_a {
-                            tr.accept_b
-                        } else {
-                            tr.accept_a
-                        };
                         ctx.emit_typed(
                             NotificationTarget::Character(party),
                             crate::router::notify_registry::OnTradeOffer {
                                 container_id: tr.trade_id,
-                                state: partner_accepted,
+                                state: [tr.accept_a, tr.accept_b],
                             },
                         );
                         if party != char_id && !added_item_ids.is_empty() {
@@ -1434,16 +1427,11 @@ fn handle_trade_action(
                                 },
                             );
                         }
-                        let partner_accepted = if party == tr.char_a {
-                            tr.accept_b
-                        } else {
-                            tr.accept_a
-                        };
                         ctx.emit_typed(
                             NotificationTarget::Character(party),
                             crate::router::notify_registry::OnTradeOffer {
                                 container_id: tr.trade_id,
-                                state: partner_accepted,
+                                state: [tr.accept_a, tr.accept_b],
                             },
                         );
                         if tr.completed {

@@ -2130,6 +2130,9 @@ async fn arch_933_t7b_canonical_emitters_shape_checked_and_compat_noop() {
     .await
     .expect("AddCorporateContact");
 
+    let mut notifs = ctx.drain_notifications_for_char(char_a);
+    notifs.extend(ctx.drain_notifications_for_char(char_b));
+
     // 4 & 5. OnTradeOffer & OnTradeMoneyOffer (trademgr.InitiateTrade, AddItem, OfferMoney, MakeOffer)
     let init_bid = ctx
         .dispatch_rpc(
@@ -2160,6 +2163,9 @@ async fn arch_933_t7b_canonical_emitters_shape_checked_and_compat_noop() {
         .dict_get("tradeContainerID")
         .and_then(PyRep::as_i64)
         .expect("tradeContainerID");
+    notifs.extend(ctx.drain_notifications_for_char(char_a));
+    notifs.extend(ctx.drain_notifications_for_char(char_b));
+
     ctx.dispatch_rpc(
         &mut sess_a,
         "trademgr",
@@ -2175,6 +2181,20 @@ async fn arch_933_t7b_canonical_emitters_shape_checked_and_compat_noop() {
     )
     .await
     .expect("AddItem");
+    let add_a = ctx.drain_notifications_for_char(char_a);
+    let add_b = ctx.drain_notifications_for_char(char_b);
+    let expected_add_offer = vec![PyRep::Integer(trade_id), PyRep::List(vec![PyRep::Bool(false), PyRep::Bool(false)])];
+    assert_eq!(
+        add_a.iter().filter(|n| n.event == "OnTradeOffer").map(|n| &n.args).collect::<Vec<_>>(),
+        vec![&expected_add_offer]
+    );
+    assert_eq!(
+        add_b.iter().filter(|n| n.event == "OnTradeOffer").map(|n| &n.args).collect::<Vec<_>>(),
+        vec![&expected_add_offer]
+    );
+    notifs.extend(add_a);
+    notifs.extend(add_b);
+
     ctx.dispatch_rpc(
         &mut sess_b,
         "trademgr",
@@ -2186,6 +2206,20 @@ async fn arch_933_t7b_canonical_emitters_shape_checked_and_compat_noop() {
     )
     .await
     .expect("OfferMoney");
+    let money_a = ctx.drain_notifications_for_char(char_a);
+    let money_b = ctx.drain_notifications_for_char(char_b);
+    let expected_money_offer = vec![PyRep::Integer(trade_id), PyRep::List(vec![PyRep::Real(0.0), PyRep::Real(2_500.0)])];
+    assert_eq!(
+        money_a.iter().filter(|n| n.event == "OnTradeMoneyOffer").map(|n| &n.args).collect::<Vec<_>>(),
+        vec![&expected_money_offer]
+    );
+    assert_eq!(
+        money_b.iter().filter(|n| n.event == "OnTradeMoneyOffer").map(|n| &n.args).collect::<Vec<_>>(),
+        vec![&expected_money_offer]
+    );
+    notifs.extend(money_a);
+    notifs.extend(money_b);
+
     ctx.dispatch_rpc(
         &mut sess_b,
         "trademgr",
@@ -2197,9 +2231,19 @@ async fn arch_933_t7b_canonical_emitters_shape_checked_and_compat_noop() {
     )
     .await
     .expect("MakeOffer");
-
-    let mut notifs = ctx.drain_notifications_for_char(char_a);
-    notifs.extend(ctx.drain_notifications_for_char(char_b));
+    let make_a = ctx.drain_notifications_for_char(char_a);
+    let make_b = ctx.drain_notifications_for_char(char_b);
+    let expected_make_offer = vec![PyRep::Integer(trade_id), PyRep::List(vec![PyRep::Bool(false), PyRep::Bool(true)])];
+    assert_eq!(
+        make_a.iter().filter(|n| n.event == "OnTradeOffer").map(|n| &n.args).collect::<Vec<_>>(),
+        vec![&expected_make_offer]
+    );
+    assert_eq!(
+        make_b.iter().filter(|n| n.event == "OnTradeOffer").map(|n| &n.args).collect::<Vec<_>>(),
+        vec![&expected_make_offer]
+    );
+    notifs.extend(make_a);
+    notifs.extend(make_b);
 
     let registry = all_registered_notifications();
     let target_events = [
