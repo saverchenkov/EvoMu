@@ -967,7 +967,9 @@ pub fn sync_deathzone_state_notifications(ctx: &ServerContext, sys_id: u32) {
         return;
     }
 
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
     let view = handle.view();
     let ball_positions: HashMap<i64, DVec3> = view
         .balls

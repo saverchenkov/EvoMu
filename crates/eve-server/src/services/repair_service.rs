@@ -251,7 +251,7 @@ pub(crate) fn resolve_structure_repair_location(
         return Some(sta_id);
     }
     let (sys_id, ship_id) = (session.solar_system_id?, session.ship_id?);
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let sys = ctx.systems.get_handle(sys_id)?;
     let view = sys.view();
     let (tethered, ship_pos) = (
         view.is_ball_tethered(ship_id),
@@ -785,7 +785,7 @@ pub async fn handle_repair_items_in_location(
         let sys_opt = ctx
             .systems
             .find_ball_system_sync(iid)
-            .map(|sys_id| ctx.systems.get_or_spawn(sys_id))
+            .and_then(|sys_id| ctx.systems.get_handle(sys_id))
             .or_else(|| {
                 session
                     .solar_system_id

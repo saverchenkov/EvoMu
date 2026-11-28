@@ -229,7 +229,9 @@ pub async fn check_and_spawn_faction_police(
         return Vec::new();
     }
 
-    let handle = ctx.systems.get_or_spawn(solar_system_id);
+    let Some(handle) = ctx.systems.get_handle(solar_system_id) else {
+        return Vec::new();
+    };
     let mut spawned_police = Vec::new();
 
     for (bid, _char_id, sec_status, standing_to_faction) in player_ships {
@@ -597,8 +599,11 @@ pub(crate) async fn plan_empire_navy_patrol_with_preloaded(
     }
 
     let piloted_ship_pos = if let Some(sid) = piloted_ship_id {
-        let handle = ctx.systems.get_or_spawn(solar_system_id);
-        handle.get_ball_snapshot(sid).await.ok().flatten().map(|(_, b)| b.position)
+        if let Some(handle) = ctx.systems.get_handle(solar_system_id) {
+            handle.get_ball_snapshot(sid).await.ok().flatten().map(|(_, b)| b.position)
+        } else {
+            None
+        }
     } else {
         None
     };

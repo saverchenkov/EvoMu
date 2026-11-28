@@ -58,7 +58,7 @@ pub async fn handle(
     handle_with_bound(ctx, session, None, service, method, args, _kwargs).await
 }
 
-async fn is_agent_colocated(
+pub(crate) async fn is_agent_colocated(
     ctx: &ServerContext,
     session: &SessionState,
     sys_id: u32,
@@ -75,16 +75,17 @@ async fn is_agent_colocated(
     if session.station_id.is_some() || session.structure_id.is_some() {
         return false;
     }
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    if let Ok(Some((_, ag_ball))) = handle.get_ball_snapshot(agent_info.agent_id).await {
-        let Some(ship_id) = session.ship_id else {
-            return false;
-        };
-        let Ok(Some((_, ship_ball))) = handle.get_ball_snapshot(ship_id).await else {
-            return false;
-        };
-        if ship_ball.position.distance(ag_ball.position) > 2_500.0 {
-            return false;
+    if let Some(handle) = ctx.systems.get_handle(sys_id) {
+        if let Ok(Some((_, ag_ball))) = handle.get_ball_snapshot(agent_info.agent_id).await {
+            let Some(ship_id) = session.ship_id else {
+                return false;
+            };
+            let Ok(Some((_, ship_ball))) = handle.get_ball_snapshot(ship_id).await else {
+                return false;
+            };
+            if ship_ball.position.distance(ag_ball.position) > 2_500.0 {
+                return false;
+            }
         }
     }
     true
@@ -123,7 +124,11 @@ async fn handle_agent_warp_to_location(
         })?;
     let parsed = parse_agent_warp_args(method, args, kwargs)?;
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(AgentWarpError::ShipNotInSpace.into_rpc(format!(
+            "Active ship {ship_id} is not in space in solar system {sys_id}"
+        )));
+    };
     let (_, current_ball) = sys_handle
         .get_ball_snapshot(ship_id)
         .await

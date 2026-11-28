@@ -490,17 +490,21 @@ impl ServerContext {
         validate_system_movement_locks(self, ship_id, &intent)?;
 
         let sys_id = intent.sys_id();
-        let sys_handle = self.systems.get_or_spawn(sys_id);
+        let sys_handle_opt = self.systems.get_handle(sys_id);
 
-        let ball_opt = sys_handle
-            .get_ball_snapshot(ship_id)
-            .await
-            .map_err(|e| BridgeRpcError {
-                code: "DestinyQueryFailed".into(),
-                message: e,
-                client_error: None,
-            })?
-            .map(|(_, b)| b);
+        let ball_opt = if let Some(ref sys_handle) = sys_handle_opt {
+            sys_handle
+                .get_ball_snapshot(ship_id)
+                .await
+                .map_err(|e| BridgeRpcError {
+                    code: "DestinyQueryFailed".into(),
+                    message: e,
+                    client_error: None,
+                })?
+                .map(|(_, b)| b)
+        } else {
+            None
+        };
 
         if intent.requires_ball_in_space() && ball_opt.is_none() {
             return Err(BridgeRpcError::ship_not_in_space(
@@ -512,14 +516,18 @@ impl ServerContext {
             ));
         }
 
-        let cs_opt = sys_handle
-            .get_combat_state(ship_id)
-            .await
-            .map_err(|e| BridgeRpcError {
-                code: "DestinyQueryFailed".into(),
-                message: e,
-                client_error: None,
-            })?;
+        let cs_opt = if let Some(ref sys_handle) = sys_handle_opt {
+            sys_handle
+                .get_combat_state(ship_id)
+                .await
+                .map_err(|e| BridgeRpcError {
+                    code: "DestinyQueryFailed".into(),
+                    message: e,
+                    client_error: None,
+                })?
+        } else {
+            None
+        };
 
         // Reject if already in active warp (or aligning only where allowed).
         if let Some(ref ball) = ball_opt {
@@ -612,11 +620,13 @@ impl ServerContext {
                         || (cs.warp_scramble_strength > 0
                             && cs.warp_scramble_strength >= cs.warp_core_strength)
                 })
-            } else {
+            } else if let Some(ref sys_handle) = sys_handle_opt {
                 sys_handle
                     .is_ball_scrambled(ship_id)
                     .await
                     .unwrap_or_else(|_| sys_handle.is_ball_scrambled_sync(ship_id))
+            } else {
+                false
             };
             if scrambled {
                 let code = match intent {

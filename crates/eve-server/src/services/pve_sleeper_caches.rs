@@ -89,7 +89,9 @@ pub async fn apply_sleeper_hazard_damage_if_active(
     let Some(ship_id) = session.ship_id else {
         return;
     };
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) else {
+        return;
+    };
     let thermal = if site.sleeper_gas_cloud_active { 200.0 } else { 0.0 };
     let kinetic = if !site.sleeper_sentry_disabled { 200.0 } else { 0.0 };
     if thermal > 0.0 || kinetic > 0.0 {

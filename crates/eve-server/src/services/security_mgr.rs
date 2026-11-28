@@ -322,7 +322,9 @@ pub fn has_active_counter_insurgency_sentries(ctx: &ServerContext, sys_id: u32) 
     if bids.is_empty() {
         return false;
     }
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return false;
+    };
     let view = sys_handle.view();
     bids.into_iter().any(|bid| {
         view.balls.contains_key(&bid)

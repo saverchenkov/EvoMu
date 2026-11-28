@@ -426,7 +426,16 @@ pub async fn step_bosonic_doomsday_system(ctx: &ServerContext, sys_id: u32) {
         return;
     }
 
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        // When a solar system is cold, no caster ship ball can be alive in space, so prune
+        // every queued cycle for those ships without waking the system actor.
+        let dead_ships: std::collections::HashSet<i64> =
+            pending_batches.iter().map(|(_, cycle, _, _)| cycle.ship_id).collect();
+        mutate_superweapon_runtime(&ctx.db, |rt| {
+            rt.active_cycles.retain(|c| !dead_ships.contains(&c.ship_id));
+        });
+        return;
+    };
     for (_, cycle, prev_ticks, target_ticks) in pending_batches {
         let caster_alive = sys
             .list_balls()

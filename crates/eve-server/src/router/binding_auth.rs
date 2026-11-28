@@ -779,7 +779,7 @@ fn is_authorized_shipping_storage_in_space(
     }
     let ship_id = session.ship_id.unwrap_or(0);
     ctx.systems
-        .get_or_spawn_if_runtime(sys_id)
+        .get_handle(sys_id)
         .and_then(|sys_handle| {
             let ship_pos = sys_handle.get_ball_position_sync(ship_id)?;
             let unit_pos = sys_handle.get_ball_position_sync(object_id)?;
@@ -820,7 +820,7 @@ fn resolve_foreign_ship_pos_pair(
         })
         .unwrap_or(object_id);
     ctx.systems
-        .get_or_spawn_if_runtime(sys_id)
+        .get_handle(sys_id)
         .and_then(|sys_handle| {
             sys_handle
                 .get_ball_position_sync(caller_ship)

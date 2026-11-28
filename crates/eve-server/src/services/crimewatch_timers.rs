@@ -111,7 +111,9 @@ pub async fn evaluate_faction_police_response(
         (sec, is_pod)
     });
     if char_sec <= threshold {
-        let _ = ctx.systems.get_or_spawn(solar_system_id).break_gate_cloak(ship_id).await;
+        if let Some(h) = ctx.systems.get_handle(solar_system_id) {
+            let _ = h.break_gate_cloak(ship_id).await;
+        }
         if is_capsule { (false, true, true) } else { (true, false, true) }
     } else {
         (false, true, false)
@@ -646,7 +648,9 @@ pub async fn step_sentry_gun_grid_aggression(
         return (false, 0.0);
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) else {
+        return (false, 0.0);
+    };
     let Some((_, ship_ball)) = sys_handle
         .get_ball_snapshot(offender_ship_id)
         .await

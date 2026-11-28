@@ -507,7 +507,18 @@ pub async fn step_guided_bombs_in_system(ctx: &ServerContext, sys_id: u32, dt: f
     if bombs.is_empty() {
         return;
     }
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        // When a solar system is cold, in-flight guided bombs have no live balls in space,
+        // so mark persisted bomb records finished and prune them without waking the system.
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ext = load_ext_state(snap);
+            for rec in &bombs {
+                ext.in_flight_guided_bombs.remove(&rec.bomb_id);
+            }
+            save_ext_state(snap, &ext);
+        });
+        return;
+    };
     let now_unix = ctx.now_unix();
     let mut finished_ids = Vec::new();
     let mut updated = Vec::new();

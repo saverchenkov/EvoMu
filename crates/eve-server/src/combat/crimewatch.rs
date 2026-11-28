@@ -587,7 +587,9 @@ impl CrimeWatchDirector {
         }
         self.pending_concord_despawns = remaining_despawns;
         for (sys_id, ball_id) in due_despawns {
-            let _ = ctx.systems.get_or_spawn(sys_id).remove_ball(ball_id).await;
+            if let Some(h) = ctx.systems.get_handle(sys_id) {
+                let _ = h.remove_ball(ball_id).await;
+            }
         }
 
         let mut ready = Vec::new();
@@ -635,7 +637,9 @@ impl CrimeWatchDirector {
                 continue;
             }
 
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+                continue;
+            };
 
             let Some((_, ship_ball)) = sys_handle
                 .get_ball_snapshot(criminal_ship_id)
@@ -862,7 +866,9 @@ pub async fn tick_concord_responses(ctx: &ServerContext, now_unix: u64) {
         }
     });
     for (sys_id, ball_id) in due_concord_despawns {
-        let _ = ctx.systems.get_or_spawn(sys_id).remove_ball(ball_id).await;
+        if let Some(h) = ctx.systems.get_handle(sys_id) {
+            let _ = h.remove_ball(ball_id).await;
+        }
     }
     if !temp_cw.states.is_empty() {
         let mut seed_buf = [0u8; 8];
