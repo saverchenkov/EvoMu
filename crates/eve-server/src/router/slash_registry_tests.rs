@@ -1865,3 +1865,247 @@ fn track2_transition_domain_parity_source_guard() {
     let transitions_prod = production_prefix(&transitions_raw);
     assert!(!transitions_prod.contains("get_or_spawn"));
 }
+
+#[test]
+fn typed_fit_and_load_argument_parsers_enforce_contract() {
+    assert_eq!(
+        parse_fit_slash_args("2048").expect("single type_id"),
+        FitSlashArgs::CallerShip {
+            type_id: 2048,
+            explicit_flag: None,
+        }
+    );
+    for alias in ["me", "ME", "myship", "\"MYSHIP\""] {
+        assert_eq!(
+            parse_fit_slash_args(&format!(" {alias} 2048 ")).expect("alias type_id"),
+            FitSlashArgs::CallerShip {
+                type_id: 2048,
+                explicit_flag: None,
+            },
+            "for {alias:?}"
+        );
+        assert_eq!(
+            parse_fit_slash_args(&format!("{alias} 2048 11")).expect("alias type_id flag"),
+            FitSlashArgs::CallerShip {
+                type_id: 2048,
+                explicit_flag: Some(eve_db::InventoryFlag::LoSlot0),
+            },
+            "for {alias:?}"
+        );
+    }
+    assert_eq!(
+        parse_fit_slash_args("100000001 2048").expect("ship_id type_id"),
+        FitSlashArgs::NumericPrefix {
+            first: 100_000_001,
+            second: 2048,
+            third_flag: None,
+        }
+    );
+    assert_eq!(
+        parse_fit_slash_args("100000001 2048 11").expect("ship_id type_id flag"),
+        FitSlashArgs::NumericPrefix {
+            first: 100_000_001,
+            second: 2048,
+            third_flag: Some(eve_db::InventoryFlag::LoSlot0),
+        }
+    );
+    assert_eq!(
+        parse_fit_slash_args("484 27").expect("type_id flag"),
+        FitSlashArgs::NumericPrefix {
+            first: 484,
+            second: 27,
+            third_flag: None,
+        }
+    );
+    for bad in [
+        "",
+        "   ",
+        "me",
+        "myship",
+        "0",
+        "-5",
+        "notatype",
+        "me 0",
+        "me badtype",
+        "me 2048 0",
+        "me 2048 badflag",
+        "me 2048 11 extra",
+        "100000001 0",
+        "100000001 bad",
+        "100000001 2048 0",
+        "100000001 2048 bad",
+        "100000001 2048 11 extra",
+        "\"\"",
+    ] {
+        let err = parse_fit_slash_args(bad).expect_err(&format!("expected /fit {bad:?} to reject"));
+        assert_eq!(err.code, "InvalidSlashArgument", "for /fit {bad:?}");
+        assert!(matches!(
+            err.client_error.as_deref(),
+            Some(eve_proto::ClientError::User {
+                key: eve_proto::UserErrorKey::SlashError,
+                ..
+            })
+        ));
+    }
+
+    assert_eq!(
+        parse_load_slash_args("34").expect("single type_id"),
+        LoadSlashArgs::Caller {
+            type_id: 34,
+            quantity: 1,
+        }
+    );
+    for alias in ["me", "ME", "myship", " \"me\" "] {
+        assert_eq!(
+            parse_load_slash_args(&format!("{alias} 34")).expect("alias type_id"),
+            LoadSlashArgs::Caller {
+                type_id: 34,
+                quantity: 1,
+            },
+            "for {alias:?}"
+        );
+        assert_eq!(
+            parse_load_slash_args(&format!("{alias} 34 250 ")).expect("alias type_id qty"),
+            LoadSlashArgs::Caller {
+                type_id: 34,
+                quantity: 250,
+            },
+            "for {alias:?}"
+        );
+    }
+    assert_eq!(
+        parse_load_slash_args("60003760 34 50").expect("target type_id qty"),
+        LoadSlashArgs::TargetId {
+            target_id: 60_003_760,
+            type_id: 34,
+            quantity: 50,
+        }
+    );
+    assert_eq!(
+        parse_load_slash_args("34 15").expect("numeric pair"),
+        LoadSlashArgs::NumericPair {
+            first: 34,
+            second: 15,
+        }
+    );
+    for bad in [
+        "",
+        "   ",
+        "me",
+        "myship",
+        "0",
+        "-3",
+        "notatype",
+        "me 0",
+        "me badtype",
+        "me 34 0",
+        "me 34 -5",
+        "me 34 badqty",
+        "me 34 5 extra",
+        "60003760 0 5",
+        "60003760 34 0",
+        "60003760 34 -1",
+        "34 0",
+        "34 -2",
+        "badtarget 34 5",
+        "60003760 34 5 extra",
+        "\"\"",
+    ] {
+        let err =
+            parse_load_slash_args(bad).expect_err(&format!("expected /load {bad:?} to reject"));
+        assert_eq!(err.code, "InvalidSlashArgument", "for /load {bad:?}");
+        assert!(matches!(
+            err.client_error.as_deref(),
+            Some(eve_proto::ClientError::User {
+                key: eve_proto::UserErrorKey::SlashError,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn track2_fitting_domain_parity_source_guard() {
+    let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    // 1. No `domain/gm_*.rs` modules and `domain/fitting.rs` must stay free of wire-protocol types.
+    let mut domain_files = Vec::new();
+    collect_rs_files(&src_root.join("domain"), &mut domain_files);
+    assert!(
+        domain_files.iter().all(|p| !p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("gm_"))),
+        "domain/ must never contain GM-only `gm_*.rs` forks"
+    );
+
+    let fitting_raw =
+        fs::read_to_string(src_root.join("domain/fitting.rs")).expect("domain/fitting.rs");
+    let fitting_prod = production_prefix(&fitting_raw);
+    for forbidden in [
+        "PyRep",
+        "BridgeRpcError",
+        "serde_json::Value",
+        "RouteExecutionResult",
+    ] {
+        assert!(
+            !fitting_prod.contains(forbidden),
+            "domain/fitting.rs must not reference `{forbidden}`"
+        );
+    }
+
+    // 2. `/fit` and `/load` delegate to `parse_fit_slash_args` / `parse_load_slash_args` and
+    // shared domain primitives without raw `snap.items.insert` or `module_online_states.insert`.
+    let gm_raw = fs::read_to_string(src_root.join("services/character_gm_tools.rs"))
+        .expect("services/character_gm_tools.rs");
+    let gm_prod = production_prefix(&gm_raw);
+    let fit_start = gm_prod
+        .find("pub(crate) fn dispatch_fit_slash(")
+        .expect("dispatch_fit_slash");
+    let load_start = gm_prod
+        .find("pub(crate) fn dispatch_load_slash(")
+        .expect("dispatch_load_slash");
+    let kill_start = gm_prod[load_start..]
+        .find("pub(crate) fn dispatch_kill_slash")
+        .map(|off| load_start + off)
+        .expect("dispatch_kill_slash");
+    let fit_fn = &gm_prod[fit_start..load_start];
+    let load_fn = &gm_prod[load_start..kill_start];
+
+    assert!(fit_fn.contains("parse_fit_slash_args("));
+    assert!(fit_fn.contains("fit_newly_minted_item_tx("));
+    assert!(fit_fn.contains("emit_module_fitted_notifications("));
+    assert!(!fit_fn.contains("snap.items.insert"));
+    assert!(!fit_fn.contains("module_online_states.insert"));
+
+    assert!(load_fn.contains("parse_load_slash_args("));
+    assert!(load_fn.contains("grant_item_in_snap("));
+    assert!(!load_fn.contains("snap.items.insert"));
+    assert!(!load_fn.contains("module_online_states.insert"));
+
+    // 3. Real non-GM gameplay fitting flows share `domain::fitting` + `emit_module_fitted_notifications`.
+    for rel in [
+        "services/inventory_fitting.rs",
+        "services/inventory_stacking.rs",
+        "services/fitting_saved_apply.rs",
+    ] {
+        let raw = fs::read_to_string(src_root.join(rel)).expect(rel);
+        let prod = production_prefix(&raw);
+        assert!(
+            prod.contains("emit_module_fitted_notifications("),
+            "{rel} must call shared emit_module_fitted_notifications"
+        );
+        assert!(
+            prod.contains("record_fitted_module_online_state_in_snap("),
+            "{rel} must call domain::fitting::record_fitted_module_online_state_in_snap"
+        );
+        assert!(
+            !prod.contains("snap.module_online_states.insert("),
+            "{rel} production code must not mutate snap.module_online_states directly"
+        );
+        assert!(
+            !prod.contains("OnModuleFitted {"),
+            "{rel} production code must emit OnModuleFitted via emit_module_fitted_notifications"
+        );
+    }
+}

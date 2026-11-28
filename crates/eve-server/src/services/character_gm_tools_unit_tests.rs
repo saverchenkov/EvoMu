@@ -2731,3 +2731,133 @@ fn displaced_docked_character_selection_runs_logoff_teardown_only_when_offline()
         "banned session teardown must preserve UserBanned instead of SessionKicked"
     );
 }
+
+#[tokio::test]
+async fn gm_fit_commits_single_tx_and_orders_prime_before_online_effect() {
+    let ctx = test_ctx();
+    let char_id = 95_800_201_i64;
+    let ship_id = 95_800_300_i64;
+    let station_id = 60_003_760_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.name = "SingleTxFitPilot".into();
+        ch.station_id = Some(station_id);
+        ch.solar_system_id = 30_000_142;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.skills.insert(char_id, HashMap::new());
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter
+                owner_id: char_id,
+                location_id: station_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let mut sess = gm_session(char_id, ship_id);
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, sess.session_id, Some(char_id), false, ctx.now_unix());
+    let _ = ctx.get_or_rebuild_ship_fitting(char_id, ship_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Offline /fit commits exactly one DB tx and emits ProcessInventoryChange < OnGodmaPrimeItem < OnModuleFitted.
+    let commits_before_offline = ctx.db.tx_commit_count();
+    let offline_rep = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/fit 484")
+        .await
+        .expect("slash handled")
+        .expect("offline /fit ok");
+    assert_eq!(offline_rep.dict_get("online"), Some(&PyRep::Bool(false)));
+    assert_eq!(
+        ctx.db.tx_commit_count(),
+        commits_before_offline + 1,
+        "offline /fit must commit in a single DB transaction"
+    );
+    let off_notifs = ctx.drain_notifications_for_char(char_id);
+    let off_proc = off_notifs
+        .iter()
+        .position(|n| n.event == "ProcessInventoryChange")
+        .expect("ProcessInventoryChange emitted");
+    let off_prime = off_notifs
+        .iter()
+        .position(|n| n.event == "OnGodmaPrimeItem")
+        .expect("OnGodmaPrimeItem emitted");
+    let off_fitted = off_notifs
+        .iter()
+        .position(|n| n.event == "OnModuleFitted")
+        .expect("OnModuleFitted emitted");
+    assert!(
+        off_proc < off_prime && off_prime < off_fitted,
+        "offline /fit must order ProcessInventoryChange < OnGodmaPrimeItem < OnModuleFitted: {:?}",
+        off_notifs.iter().map(|n| &n.event).collect::<Vec<_>>()
+    );
+    assert!(
+        !off_notifs.iter().any(|n| n.event == "OnGodmaShipEffect"),
+        "offline /fit must not emit OnGodmaShipEffect"
+    );
+
+    // 2. Grant skills, pre-warm cache cleanly, and verify online /fit ALSO commits in 1 DB tx
+    //    and emits OnGodmaPrimeItem before OnGodmaShipEffect(16).
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk_map = snap.skills.entry(char_id).or_default();
+        for sk in [3300_u32, 3301, 3302] {
+            sk_map.insert(
+                sk,
+                eve_db::TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let _ = ctx.get_or_rebuild_ship_fitting(char_id, ship_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let commits_before_online = ctx.db.tx_commit_count();
+    let online_rep = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/fit 484")
+        .await
+        .expect("slash handled")
+        .expect("online /fit ok");
+    assert_eq!(online_rep.dict_get("online"), Some(&PyRep::Bool(true)));
+    assert_eq!(
+        ctx.db.tx_commit_count(),
+        commits_before_online + 1,
+        "online /fit must commit in a single DB transaction"
+    );
+    let on_notifs = ctx.drain_notifications_for_char(char_id);
+    let on_proc = on_notifs
+        .iter()
+        .position(|n| n.event == "ProcessInventoryChange")
+        .expect("ProcessInventoryChange emitted");
+    let on_prime = on_notifs
+        .iter()
+        .position(|n| n.event == "OnGodmaPrimeItem")
+        .expect("OnGodmaPrimeItem emitted");
+    let on_fitted = on_notifs
+        .iter()
+        .position(|n| n.event == "OnModuleFitted")
+        .expect("OnModuleFitted emitted");
+    let on_eff16 = on_notifs
+        .iter()
+        .position(|n| {
+            n.event == "OnGodmaShipEffect"
+                && n.args.get(1).and_then(PyRep::as_i64) == Some(16)
+        })
+        .expect("OnGodmaShipEffect(16) emitted");
+    assert!(
+        on_proc < on_prime && on_prime < on_fitted && on_prime < on_eff16,
+        "online /fit must order ProcessInventoryChange < OnGodmaPrimeItem < OnModuleFitted and OnGodmaPrimeItem < OnGodmaShipEffect(16): {:?}",
+        on_notifs.iter().map(|n| &n.event).collect::<Vec<_>>()
+    );
+}

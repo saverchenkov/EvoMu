@@ -2400,6 +2400,205 @@ fn online_module_active_effects_for_attrs(
     online_module_active_effects(mod_id, char_id, ship_id, now_ft, is_online)
 }
 
+/// Emits `OnGodmaPrimeItem` for a newly fitted module, subsystem, service module, or slot-loaded
+/// charge so the client and `ShadowClient` prime `effectsByItemEffect[item_id]` before subsequent
+/// `OnGodmaShipEffect(16)` or `SetModuleOnline` notifications (`#1193`).
+pub(crate) fn emit_godma_fitted_module_prime(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    item: &eve_db::InventoryItemRecord,
+    is_online: bool,
+    fit_opt: Option<&ShipFittingEngine>,
+) {
+    if ship_id <= 0 {
+        return;
+    }
+    let is_charge = ctx
+        .sde
+        .types
+        .get(&item.type_id)
+        .is_some_and(|t| t.category_id == 8);
+    if is_charge {
+        emit_godma_charge_sublocation_prime(ctx, char_id, ship_id, item);
+        return;
+    }
+
+    let mut inv_item = item.clone();
+    inv_item.singleton = true;
+    let inv_row = eve_proto::DBRowDescriptor::inv_item_header()
+        .build_dbrow(super::super::item_to_packed_cells(ctx, &inv_item));
+
+    let mut m_map_opt: Option<HashMap<u16, f64>> = None;
+    if is_online {
+        if let Some(fit) = fit_opt {
+            let computed_ctx;
+            let eval_ctx = match fit.persisted_context() {
+                Some(c) => c,
+                None => {
+                    computed_ctx = fit.evaluated_context(&ctx.sde);
+                    &computed_ctx
+                }
+            };
+            if let Some(m_state) = eval_ctx
+                .ship_located_items
+                .iter()
+                .find(|m| m.item_id == item.item_id)
+            {
+                let attr_ids_set: std::collections::BTreeSet<u16> = m_state
+                    .base_attributes
+                    .keys()
+                    .copied()
+                    .chain(m_state.modifiers.iter().map(|m| m.target_attribute_id))
+                    .collect();
+                let mut evaluated: HashMap<u16, f64> = attr_ids_set
+                    .into_iter()
+                    .map(|aid| (aid, m_state.get_attribute(aid, &ctx.sde)))
+                    .collect();
+                for (&aid, &val) in &item.dynamic_attributes {
+                    if matches!(aid, 3 | 18 | 264 | 265 | 266)
+                        || !m_state.modifiers.iter().any(|m| m.target_attribute_id == aid)
+                    {
+                        evaluated.insert(aid, val);
+                    }
+                }
+                m_map_opt = Some(evaluated);
+            }
+        }
+    }
+
+    let mut m_map = m_map_opt.unwrap_or_else(|| {
+        let mut defaults = ctx
+            .sde
+            .types
+            .get(&item.type_id)
+            .map(|t| t.default_attributes.clone())
+            .unwrap_or_default();
+        for (&aid, &val) in &item.dynamic_attributes {
+            defaults.insert(aid, val);
+        }
+        defaults
+    });
+    m_map.insert(2, if is_online { 1.0 } else { 0.0 });
+    if is_online {
+        crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(
+            ctx,
+            ship_id,
+            &mut m_map,
+        );
+    }
+    let mut attrs: Vec<(PyRep, PyRep)> = m_map
+        .into_iter()
+        .map(|(aid, val)| (PyRep::Integer(i64::from(aid)), PyRep::Real(val)))
+        .collect();
+    attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+
+    let has_online_effect = ctx
+        .sde
+        .types
+        .get(&item.type_id)
+        .is_some_and(|t| t.effect_ids.contains(&16));
+    let now_ft = ctx.now_client_sim_filetime_ticks();
+    let row = PyRep::keyval([
+        ("itemID", PyRep::Integer(item.item_id)),
+        ("invItem", inv_row),
+        ("attributes", PyRep::Dict(attrs)),
+        (
+            "activeEffects",
+            online_module_active_effects(
+                item.item_id,
+                char_id,
+                ship_id,
+                now_ft,
+                is_online && has_online_effect,
+            ),
+        ),
+        ("time", PyRep::Integer(now_ft)),
+        ("wallclockTime", PyRep::Integer(now_ft)),
+        ("description", PyRep::String(String::new())),
+    ]);
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Character(char_id),
+        crate::router::notify_registry::OnGodmaPrimeItem {
+            location_id: ship_id,
+            row,
+        },
+    );
+}
+
+/// Emits post-fit godma priming and slot/online/attribute-delta notifications in canonical V24
+/// order: `OnGodmaPrimeItem` -> `OnModuleFitted` -> `OnModuleAttributeChanges` (`isOnline`) ->
+/// optional `OnGodmaShipEffect(16)` -> optional ship fitting attribute delta changes (`#1193`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_module_fitted_notifications(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    item: &eve_db::InventoryItemRecord,
+    is_online: bool,
+    emit_online_effect: bool,
+    before_ship_attrs: Option<&std::collections::BTreeMap<u16, f64>>,
+    fit_opt: Option<&ShipFittingEngine>,
+    include_ship_attr_changes: bool,
+) -> Option<std::collections::BTreeMap<u16, f64>> {
+    emit_godma_fitted_module_prime(ctx, char_id, ship_id, item, is_online, fit_opt);
+
+    let type_rec_opt = ctx.sde.types.get(&item.type_id);
+    if type_rec_opt.is_some_and(|t| t.category_id == 8) {
+        return None;
+    }
+
+    let group_id = type_rec_opt.map(|t| i64::from(t.group_id)).unwrap_or(0);
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Character(char_id),
+        crate::router::notify_registry::OnModuleFitted {
+            char_id,
+            flag: item.flag as i64,
+            type_id: i64::from(item.type_id),
+            group_id,
+        },
+    );
+    let _ = ctx.notify_module_online_state(char_id, item.item_id, is_online);
+    let has_online_effect = type_rec_opt.is_some_and(|t| t.effect_ids.contains(&16));
+    if emit_online_effect && is_online && has_online_effect {
+        let eff_id = ctx
+            .effect_id_for_module(item.type_id, Some("online"))
+            .unwrap_or(16) as i32;
+        let _ = ctx.notify_godma_ship_effect(
+            crate::router::NotificationTarget::Character(char_id),
+            item.item_id,
+            eff_id,
+            true,
+            0,
+            0,
+        );
+    }
+
+    if include_ship_attr_changes {
+        let only_if_changed = emit_online_effect;
+        if let Some(after_fit) = fit_opt {
+            crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_from_fit(
+                ctx,
+                char_id,
+                ship_id,
+                before_ship_attrs,
+                after_fit,
+                only_if_changed,
+            )
+        } else {
+            crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_for_ship(
+                ctx,
+                char_id,
+                ship_id,
+                before_ship_attrs,
+                only_if_changed,
+            )
+        }
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 #[path = "fitting_module_cycles_helpers_tests.rs"]
 mod fitting_module_cycles_helpers_tests;

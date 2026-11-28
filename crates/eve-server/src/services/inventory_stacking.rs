@@ -464,10 +464,7 @@ pub(crate) async fn handle_multi_add(
             if old_loc != new_loc {
                 old_containers.insert((old_loc, item_id, it_tid, it_qty));
             }
-            snap.module_online_states.remove(&item_id);
-            snap.module_active_states.remove(&item_id);
-            snap.module_active_charges.remove(&item_id);
-            crate::router::ServerContext::clear_persisted_module_overload(snap, old_loc, item_id);
+            crate::domain::fitting::clear_unfitted_module_state_in_snap(snap, old_loc, item_id);
             let (fin_opt, _) = crate::services::structure_acl_defense_rules::finalize_fuel_bay_move_in_snap(
                 ctx, snap, item_id, old_loc, old_flag, new_loc, flag, char_id, caller_corp_id,
             );
@@ -981,7 +978,7 @@ async fn handle_multi_add_auto_fit(
             .values()
             .filter(|other| {
                 other.location_id == ship_id
-                    && matches!(other.flag as u16, 11..=34 | 92..=94 | 125..=132)
+                    && crate::domain::fitting::is_ship_fitting_slot_flag(other.flag)
                     && ctx.sde.types.get(&other.type_id).is_none_or(|t| t.category_id == 7 || t.category_id == 32)
             })
             .map(|other| other.flag as u16)
@@ -991,28 +988,19 @@ async fn handle_multi_add_auto_fit(
             let (item, mod_t) = validate_auto_fit_item_in_snap(
                 ctx, snap, session, ch, char_id, ship_id, ship_t, item_id, &looted_from_space_ids, &pre_balls,
             )?;
-            let (cand_slots, default_online): (Vec<u16>, bool) = if mod_t.effect_ids.contains(&12) {
-                ((27_u16..=34).collect(), true)
-            } else if mod_t.effect_ids.contains(&13) {
-                ((19_u16..=26).collect(), true)
-            } else if mod_t.effect_ids.contains(&11) {
-                ((11_u16..=18).collect(), true)
-            } else if mod_t.effect_ids.contains(&2663) {
-                ((92_u16..=94).collect(), true)
-            } else if mod_t.effect_ids.contains(&3772) {
-                if let Some(&req_slot_f) = mod_t.default_attributes.get(&1366) {
-                    (vec![req_slot_f as u16], true)
-                } else {
-                    ((125_u16..=132).collect(), true)
-                }
-            } else {
+            let cand_slots: Vec<u16> = crate::domain::fitting::candidate_fitting_flags_for_type(mod_t)
+                .into_iter()
+                .filter(|&f| crate::domain::fitting::is_ship_fitting_slot_flag(f))
+                .map(|f| f as u16)
+                .collect();
+            if cand_slots.is_empty() {
                 return Err(BridgeRpcError {
                     code: "ItemNotFittableModule".into(),
                     message: format!("Module {} lacks a fitting slot effect", mod_t.name),
                     client_error: None,
                 });
-            };
-            meta.push((item.clone(), cand_slots, default_online));
+            }
+            meta.push((item.clone(), cand_slots, true));
         }
         Ok((used, meta))
     })?;
@@ -1129,7 +1117,11 @@ async fn handle_multi_add_auto_fit(
             it.singleton = true;
             it.version += 1;
             let updated = it.clone();
-            snap.module_online_states.insert(fitted_id, plan.online);
+            crate::domain::fitting::record_fitted_module_online_state_in_snap(
+                snap,
+                fitted_id,
+                plan.online,
+            );
             fitting_containers_ships::record_inv_move_logs_in_snap(
                 &ctx.sde, snap, char_id, updated.item_id, plan.src_item.item_id, updated.type_id, updated.quantity, old_loc, ship_id, true, now_unix,
             )?;
@@ -1193,48 +1185,20 @@ async fn handle_multi_add_auto_fit(
             old_loc,
             updated.flag as i64,
         );
-        let group_id = ctx
-            .sde
-            .types
-            .get(&updated.type_id)
-            .map(|t| i64::from(t.group_id))
-            .unwrap_or(0);
-        ctx.emit_typed(
-            crate::router::NotificationTarget::Character(char_id),
-            crate::router::notify_registry::OnModuleFitted {
+        if let Some(next_attrs) =
+            crate::services::inventory_fitting::emit_module_fitted_notifications(
+                ctx,
                 char_id,
-                flag: updated.flag as i64,
-                type_id: updated.type_id as i64,
-                group_id,
-            },
-        );
-        let _ = ctx.notify_module_online_state(char_id, updated.item_id, plan.online);
-        if plan.online {
-            let eff_id = ctx
-                .effect_id_for_module(updated.type_id, Some("online"))
-                .unwrap_or(16) as i32;
-            let _ = ctx.notify_godma_ship_effect(
-                crate::router::NotificationTarget::Character(char_id),
-                updated.item_id,
-                eff_id,
+                ship_id,
+                &updated,
+                plan.online,
                 true,
-                0,
-                0,
-            );
-        }
-        if let Some(ref new_fit) = rebuilt_fit {
-            if let Some(next_attrs) =
-                crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_from_fit(
-                    ctx,
-                    char_id,
-                    ship_id,
-                    Some(&prev_ship_attrs),
-                    new_fit,
-                    true,
-                )
-            {
-                prev_ship_attrs = next_attrs;
-            }
+                Some(&prev_ship_attrs),
+                rebuilt_fit.as_ref(),
+                true,
+            )
+        {
+            prev_ship_attrs = next_attrs;
         }
         fitted_ids.push(updated.item_id);
     }

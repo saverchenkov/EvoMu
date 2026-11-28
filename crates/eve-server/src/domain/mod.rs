@@ -8,6 +8,7 @@
 pub mod career_goals;
 pub mod combat_ops;
 pub mod corp_governance;
+pub mod fitting;
 pub mod fleets;
 pub mod items;
 pub mod mail;

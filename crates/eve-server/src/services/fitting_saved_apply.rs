@@ -1766,36 +1766,20 @@ fn validate_and_apply_fitting_with_options(
                     ship_failed = true;
                     continue;
                 }
-                let mut online = true;
-                if is_mod {
-                    if let Some(m_type) = ctx.sde.types.get(&tid) {
-                        for (sk_attr, lv_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
-                            .into_iter()
-                            .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
-                        {
-                            if let Some(&sk_f) = m_type.default_attributes.get(&sk_attr) {
-                                let sk_id = sk_f as u32;
-                                if sk_id > 0 {
-                                    let req_lvl = m_type.default_attributes.get(&lv_attr).copied().unwrap_or(1.0) as u8;
-                                    let trained = char_skills.get(&sk_id).copied().unwrap_or(0);
-                                    if trained < req_lvl {
-                                        online = false;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                let online = if is_mod {
                     let dummy_mod_id = snap.next_entity_id + 10_000 + flag_u16 as i64;
-                    if online {
-                        if engine.fit_module_with_state(dummy_mod_id, tid, flag_u16, true, &ctx.sde).is_err() {
-                            online = false;
-                            let _ = engine.fit_module_with_state(dummy_mod_id, tid, flag_u16, false, &ctx.sde);
-                        }
-                    } else {
-                        let _ = engine.fit_module_with_state(dummy_mod_id, tid, flag_u16, false, &ctx.sde);
-                    }
-                }
+                    crate::domain::fitting::fit_and_try_online_in_engine(
+                        &ctx.sde,
+                        &mut engine,
+                        dummy_mod_id,
+                        tid,
+                        flag,
+                        crate::domain::fitting::FitOnlinePolicy::CheckSkillsAndResources,
+                    )
+                    .unwrap_or(false)
+                } else {
+                    true
+                };
                 let mut to_consume = req_qty;
                 for (cid, avail) in matching_stacks {
                     if to_consume <= 0 {
@@ -1827,7 +1811,9 @@ fn validate_and_apply_fitting_with_options(
                             moved_items.push(moved);
                             ship_fitted = true;
                             if is_mod {
-                                snap.module_online_states.insert(cid, online);
+                                crate::domain::fitting::record_fitted_module_online_state_in_snap(
+                                    snap, cid, online,
+                                );
                                 fitted_online_states.insert(cid, online);
                             }
                         } else {
@@ -1857,7 +1843,9 @@ fn validate_and_apply_fitting_with_options(
                         moved_items.push(new_item);
                         ship_fitted = true;
                         if is_mod {
-                            snap.module_online_states.insert(split_id, online);
+                            crate::domain::fitting::record_fitted_module_online_state_in_snap(
+                                snap, split_id, online,
+                            );
                             fitted_online_states.insert(split_id, online);
                         }
                     }
@@ -1881,25 +1869,24 @@ fn validate_and_apply_fitting_with_options(
     for &ship_id in target_ship_ids {
         ctx.invalidate_ship_fitting(ship_id);
     }
+    let mut fit_by_ship: HashMap<i64, Option<eve_dogma::ShipFittingEngine>> = HashMap::new();
     if fitted_count > 0 && !moved_items.is_empty() && emit_single_item_change {
         for item in &moved_items {
             if let Some(&online) = fitted_online_states.get(&item.item_id) {
-                let group_id = ctx
-                    .sde
-                    .types
-                    .get(&item.type_id)
-                    .map(|t| i64::from(t.group_id))
-                    .unwrap_or(0);
-                ctx.emit_typed(
-                    crate::router::NotificationTarget::Character(char_id),
-                    crate::router::notify_registry::OnModuleFitted {
-                        char_id,
-                        flag: item.flag as i64,
-                        type_id: item.type_id as i64,
-                        group_id,
-                    },
+                let fit_opt = fit_by_ship
+                    .entry(item.location_id)
+                    .or_insert_with(|| ctx.get_or_rebuild_ship_fitting(char_id, item.location_id).ok());
+                crate::services::inventory_fitting::emit_module_fitted_notifications(
+                    ctx,
+                    char_id,
+                    item.location_id,
+                    item,
+                    online,
+                    false,
+                    None,
+                    fit_opt.as_ref(),
+                    false,
                 );
-                let _ = ctx.notify_module_online_state(char_id, item.item_id, online);
             }
         }
     }

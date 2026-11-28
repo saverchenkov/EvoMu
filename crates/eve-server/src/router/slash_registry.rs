@@ -456,7 +456,7 @@ pub(crate) fn unknown_slash_error(cmd: &str) -> BridgeRpcError {
     )
 }
 
-fn invalid_slash_arg_error(msg: impl Into<String>) -> BridgeRpcError {
+pub(crate) fn invalid_slash_arg_error(msg: impl Into<String>) -> BridgeRpcError {
     let msg = msg.into();
     let reason = format!("InvalidSlashArgument: {msg}");
     BridgeRpcError::with_client_error(
@@ -863,6 +863,190 @@ pub(crate) fn parse_teleport_slash_args(rest: &str) -> Result<TeleportSlashArgs,
             })
         }
         _ => Err(usage_err()),
+    }
+}
+
+const FIT_USAGE: &str = "Usage: /fit [me|myship|<ship_id|char_id>] <type_id> [flag_id]";
+
+/// Typed arguments parsed syntactically for `/fit` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FitSlashArgs {
+    /// `[me|myship] <type_id> [flag_id]` or `<type_id>` targeting the caller's active ship.
+    CallerShip {
+        type_id: u32,
+        explicit_flag: Option<eve_db::InventoryFlag>,
+    },
+    /// `<first_i64> <second_u32> [third_flag_u16]`: resolved in `dispatch_fit_slash` against
+    /// world items and characters between `<ship_id|char_id> <type_id> [flag_id]` and
+    /// `<type_id> <flag_id>` on the caller's ship.
+    NumericPrefix {
+        first: i64,
+        second: u32,
+        third_flag: Option<eve_db::InventoryFlag>,
+    },
+}
+
+/// Parses `/fit` arguments syntactically without querying DB/SDE (`#1193`).
+pub(crate) fn parse_fit_slash_args(rest: &str) -> Result<FitSlashArgs, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let parse_pos_u32 = |tok: &str| tok.parse::<u32>().ok().filter(|&id| id > 0);
+    let parse_pos_i64 = |tok: &str| tok.parse::<i64>().ok().filter(|&id| id > 0);
+    let parse_pos_flag = |tok: &str| {
+        tok.parse::<u16>()
+            .ok()
+            .filter(|&id| id > 0)
+            .map(eve_db::InventoryFlag::from_u16)
+    };
+
+    match token_strs.as_slice() {
+        [alias] if crate::services::character_skills::character_gm_tools::is_me_or_myship(alias) => {
+            Err(invalid_slash_arg_error("Usage: /fit me <type_id> [flag_id]"))
+        }
+        [alias, tid_tok]
+            if crate::services::character_skills::character_gm_tools::is_me_or_myship(alias) =>
+        {
+            let type_id = parse_pos_u32(tid_tok)
+                .ok_or_else(|| invalid_slash_arg_error("Usage: /fit me <type_id> [flag_id]"))?;
+            Ok(FitSlashArgs::CallerShip {
+                type_id,
+                explicit_flag: None,
+            })
+        }
+        [alias, tid_tok, flag_tok]
+            if crate::services::character_skills::character_gm_tools::is_me_or_myship(alias) =>
+        {
+            let type_id = parse_pos_u32(tid_tok)
+                .ok_or_else(|| invalid_slash_arg_error("Usage: /fit me <type_id> [flag_id]"))?;
+            let explicit_flag = Some(
+                parse_pos_flag(flag_tok)
+                    .ok_or_else(|| invalid_slash_arg_error("Invalid flag_id for /fit"))?,
+            );
+            Ok(FitSlashArgs::CallerShip {
+                type_id,
+                explicit_flag,
+            })
+        }
+        [tid_tok] => {
+            let type_id =
+                parse_pos_u32(tid_tok).ok_or_else(|| invalid_slash_arg_error(FIT_USAGE))?;
+            Ok(FitSlashArgs::CallerShip {
+                type_id,
+                explicit_flag: None,
+            })
+        }
+        [first_tok, second_tok] => {
+            let first =
+                parse_pos_i64(first_tok).ok_or_else(|| invalid_slash_arg_error(FIT_USAGE))?;
+            let second =
+                parse_pos_u32(second_tok).ok_or_else(|| invalid_slash_arg_error(FIT_USAGE))?;
+            Ok(FitSlashArgs::NumericPrefix {
+                first,
+                second,
+                third_flag: None,
+            })
+        }
+        [first_tok, second_tok, third_tok] => {
+            let first = parse_pos_i64(first_tok).ok_or_else(|| {
+                invalid_slash_arg_error("Usage: /fit <ship_id|char_id> <type_id> [flag_id]")
+            })?;
+            let second = parse_pos_u32(second_tok).ok_or_else(|| {
+                invalid_slash_arg_error("Usage: /fit <ship_id|char_id> <type_id> [flag_id]")
+            })?;
+            let third_flag = Some(
+                parse_pos_flag(third_tok)
+                    .ok_or_else(|| invalid_slash_arg_error("Invalid flag_id for /fit"))?,
+            );
+            Ok(FitSlashArgs::NumericPrefix {
+                first,
+                second,
+                third_flag,
+            })
+        }
+        _ => Err(invalid_slash_arg_error(FIT_USAGE)),
+    }
+}
+
+const LOAD_USAGE: &str = "Usage: /load [target|me] <type_id> [quantity]";
+
+/// Typed arguments parsed syntactically for `/load` (`#1193`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LoadSlashArgs {
+    /// `[me|myship] <type_id> [quantity]` or `<type_id>` targeting the caller.
+    Caller { type_id: u32, quantity: i32 },
+    /// `<target_id> <type_id> <quantity>` targeting a specific character, container, ship, or station.
+    TargetId {
+        target_id: i64,
+        type_id: u32,
+        quantity: i32,
+    },
+    /// Two positive integers `[first, second]`: resolved against stations, characters, items, and
+    /// structures between `<target_id> <type_id>` (qty 1) and `<type_id> <quantity>` on caller.
+    NumericPair { first: i64, second: i32 },
+}
+
+/// Parses `/load` arguments syntactically with positive quantity validation (`#1193`).
+pub(crate) fn parse_load_slash_args(rest: &str) -> Result<LoadSlashArgs, BridgeRpcError> {
+    let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+    let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let parse_pos_u32 = |tok: &str| tok.parse::<u32>().ok().filter(|&id| id > 0);
+    let parse_pos_i64 = |tok: &str| tok.parse::<i64>().ok().filter(|&id| id > 0);
+    let parse_pos_qty = |tok: &str| {
+        tok.parse::<i32>()
+            .ok()
+            .filter(|&q| q > 0)
+            .ok_or_else(|| invalid_slash_arg_error("Quantity for /load must be a positive integer"))
+    };
+
+    match token_strs.as_slice() {
+        [alias] if crate::services::character_skills::character_gm_tools::is_me_or_myship(alias) => {
+            Err(invalid_slash_arg_error("Usage: /load me <type_id> [quantity]"))
+        }
+        [alias, tid_tok]
+            if crate::services::character_skills::character_gm_tools::is_me_or_myship(alias) =>
+        {
+            let type_id = parse_pos_u32(tid_tok)
+                .ok_or_else(|| invalid_slash_arg_error(LOAD_USAGE))?;
+            Ok(LoadSlashArgs::Caller {
+                type_id,
+                quantity: 1,
+            })
+        }
+        [alias, tid_tok, qty_tok]
+            if crate::services::character_skills::character_gm_tools::is_me_or_myship(alias) =>
+        {
+            let type_id = parse_pos_u32(tid_tok)
+                .ok_or_else(|| invalid_slash_arg_error(LOAD_USAGE))?;
+            let quantity = parse_pos_qty(qty_tok)?;
+            Ok(LoadSlashArgs::Caller { type_id, quantity })
+        }
+        [tid_tok] => {
+            let type_id =
+                parse_pos_u32(tid_tok).ok_or_else(|| invalid_slash_arg_error(LOAD_USAGE))?;
+            Ok(LoadSlashArgs::Caller {
+                type_id,
+                quantity: 1,
+            })
+        }
+        [first_tok, second_tok] => {
+            let first =
+                parse_pos_i64(first_tok).ok_or_else(|| invalid_slash_arg_error(LOAD_USAGE))?;
+            let second = parse_pos_qty(second_tok)?;
+            Ok(LoadSlashArgs::NumericPair { first, second })
+        }
+        [target_tok, tid_tok, qty_tok] => {
+            let target_id =
+                parse_pos_i64(target_tok).ok_or_else(|| invalid_slash_arg_error(LOAD_USAGE))?;
+            let type_id =
+                parse_pos_u32(tid_tok).ok_or_else(|| invalid_slash_arg_error(LOAD_USAGE))?;
+            let quantity = parse_pos_qty(qty_tok)?;
+            Ok(LoadSlashArgs::TargetId {
+                target_id,
+                type_id,
+                quantity,
+            })
+        }
+        _ => Err(invalid_slash_arg_error(LOAD_USAGE)),
     }
 }
 

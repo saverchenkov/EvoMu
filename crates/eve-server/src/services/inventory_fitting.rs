@@ -3,8 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::formulas::abyssal_attribute_roll;
-use crate::router::notify_registry::OnModuleFitted;
-use crate::router::{BoundObjectEntry, NotificationTarget, ServerContext};
+use crate::router::{BoundObjectEntry, ServerContext};
 use crate::services::notify_emitters_skills_trade_godma::{
     emit_ship_fitting_attr_changes_for_ship, emit_ship_fitting_attr_changes_from_fit,
     snapshot_ship_fitting_attrs_for_ship,
@@ -389,18 +388,14 @@ pub(crate) async fn handle_invbroker_add(
                         .and_then(|src| ctx.sde.types.get(&src.type_id))
                         .filter(|t| matches!(t.category_id, 7 | 32));
                     if let Some(mod_type) = mod_type_opt {
-                        let rack = if mod_type.effect_ids.contains(&12) {
-                            Some((27_u16, Some(eve_dogma::attr_ids::HI_SLOTS), false))
-                        } else if mod_type.effect_ids.contains(&13) {
-                            Some((19_u16, Some(eve_dogma::attr_ids::MED_SLOTS), false))
-                        } else if mod_type.effect_ids.contains(&11) {
-                            Some((11_u16, Some(eve_dogma::attr_ids::LOW_SLOTS), false))
-                        } else if mod_type.effect_ids.contains(&2663) {
-                            Some((92_u16, Some(eve_dogma::attr_ids::RIG_SLOTS), false))
-                        } else if mod_type.category_id == 32 || mod_type.effect_ids.contains(&3772) {
-                            Some((125_u16, None, true))
-                        } else {
-                            None
+                        let candidates = crate::domain::fitting::candidate_fitting_flags_for_type(mod_type);
+                        let rack = match candidates.first().map(|&f| f as u16) {
+                            Some(27..=34) => Some((27_u16, Some(eve_dogma::attr_ids::HI_SLOTS), false)),
+                            Some(19..=26) => Some((19_u16, Some(eve_dogma::attr_ids::MED_SLOTS), false)),
+                            Some(11..=18) => Some((11_u16, Some(eve_dogma::attr_ids::LOW_SLOTS), false)),
+                            Some(92..=94) => Some((92_u16, Some(eve_dogma::attr_ids::RIG_SLOTS), false)),
+                            Some(125..=132) => Some((125_u16, None, true)),
+                            _ => None,
                         };
                         if let Some((base_flag, slot_attr_opt, is_sub)) = rack {
                             let max_slots = if is_sub {
@@ -562,9 +557,9 @@ pub(crate) async fn handle_invbroker_add(
                 );
             }
 
-            let is_fitting_slot = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
+            let is_fitting_slot = crate::domain::fitting::is_ship_fitting_slot_flag(flag);
             let src_is_fitted_module = source_item_opt.as_ref().is_some_and(|src_item| {
-                matches!(src_item.flag as u16, 11..=34 | 92..=94 | 125..=132)
+                crate::domain::fitting::is_ship_fitting_slot_flag(src_item.flag)
                     && ctx
                         .sde
                         .types
@@ -1989,12 +1984,13 @@ pub(crate) async fn handle_invbroker_add(
 
                 let mut unfitted_charges = Vec::new();
                 if is_fitting_slot {
-                    snap.module_online_states.insert(effective_item_id, online);
+                    crate::domain::fitting::record_fitted_module_online_state_in_snap(
+                        snap,
+                        effective_item_id,
+                        online,
+                    );
                 } else if old_was_fitted {
-                    snap.module_online_states.remove(&effective_item_id);
-                    snap.module_active_states.remove(&effective_item_id);
-                    snap.module_active_charges.remove(&effective_item_id);
-                    crate::router::ServerContext::clear_persisted_module_overload(
+                    crate::domain::fitting::clear_unfitted_module_state_in_snap(
                         snap,
                         old_loc_id,
                         effective_item_id,
@@ -2294,27 +2290,17 @@ pub(crate) async fn handle_invbroker_add(
                         }
                         ctx.invalidate_ship_fitting(new_loc);
                         let new_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok();
-                        let group_id = ctx
-                            .sde
-                            .types
-                            .get(&updated.type_id)
-                            .map(|t| i64::from(t.group_id))
-                            .unwrap_or(0);
-                        ctx.emit_typed(
-                            NotificationTarget::Character(char_id),
-                            OnModuleFitted {
-                                char_id,
-                                flag: flag as i64,
-                                type_id: updated.type_id as i64,
-                                group_id,
-                            },
+                        emit_module_fitted_notifications(
+                            ctx,
+                            char_id,
+                            new_loc,
+                            &updated,
+                            online,
+                            false,
+                            old_ship_attrs.as_ref(),
+                            new_fit_opt.as_ref(),
+                            true,
                         );
-                        let _ = ctx.notify_module_online_state(char_id, item_id, online);
-                        if let Some(ref new_fit) = new_fit_opt {
-                            emit_ship_fitting_attr_changes_from_fit(
-                                ctx, char_id, new_loc, old_ship_attrs.as_ref(), new_fit, false,
-                            );
-                        }
                     } else if old_was_fitted {
                         ctx.invalidate_ship_fitting(old_loc_id);
                         let new_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, old_loc_id).ok();

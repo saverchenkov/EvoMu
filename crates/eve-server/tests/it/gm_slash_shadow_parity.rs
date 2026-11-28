@@ -1,9 +1,9 @@
 //! Wire-path `ClientHarness` (`:26000`) & `ShadowClient` parity tests for GM slash commands
 //! (`#1193`, `#949`, `#1137`, `#1138`).
 //!
-//! Track 1 tests live wire/dispatcher behavior against unchanged `main` handlers. Any family
-//! defect uncovered (`gm_fit_updates_shadow_client_over_wire`, `gm_tr_updates_shadow_client_over_wire`)
-//! belongs to that family's Track 2 (`#1193`) rather than Track 1 routing.
+//! Track 2 parity tests verify `/fit`, `/giveisk`, `/giveskill`, `/heal`, `/kill`, `/load`, and
+//! `/spawn` end-to-end against `ShadowClient` over `:26000` (`gm_tr_updates_shadow_client_over_wire`
+//! remains staged for the transitions family).
 
 #![forbid(unsafe_code)]
 
@@ -259,18 +259,53 @@ async fn gm_giveisk_and_giveskill_update_shadow_client_over_wire() {
     assert!((final_isk - post_me_isk).abs() < 0.01);
 }
 
-/// Parity test staged for the `#1193` `/fit` family track (`character_gm_tools.rs:1544-1554` on
-/// unchanged `main` emits `OnGodmaShipEffect(effect_id=16)` without priming `effectsByItemEffect`,
-/// causing `ClientHarness` `UnprimedGodmaShipEffect` on `/fit me 2048`).
-#[ignore = "live main /fit defect (UnprimedGodmaShipEffect); belongs to #1193 Track 2 /fit family"]
+/// Parity test verifying `/fit` emits `OnGodmaPrimeItem` before `OnModuleFitted` /
+/// `OnGodmaShipEffect(16)` for both offline and online modules, converging `ShadowClient` and
+/// allowing subsequent `SetModuleOnline` / `TakeModuleOffline` toggles without `GetAllInfo`.
 #[tokio::test]
 async fn gm_fit_updates_shadow_client_over_wire() {
+    const MODULE_1MN_AB_I: u32 = 439;
+
     let ctx = ServerContext::new();
     let _guard = common::teardown_guard(&ctx);
     let kw = HashMap::new();
     let (mut harness, ship_id) = prepare_undocked_gm_wire_harness(&ctx, 119_308).await;
 
-    // `/fit me <type_id>` updates ShadowInventory + online module state without dock/undock or GetAllInfo refresh.
+    // 1. Offline `/fit me 2048` (pilot starts with Hull Upgrades II < IV) updates ShadowInventory
+    //    and converges `online_states == Some(&false)` with `OnGodmaPrimeItem` priming.
+    let offline_fit_cmd = format!("/fit me {MODULE_DCU_II}");
+    let offline_fit_rep = harness
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String(offline_fit_cmd)], &kw)
+        .await;
+    let dcu_item_id = offline_fit_rep
+        .dict_get("itemID")
+        .and_then(PyRep::as_i64)
+        .expect("offline fitted dcu itemID");
+    assert_eq!(
+        offline_fit_rep.dict_get("online"),
+        Some(&PyRep::Bool(false)),
+        "/fit me {MODULE_DCU_II} before Hull Upgrades IV must fit offline"
+    );
+    harness.assert_shadow_converged();
+    {
+        let shadow = harness.shadow().unwrap();
+        let dcu_sh = shadow
+            .inventory
+            .items
+            .get(&dcu_item_id)
+            .expect("offline /fit module replicated to ShadowInventory");
+        assert_eq!(dcu_sh.location_id, ship_id);
+        assert_eq!(dcu_sh.type_id, MODULE_DCU_II);
+        assert_eq!(
+            shadow.module_states.online_states.get(&dcu_item_id),
+            Some(&false),
+            "offline /fit module must converge ShadowClient online_states to false"
+        );
+    }
+
+    // 2. Grant Hull Upgrades V, then online the `/fit`-created module directly via
+    //    `dogmaIM.SetModuleOnline` without any `GetAllInfo` refresh (proving `effectsByItemEffect`
+    //    was primed by `OnGodmaPrimeItem` during `/fit`).
     let hull_skill_rep = harness
         .call_ok(
             "slash",
@@ -285,32 +320,103 @@ async fn gm_fit_updates_shadow_client_over_wire() {
         Some(&PyRep::String("/giveskill 3394 5".into()))
     );
     harness.assert_shadow_converged();
-    let fit_cmd = format!("/fit me {MODULE_DCU_II}");
-    let fit_rep = harness
-        .call_ok("slash", None, "SlashCmd", &[PyRep::String(fit_cmd)], &kw)
+
+    harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "SetModuleOnline",
+            &[PyRep::Integer(ship_id), PyRep::Integer(dcu_item_id)],
+            &kw,
+        )
         .await;
-    let fitted_item_id = fit_rep
+    harness.assert_shadow_converged();
+    assert_eq!(
+        harness
+            .shadow()
+            .unwrap()
+            .module_states
+            .online_states
+            .get(&dcu_item_id),
+        Some(&true),
+        "SetModuleOnline on offline `/fit` module must succeed and converge without GetAllInfo"
+    );
+
+    // 3. Online `/fit me 439` converges `online_states == Some(&true)` and toggles offline/online
+    //    cleanly without `GetAllInfo` refresh or `UnprimedGodmaShipEffect`.
+    let online_fit_rep = harness
+        .call_ok(
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(format!("/fit me {MODULE_1MN_AB_I}"))],
+            &kw,
+        )
+        .await;
+    let ab_item_id = online_fit_rep
         .dict_get("itemID")
         .and_then(PyRep::as_i64)
-        .expect("fitted itemID");
+        .expect("online fitted AB itemID");
     assert_eq!(
-        fit_rep.dict_get("online"),
+        online_fit_rep.dict_get("online"),
         Some(&PyRep::Bool(true)),
-        "/fit me {MODULE_DCU_II} must bring module online after Hull Upgrades V"
+        "/fit me {MODULE_1MN_AB_I} must bring module online"
     );
     harness.assert_shadow_converged();
-    let shadow = harness.shadow().unwrap();
-    let fitted_sh = shadow
-        .inventory
-        .items
-        .get(&fitted_item_id)
-        .expect("fitted module replicated to ShadowInventory immediately");
-    assert_eq!(fitted_sh.location_id, ship_id);
-    assert_eq!(fitted_sh.type_id, MODULE_DCU_II);
+    {
+        let shadow = harness.shadow().unwrap();
+        let ab_sh = shadow
+            .inventory
+            .items
+            .get(&ab_item_id)
+            .expect("online /fit module replicated to ShadowInventory");
+        assert_eq!(ab_sh.location_id, ship_id);
+        assert_eq!(ab_sh.type_id, MODULE_1MN_AB_I);
+        assert_eq!(
+            shadow.module_states.online_states.get(&ab_item_id),
+            Some(&true),
+            "online /fit module must converge ShadowClient online_states via OnGodmaPrimeItem / OnGodmaShipEffect"
+        );
+    }
+
+    harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "TakeModuleOffline",
+            &[PyRep::Integer(ship_id), PyRep::Integer(ab_item_id)],
+            &kw,
+        )
+        .await;
+    harness.assert_shadow_converged();
     assert_eq!(
-        shadow.module_states.online_states.get(&fitted_item_id),
-        Some(&true),
-        "online /fit module must converge ShadowClient online_states via OnGodmaPrimeItem / OnGodmaShipEffect"
+        harness
+            .shadow()
+            .unwrap()
+            .module_states
+            .online_states
+            .get(&ab_item_id),
+        Some(&false)
+    );
+
+    harness
+        .call_ok(
+            "dogmaIM",
+            None,
+            "SetModuleOnline",
+            &[PyRep::Integer(ship_id), PyRep::Integer(ab_item_id)],
+            &kw,
+        )
+        .await;
+    harness.assert_shadow_converged();
+    assert_eq!(
+        harness
+            .shadow()
+            .unwrap()
+            .module_states
+            .online_states
+            .get(&ab_item_id),
+        Some(&true)
     );
 }
 
