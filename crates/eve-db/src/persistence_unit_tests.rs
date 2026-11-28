@@ -193,7 +193,10 @@ fn wal_delta_from_diff_and_apply_to_hot_and_cold_paths() {
 fn repository_metadata_clocks_write_depth_and_asteroids() {
     let r1 = WorldRepository::new_empty_with_snapshot_path(None).expect("in-memory repo 1");
     let r2 = WorldRepository::new_empty_with_snapshot_path(None).expect("in-memory repo 2");
-    assert!(r2.instance_id() > r1.instance_id());
+    assert!(r1.instance_id() > 0 && r2.instance_id() > 0 && r2.instance_id() != r1.instance_id());
+    let g1 = crate::generate_non_zero_u64_id();
+    let g2 = crate::generate_non_zero_u64_id();
+    assert!(g1 > 0 && g2 > 0 && g1 != g2);
     assert!(r1.is_ephemeral_in_memory());
     assert_eq!(r1.sqlite_path(), None);
 

@@ -10,7 +10,7 @@ use eve_dogma::ShipFittingEngine;
 use eve_proto::BridgeRpcError;
 use eve_sde::SdeRegistry;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 #[path = "rpc_rate_limit.rs"]
@@ -20,8 +20,6 @@ pub use rpc_rate_limit::{
     RPC_BOOTSTRAP_TRANSITION_ALLOWANCE, RPC_RATE_BURST_TOKENS, RPC_RATE_IDLE_TTL,
     RPC_RATE_PRUNE_THRESHOLD, RPC_RATE_REFILL_PER_SEC,
 };
-
-pub static NEXT_BOUND_ID: AtomicU64 = AtomicU64::new(10_000);
 
 /// Returns current host wallclock time as EVE BlueOS 100ns FILETIME ticks.
 ///
@@ -49,8 +47,6 @@ pub struct BoundObjectEntry {
     pub ref_id: i64,
 }
 
-static NEXT_CTX_INSTANCE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
 #[derive(Clone)]
 pub struct ServerContext {
     pub instance_id: u64,
@@ -64,6 +60,8 @@ pub struct ServerContext {
     pub quasar_domains: Arc<HashSet<String>>,
     pub rpc_registry: Arc<crate::router::rpc_registry::RpcRegistry>,
     pub bound_objects: Arc<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
+    pub(crate) next_bound_id: Arc<AtomicU64>,
+    pub(crate) next_fighter_res_id: Arc<AtomicI64>,
     pub(crate) transition_grace_store: Arc<
         RankedRwLock<
             crate::router::binding_transition_policy::ContextGraceStore,
@@ -158,6 +156,8 @@ pub(crate) struct ServerContextWeak {
     quasar_domains: std::sync::Weak<HashSet<String>>,
     rpc_registry: std::sync::Weak<crate::router::rpc_registry::RpcRegistry>,
     bound_objects: std::sync::Weak<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
+    next_bound_id: std::sync::Weak<AtomicU64>,
+    next_fighter_res_id: std::sync::Weak<AtomicI64>,
     transition_grace_store: std::sync::Weak<
         RankedRwLock<
             crate::router::binding_transition_policy::ContextGraceStore,
@@ -235,6 +235,8 @@ impl ServerContextWeak {
             quasar_domains: self.quasar_domains.upgrade()?,
             rpc_registry: self.rpc_registry.upgrade()?,
             bound_objects: self.bound_objects.upgrade()?,
+            next_bound_id: self.next_bound_id.upgrade()?,
+            next_fighter_res_id: self.next_fighter_res_id.upgrade()?,
             transition_grace_store: self.transition_grace_store.upgrade()?,
             object_cache: self.object_cache.upgrade()?,
             object_cache_timestamps: self.object_cache_timestamps.upgrade()?,
@@ -393,6 +395,16 @@ impl ServerContext {
         self.xmpp_port.store(port, Ordering::Release);
     }
 
+    #[inline]
+    pub(crate) fn allocate_bound_id(&self) -> u64 {
+        self.next_bound_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub(crate) fn next_fighter_reservation_id(&self) -> i64 {
+        self.next_fighter_res_id.fetch_sub(1, Ordering::Relaxed)
+    }
+
     /// Creates a non-owning weak handle referencing all shared runtime state on this `ServerContext`
     /// (`RFC-1 E-4`, `#839`, `#919`).
     pub(crate) fn downgrade(&self) -> ServerContextWeak {
@@ -408,6 +420,8 @@ impl ServerContext {
             quasar_domains: Arc::downgrade(&self.quasar_domains),
             rpc_registry: Arc::downgrade(&self.rpc_registry),
             bound_objects: Arc::downgrade(&self.bound_objects),
+            next_bound_id: Arc::downgrade(&self.next_bound_id),
+            next_fighter_res_id: Arc::downgrade(&self.next_fighter_res_id),
             transition_grace_store: Arc::downgrade(&self.transition_grace_store),
             object_cache: Arc::downgrade(&self.object_cache),
             object_cache_timestamps: Arc::downgrade(&self.object_cache_timestamps),
@@ -498,7 +512,12 @@ impl ServerContext {
         let quasar_domains = Arc::clone(Self::default_quasar_domains());
         let rpc_registry = Arc::new(crate::router::rpc_registry::RpcRegistry::default_compiled());
         let (notify_tx, _) = tokio::sync::broadcast::channel(256);
-        let instance_id = NEXT_CTX_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let instance_id = loop {
+            let id = eve_db::generate_non_zero_u64_id();
+            if id as usize != Arc::as_ptr(&db) as usize {
+                break id;
+            }
+        };
         let pending_notifications = Arc::new(RankedRwLock::new(HashMap::new()));
         let ship_fittings = Arc::new(RankedRwLock::new(HashMap::new()));
         let ship_fit_revs = Arc::new(RankedRwLock::new(HashMap::new()));
@@ -537,9 +556,13 @@ impl ServerContext {
             list
         });
         if db.is_ephemeral_in_memory() {
+            let corp_slot = (instance_id % 80) as i64 + 1;
+            let alliance_slot = (instance_id % 900) as i64 + 1;
             db.with_mut_snapshot(|snap| {
-                snap.next_corporation_id = snap.next_corporation_id.max(98_100_000 + (instance_id as i64) * 10_000);
-                snap.next_alliance_id = snap.next_alliance_id.max(99_000_000 + (instance_id as i64) * 1_000);
+                snap.next_corporation_id =
+                    snap.next_corporation_id.max(98_100_000 + corp_slot * 10_000);
+                snap.next_alliance_id =
+                    snap.next_alliance_id.max(99_000_000 + alliance_slot * 1_000);
             });
         }
         let crimewatch = Arc::new(crate::combat::crimewatch::CrimeWatchLock::new(Arc::clone(&db)));
@@ -578,6 +601,8 @@ impl ServerContext {
             quasar_domains,
             rpc_registry,
             bound_objects: Arc::new(RankedRwLock::new(HashMap::new())),
+            next_bound_id: Arc::new(AtomicU64::new(10_000)),
+            next_fighter_res_id: Arc::new(AtomicI64::new(-300_000)),
             transition_grace_store: Arc::new(RankedRwLock::new(
                 crate::router::binding_transition_policy::ContextGraceStore::default(),
             )),

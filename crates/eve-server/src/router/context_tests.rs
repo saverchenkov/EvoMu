@@ -2306,3 +2306,35 @@ fn server_context_new_and_from_config_share_sde_tables_with_isolated_derived_cac
     assert!(!Arc::ptr_eq(&ctx_a.sde, &ctx_cfg_explicit.sde));
     assert!(eve_sde::SharedMap::ptr_eq(&ctx_a.sde.types, &ctx_cfg_explicit.sde.types));
 }
+
+#[test]
+fn server_context_scopes_bound_and_fighter_counters_and_random_instance_ids() {
+    let left = test_ctx();
+    let right = test_ctx();
+
+    assert!(left.instance_id > 0);
+    assert!(right.instance_id > 0);
+    assert_ne!(left.instance_id, right.instance_id);
+    assert!(left.db.instance_id() > 0);
+    assert!(right.db.instance_id() > 0);
+    assert_ne!(left.db.instance_id(), right.db.instance_id());
+    assert_ne!(left.instance_id as usize, Arc::as_ptr(&left.db) as usize);
+    assert_ne!(right.instance_id as usize, Arc::as_ptr(&right.db) as usize);
+
+    let left_clone = left.clone();
+    let left_upgraded = left.downgrade().upgrade().expect("live ServerContext upgrade");
+    assert_eq!(left_clone.instance_id, left.instance_id);
+    assert_eq!(left_upgraded.instance_id, left.instance_id);
+
+    assert_eq!(left.allocate_bound_id(), 10_000);
+    assert_eq!(left_clone.allocate_bound_id(), 10_001);
+    assert_eq!(left_upgraded.allocate_bound_id(), 10_002);
+    assert_eq!(right.allocate_bound_id(), 10_000);
+    assert_eq!(right.allocate_bound_id(), 10_001);
+
+    assert_eq!(left.next_fighter_reservation_id(), -300_000);
+    assert_eq!(left_clone.next_fighter_reservation_id(), -300_001);
+    assert_eq!(left_upgraded.next_fighter_reservation_id(), -300_002);
+    assert_eq!(right.next_fighter_reservation_id(), -300_000);
+    assert_eq!(right.next_fighter_reservation_id(), -300_001);
+}

@@ -442,8 +442,50 @@ impl Drop for DbWriteLockDepthGuard {
     }
 }
 
-static NEXT_REPO_INSTANCE_ID: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
+#[inline]
+fn splitmix64_mix(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Generates a non-zero random `u64` identifier from OS entropy (`getrandom`) with a
+/// non-panicking SplitMix64 fallback over wallclock time and stack/heap addresses,
+/// without any process-global `static` or `thread_local!` state (`#1583`).
+pub fn generate_non_zero_u64_id() -> u64 {
+    let mut buf = [0u8; 8];
+    let mut attempts = 0usize;
+    while attempts < 16 {
+        match getrandom::getrandom(&mut buf) {
+            Ok(()) => {
+                let id = u64::from_le_bytes(buf);
+                if id != 0 {
+                    return id;
+                }
+            }
+            Err(_) => break,
+        }
+        attempts += 1;
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let stack_byte = 0u8;
+    let stack_addr = (&stack_byte as *const u8) as usize as u64;
+    let heap_byte = Box::new(0u8);
+    let heap_addr = (&*heap_byte as *const u8) as usize as u64;
+    let lo = nanos as u64;
+    let hi = (nanos >> 64) as u64;
+    let mut mixed = splitmix64_mix(lo ^ stack_addr.rotate_left(13) ^ 0x9E37_79B9_7F4A_7C15);
+    mixed = splitmix64_mix(mixed ^ hi ^ heap_addr.rotate_left(29) ^ 0xA076_1D64_78BD_642F);
+    if mixed == 0 {
+        1
+    } else {
+        mixed
+    }
+}
 
 static PERSIST_FAILURES_TOTAL: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -684,10 +726,10 @@ impl WorldRepository {
     }
 
     pub(crate) fn next_instance_id() -> u64 {
-        NEXT_REPO_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        generate_non_zero_u64_id()
     }
 
-    /// Returns the process-unique monotonic instance ID of this [`WorldRepository`].
+    /// Returns the non-zero random instance ID of this [`WorldRepository`].
     pub fn instance_id(&self) -> u64 {
         self.instance_id
     }

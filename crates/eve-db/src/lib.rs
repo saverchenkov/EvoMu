@@ -74,7 +74,8 @@ pub use gateway_tokens::QuasarVerifiedToken;
 pub use inventory::{ConsumeExactOptions, ItemClassPolicy, MintItemSpec, TransferItemSpec};
 pub use ledger::{JournalEntryInput, JournalMeta};
 pub use persistence::{
-    persist_failures_total, tx_panics_total, SessionOfflineListener, WorldRepository,
+    generate_non_zero_u64_id, persist_failures_total, tx_panics_total, SessionOfflineListener,
+    WorldRepository,
 };
 pub use tx_engine::{
     ChangeSet, ColdDomainDiff, Effects, EntityIdAllocator, FromTxError, PostCommitListener,

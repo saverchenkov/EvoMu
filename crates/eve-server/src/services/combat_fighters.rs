@@ -951,7 +951,6 @@ async fn handle_launch_fighters_from_tubes(
         }
     }
 
-    static NEXT_FIGHTER_RES_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-300_000);
     let res_count = requested_tubes
         .as_ref()
         .map(|r| r.len())
@@ -959,7 +958,7 @@ async fn handle_launch_fighters_from_tubes(
         .max(tube_count)
         .max(1);
     let next_res_ids: Vec<i64> = (0..res_count)
-        .map(|_| NEXT_FIGHTER_RES_ID.fetch_sub(1, std::sync::atomic::Ordering::Relaxed))
+        .map(|_| ctx.next_fighter_reservation_id())
         .collect();
     let launch_out = match sys_handle
         .fighter_launch_op(FighterLaunchActorOp::ClaimAndReserve {
