@@ -1455,7 +1455,8 @@ async fn self_destruct_server_timer_expiry_emits_immediate_notices_without_secon
 
 #[tokio::test]
 async fn self_destruct_and_abort_validate_optional_pickid() {
-    let (ctx, mut session, char_id, ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let _ = ctx.systems.get_or_spawn(sys_id);
     let kw = HashMap::new();
     let other_ship_id = ship_id + 999;
 

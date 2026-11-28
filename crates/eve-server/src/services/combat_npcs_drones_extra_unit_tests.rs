@@ -266,7 +266,14 @@ async fn drone_control_range_damage_destruction_and_salvager_tractor_guards() {
     seed_skill(&ctx, char_id, 23618, 3);
     assert!((compute_drone_control_range(&ctx, char_id, ship_id) - 49_000.0).abs() < 1e-6);
 
-    // 2. apply_damage_to_drone_in_space: missing ball -> (0, false), partial hit keeps ball, lethal destroys ball + removes inventory & runtime
+    // 2. apply_damage_to_drone_in_space: cold system or missing ball -> (0, false), partial hit keeps ball, lethal destroys ball + removes inventory & runtime
+    assert_eq!(
+        apply_damage_to_drone_in_space(&ctx, sys_id, 999_888_777, DamageVector::new(10.0, 0.0, 0.0, 0.0)).await,
+        (0.0, false)
+    );
+    assert!(!ctx.systems.is_system_loaded(sys_id));
+    // Spawn the solar system before inserting space-item DB fixtures so `wreck_id` is not pre-hydrated into the ballpark.
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     assert_eq!(
         apply_damage_to_drone_in_space(&ctx, sys_id, 999_888_777, DamageVector::new(10.0, 0.0, 0.0, 0.0)).await,
         (0.0, false)
@@ -288,7 +295,6 @@ async fn drone_control_range_damage_destruction_and_salvager_tractor_guards() {
             },
         );
     });
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle
         .spawn_ball_with_combat(
             make_ball(drone_ball_id, 2_456, DVec3::ZERO, DVec3::ZERO),

@@ -333,7 +333,15 @@ pub async fn activate_salvager_or_tractor_module(
     let Some(wreck_id) = target_id_opt else {
         return Some(Err(tractor_target_required_error()));
     };
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Some(Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "tractor_or_salvager",
+            format!("Active ship {ship_id} is not spawned in space"),
+        )));
+    };
     let (wreck_ball, dist, mod_state_opt) = match resolve_salvager_or_tractor_target(
         ctx,
         &sys_handle,
@@ -460,7 +468,9 @@ pub async fn apply_damage_to_drone_in_space(
     drone_ball_id: i64,
     damage: DamageVector,
 ) -> (f64, bool) {
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) else {
+        return (0.0, false);
+    };
     let Some((applied, destroyed, _)) = sys_handle.apply_damage(drone_ball_id, damage).await.ok().flatten() else {
         return (0.0, false);
     };
@@ -908,7 +918,15 @@ async fn resolve_uncloaked_drone_ship(
             ));
         }
     }
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            action_label,
+            "Active ship is not spawned in space",
+        ));
+    };
     let ship_ball = match sys_handle.get_ball_snapshot(ship_id).await {
         Ok(Some((_, b))) => b,
         Ok(None) => {
@@ -1195,7 +1213,15 @@ pub async fn handle_npcs_drones(
             if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
                 return Some(Err(e));
             }
-            let sys_handle_guard = ctx.systems.get_or_spawn(sys_id);
+            let Some(sys_handle_guard) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "LaunchDrones",
+                    "Active ship is not spawned in space",
+                )));
+            };
             if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::enforce_space_action_cloak_and_warp_guard(
                 ctx,
                 &sys_handle_guard,
@@ -1849,7 +1875,6 @@ pub async fn handle_npcs_drones(
                 (Some(PyRep::Integer(tid)), _) => (*tid, None),
                 _ => (0, None),
             };
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
             if session.station_id.is_some() || session.structure_id.is_some() {
                 return Some(Err(BridgeRpcError {
                     code: "ShipDocked".into(),
@@ -1857,6 +1882,15 @@ pub async fn handle_npcs_drones(
                     client_error: None,
                 }));
             }
+            let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "CmdEngage",
+                    "Active ship is not spawned in space",
+                )));
+            };
             if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::enforce_space_action_cloak_and_warp_guard(
                 ctx,
                 &sys_handle,

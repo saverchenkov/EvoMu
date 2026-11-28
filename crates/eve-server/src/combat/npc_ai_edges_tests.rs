@@ -1083,3 +1083,85 @@ fn two_sde_registries_with_equal_type_counts_isolate_clone_soldier_catalog() {
         Some(33_132)
     );
 }
+
+#[test]
+fn cold_system_npc_ai_step_preserves_tracked_npcs_and_records_no_cooldowns() {
+    use crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype;
+    use crate::services::combat_crimewatch::with_combat_ephemeral;
+    use crate::system_actor::SystemLifecycleState;
+
+    let mut ctx = test_ctx();
+    let cold_sys = 30_000_144_u32;
+    let clone_tid = 33_132_u32;
+    if !ctx.sde.types.contains_key(&clone_tid) {
+        let mut clone_ty = ctx.sde.types[&587].clone();
+        clone_ty.type_id = clone_tid;
+        clone_ty.group_id = 556;
+        clone_ty.name = "Guristas Clone Soldier Trainer".to_string();
+        Arc::make_mut(&mut ctx.sde).types.insert(clone_tid, clone_ty);
+    }
+    assert_eq!(derive_npc_archetype(&ctx, clone_tid), "CloneSoldier");
+
+    let (belts, _) = NpcSpawnManager::belt_and_gate_anchors(&ctx.sde, cold_sys);
+    let belt_pos = belts.first().copied().unwrap_or(DVec3::ZERO);
+
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+    assert!(!ctx.systems.is_system_loaded(cold_sys));
+
+    let belt_npc_id = 88_100_001_i64;
+    let clone_npc_id = 88_100_002_i64;
+    let make_npc = |ball_id: i64, type_id: u32, spawn_group_id: u32, spawn_pos: DVec3| NpcCombatEntity {
+        ball_id,
+        type_id,
+        faction_id: 500_010,
+        state: NpcAiState::Idle,
+        spawn_group_id,
+        spawn_pos,
+        target_id: None,
+        bounty_isk: 50_000.0,
+        optimal_range: 5_000.0,
+        orbit_range: 2_000.0,
+        base_dps: 120.0,
+        damage_vector: faction_damage_vector(500_010, 120.0),
+        last_attack_tick: 0,
+        has_shield_rep: false,
+        has_armor_rep: false,
+    };
+
+    let mut mgr = NpcSpawnManager::new();
+    mgr.entities.insert(belt_npc_id, make_npc(belt_npc_id, 597, 1, belt_pos));
+    mgr.entities.insert(clone_npc_id, make_npc(clone_npc_id, clone_tid, 2, DVec3::new(5_000.0, 0.0, 0.0)));
+
+    mgr.step_ai_sync(&ctx, cold_sys, 10, 1.0);
+    assert_eq!(mgr.entities.len(), 2);
+    assert!(mgr.entities.contains_key(&belt_npc_id));
+    assert!(mgr.entities.contains_key(&clone_npc_id));
+    assert!(mgr.belt_slot_respawn_timers.is_empty());
+    assert!(mgr.respawn_timers.is_empty());
+    assert!(mgr.clone_soldier_respawn_timers.is_empty());
+    assert!(with_combat_ephemeral(&ctx, |rt| {
+        rt.clone_soldier_cooldown_until.get(&cold_sys).is_none()
+    }));
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+    assert!(!ctx.systems.is_system_loaded(cold_sys));
+
+    ctx.npc_spawns
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(cold_sys, mgr);
+    step_system_npc_spawns_ai_sync(&ctx, cold_sys, 20, 1.0);
+
+    let spawns = ctx.npc_spawns.read().unwrap_or_else(|e| e.into_inner());
+    let stored = spawns.get(&cold_sys).expect("cold system spawn manager preserved");
+    assert_eq!(stored.entities.len(), 2);
+    assert!(stored.entities.contains_key(&belt_npc_id));
+    assert!(stored.entities.contains_key(&clone_npc_id));
+    assert!(stored.belt_slot_respawn_timers.is_empty());
+    assert!(stored.respawn_timers.is_empty());
+    assert!(stored.clone_soldier_respawn_timers.is_empty());
+    assert!(with_combat_ephemeral(&ctx, |rt| {
+        rt.clone_soldier_cooldown_until.get(&cold_sys).is_none()
+    }));
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+    assert!(!ctx.systems.is_system_loaded(cold_sys));
+}

@@ -110,7 +110,15 @@ pub(crate) async fn handle_dogma_ops(
                 return Some(Err(e));
             }
 
-            let sys = ctx.systems.get_or_spawn(sys_id);
+            let Some(sys) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(BridgeRpcError::targeting_failed(
+                    Some(source_id),
+                    Some(target_id),
+                    eve_proto::UserErrorKey::CantShipNotPresent,
+                    "ship_not_in_space",
+                    format!("Source ball {source_id} not found in system"),
+                )));
+            };
             let Some((_, ship_ball)) = sys.get_ball_snapshot(source_id).await.unwrap_or(None) else {
                 return Some(Err(BridgeRpcError::targeting_failed(
                     Some(source_id),
@@ -380,8 +388,9 @@ pub(crate) async fn handle_dogma_ops(
             let in_space = session.station_id.is_none()
                 && (session.structure_id.is_none() || session.structure_id == Some(ship_id));
             if let (true, Some(sys_id)) = (in_space, session.solar_system_id.filter(|&s| s > 0)) {
-                let sys = ctx.systems.get_or_spawn(sys_id);
-                let _ = sys.remove_target_lock(ship_id, target_id).await;
+                if let Some(sys) = ctx.systems.get_handle(sys_id) {
+                    let _ = sys.remove_target_lock(ship_id, target_id).await;
+                }
             }
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(target_id));
             crate::services::combat_weapons_spool::clear_entropic_spools_on_target_unlock(ctx, ship_id, char_id, Some(target_id));
@@ -431,8 +440,9 @@ pub(crate) async fn handle_dogma_ops(
                     .filter(|&s| s > 0)
             });
             if let Some(sys_id) = obo_sys_opt {
-                let sys = ctx.systems.get_or_spawn(sys_id);
-                let _ = sys.remove_target_lock_quiet(source_id, target_id).await;
+                if let Some(sys) = ctx.systems.get_handle(sys_id) {
+                    let _ = sys.remove_target_lock_quiet(source_id, target_id).await;
+                }
             }
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, source_id, Some(target_id));
             if let Some(scene) = obo_sys_opt
@@ -479,11 +489,13 @@ pub(crate) async fn handle_dogma_ops(
             let in_space = session.station_id.is_none()
                 && (session.structure_id.is_none() || session.structure_id == Some(ship_id));
             if let (true, Some(sys_id)) = (in_space, session.solar_system_id.filter(|&s| s > 0)) {
-                let sys = ctx.systems.get_or_spawn(sys_id);
+                let sys_opt = ctx.systems.get_handle(sys_id);
                 if let Some(PyRep::List(list)) | Some(PyRep::Tuple(list)) = args.first() {
                     for it in list {
                         if let Some(tid) = it.as_i64() {
-                            let _ = sys.remove_target_lock_quiet(ship_id, tid).await;
+                            if let Some(ref sys) = sys_opt {
+                                let _ = sys.remove_target_lock_quiet(ship_id, tid).await;
+                            }
                             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(tid));
                             if let Some(scene) =
                                 crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
@@ -501,7 +513,9 @@ pub(crate) async fn handle_dogma_ops(
                         }
                     }
                 } else if let Some(tid) = args.first().and_then(|a| a.as_i64()) {
-                    let _ = sys.remove_target_lock_quiet(ship_id, tid).await;
+                    if let Some(ref sys) = sys_opt {
+                        let _ = sys.remove_target_lock_quiet(ship_id, tid).await;
+                    }
                     crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(tid));
                     if let Some(scene) =
                         crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
@@ -517,10 +531,14 @@ pub(crate) async fn handle_dogma_ops(
                         );
                     }
                 } else {
-                    let current_locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
-                    let _ = sys.clear_target_locks_quiet(ship_id).await;
-                    for lock in current_locks {
-                        crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(lock.target_id));
+                    if let Some(ref sys) = sys_opt {
+                        let current_locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
+                        let _ = sys.clear_target_locks_quiet(ship_id).await;
+                        for lock in current_locks {
+                            crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(lock.target_id));
+                        }
+                    } else {
+                        crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, None);
                     }
                     ctx.emit_typed(
                         NotificationTarget::Character(char_id),
@@ -640,17 +658,18 @@ pub(crate) async fn handle_dogma_ops(
                     }));
                 }
             } else if let Some(sys_id) = session.solar_system_id {
-                let sys = ctx.systems.get_or_spawn(sys_id);
-                if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                    if cs.max_capacitor > 0.0 && cs.capacitor < 0.75 * cs.max_capacitor {
-                        return Some(Err(BridgeRpcError {
-                            code: "NotEnoughCapacitorToOnline".into(),
-                            message: format!(
-                                "Capacitor level ({:.1} GJ / {:.1} GJ) is below 75% requirement to online modules in space",
-                                cs.capacitor, cs.max_capacitor
-                            ),
-                            client_error: None,
-                        }));
+                if let Some(sys) = ctx.systems.get_handle(sys_id) {
+                    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+                        if cs.max_capacitor > 0.0 && cs.capacitor < 0.75 * cs.max_capacitor {
+                            return Some(Err(BridgeRpcError {
+                                code: "NotEnoughCapacitorToOnline".into(),
+                                message: format!(
+                                    "Capacitor level ({:.1} GJ / {:.1} GJ) is below 75% requirement to online modules in space",
+                                    cs.capacitor, cs.max_capacitor
+                                ),
+                                client_error: None,
+                            }));
+                        }
                     }
                 }
             }
@@ -765,7 +784,15 @@ pub(crate) async fn handle_dogma_ops(
                     client_error: None,
                 }));
             };
-            let sys = ctx.systems.get_or_spawn(sys_id);
+            let Some(sys) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "InitiateModuleRepairMany",
+                    format!("Active ship {ship_id} is not in space"),
+                )));
+            };
             let _ = sys.wait_for_post_unlock_barrier().await;
             let is_cloaked = sys.view().is_ball_cloaked(ship_id);
             if is_cloaked {
@@ -796,7 +823,11 @@ pub(crate) async fn handle_dogma_ops(
                 && session.structure_id.is_some() == false
                 && session
                     .solar_system_id
-                    .is_some_and(|sid| ctx.systems.get_or_spawn(sid).has_active_overloaded_cycle_sync(ship_id));
+                    .is_some_and(|sid| {
+                        ctx.systems
+                            .get_handle(sid)
+                            .is_some_and(|s| s.has_active_overloaded_cycle_sync(ship_id))
+                    });
             if in_space_overheating {
                 return Some(Err(BridgeRpcError {
                     code: "CannotRepairWhileOverheating".into(),

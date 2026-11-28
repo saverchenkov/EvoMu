@@ -389,3 +389,210 @@ async fn add_target_ecm_cloak_tether_range_passive_targeter_and_targeters_list()
     .unwrap();
     assert!(!format!("{dmg_enemy:?}").contains("40.0"));
 }
+
+#[tokio::test]
+async fn cold_system_docked_fitting_targeting_repair_trash_and_inspace_add_target_do_not_wake() {
+    use crate::services::inventory_fitting::fitting_dogma_ops::handle_dogma_ops;
+    use crate::services::inventory_fitting::fitting_ships_mastery::handle_ships_mastery_and_fitting_ext;
+    use crate::system_actor::SystemLifecycleState;
+
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let cold_sys_id = 30_000_144_u32;
+    let station_id = 60_003_760_i64;
+    let char_id = 96_400_901_i64;
+    let ship_id = 96_400_902_i64;
+    let mod_id = 96_400_903_i64;
+    let hangar_trash_id = 96_400_904_i64;
+    let jetcan_id = 96_400_905_i64;
+    let jetcan_item_id = 96_400_906_i64;
+    let enemy_ship_id = 96_400_907_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().unwrap();
+        ch.character_id = char_id;
+        ch.user_id = char_id as u64;
+        ch.corporation_id = 1_000_009;
+        ch.solar_system_id = cold_sys_id;
+        ch.station_id = Some(station_id);
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+
+        for (iid, tid, loc, flg, qty, singleton, dyn_attrs) in [
+            (ship_id, 587_u32, station_id, InventoryFlag::Hangar, 1_i32, true, HashMap::new()),
+            (
+                mod_id,
+                484_u32,
+                ship_id,
+                InventoryFlag::HiSlot0,
+                1_i32,
+                true,
+                HashMap::from([(attr_ids::DAMAGE, 10.0), (attr_ids::HP_STRUCT, 40.0)]),
+            ),
+            (hangar_trash_id, 34_u32, station_id, InventoryFlag::Hangar, 25_i32, false, HashMap::new()),
+            (jetcan_id, 23_u32, i64::from(cold_sys_id), InventoryFlag::None, 1_i32, true, HashMap::new()),
+            (jetcan_item_id, 34_u32, jetcan_id, InventoryFlag::Cargo, 10_i32, false, HashMap::new()),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: loc,
+                    flag: flg,
+                    quantity: qty,
+                    singleton,
+                    dynamic_attributes: dyn_attrs,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        snap.item_positions.insert(jetcan_id, [100.0, 0.0, 0.0]);
+    });
+
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys_id), SystemLifecycleState::Cold);
+    assert!(!ctx.systems.is_system_loaded(cold_sys_id));
+
+    let mut session = make_session(char_id, 1_000_009, Some(cold_sys_id), Some(station_id), Some(ship_id));
+
+    // Docked GetTargets / GetTargeters / InitiateModuleRepairMany / DestroyFitting / TrashItems stay Cold
+    assert_eq!(
+        call_dogma_im(&ctx, &mut session, None, "GetTargets", &[]).await.unwrap(),
+        PyRep::List(Vec::new())
+    );
+    assert_eq!(
+        call_dogma_im(&ctx, &mut session, None, "GetTargeters", &[]).await.unwrap(),
+        PyRep::List(Vec::new())
+    );
+    let repair_docked = handle_dogma_ops(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "InitiateModuleRepairMany",
+        &[PyRep::List(vec![PyRep::Integer(mod_id)])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("docked nanite repair must reject");
+    assert_eq!(repair_docked.code, "CannotRepairNaniteWhileDocked");
+
+    let destroyed = call_dogma_im(&ctx, &mut session, None, "DestroyFitting", &[PyRep::Integer(mod_id)])
+        .await
+        .expect("docked DestroyFitting succeeds without waking cold system");
+    assert_eq!(destroyed.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&mod_id)));
+
+    let trashed_hangar = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "TrashItems",
+        &[PyRep::List(vec![PyRep::Integer(hangar_trash_id)])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("docked TrashItems succeeds without waking cold system");
+    assert_eq!(trashed_hangar, PyRep::List(Vec::new()));
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&hangar_trash_id)));
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys_id), SystemLifecycleState::Cold);
+    assert!(!ctx.systems.is_system_loaded(cold_sys_id));
+
+    // Undocked cold system: GetTargets/GetTargeters return empty, TrashItems cleans empty jetcan,
+    // AddTarget / AddTargetOBO / InitiateModuleRepairMany fail closed without waking.
+    session.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(cold_sys_id);
+            sh.flag = InventoryFlag::None;
+        }
+    });
+
+    assert_eq!(
+        call_dogma_im(&ctx, &mut session, None, "GetTargets", &[]).await.unwrap(),
+        PyRep::List(Vec::new())
+    );
+    assert_eq!(
+        call_dogma_im(&ctx, &mut session, None, "GetTargeters", &[]).await.unwrap(),
+        PyRep::List(Vec::new())
+    );
+    let trashed_jetcan = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "TrashItems",
+        &[PyRep::List(vec![PyRep::Integer(jetcan_item_id)])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("cold-system TrashItems removes empty jetcan via item_positions without waking");
+    assert_eq!(trashed_jetcan, PyRep::List(Vec::new()));
+    assert!(ctx
+        .db
+        .with_snapshot(|s| !s.items.contains_key(&jetcan_item_id) && !s.items.contains_key(&jetcan_id)));
+
+    let add_err = call_dogma_im(&ctx, &mut session, None, "AddTarget", &[PyRep::Integer(enemy_ship_id)])
+        .await
+        .expect_err("cold-system AddTarget must fail closed");
+    assert_eq!(add_err.code, "TargetingFailed");
+    assert_eq!(
+        add_err
+            .to_client_error("dogmaIM", "AddTarget")
+            .as_user_error()
+            .map(|(k, _)| k),
+        Some(eve_proto::UserErrorKey::CantShipNotPresent)
+    );
+
+    let add_obo_err = handle_dogma_ops(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "AddTargetOBO",
+        &[PyRep::Integer(ship_id), PyRep::Integer(enemy_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("cold-system AddTargetOBO must fail closed");
+    assert_eq!(add_obo_err.code, "TargetingFailed");
+    assert_eq!(
+        add_obo_err
+            .to_client_error("dogmaIM", "AddTargetOBO")
+            .as_user_error()
+            .map(|(k, _)| k),
+        Some(eve_proto::UserErrorKey::CantShipNotPresent)
+    );
+
+    let repair_cold = handle_dogma_ops(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "InitiateModuleRepairMany",
+        &[PyRep::List(vec![PyRep::Integer(mod_id)])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("cold-system InitiateModuleRepairMany must fail closed");
+    assert_eq!(repair_cold.code, "ShipNotInSpace");
+
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys_id), SystemLifecycleState::Cold);
+    assert!(!ctx.systems.is_system_loaded(cold_sys_id));
+}

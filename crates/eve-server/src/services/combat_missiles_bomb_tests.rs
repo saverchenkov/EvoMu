@@ -118,6 +118,7 @@ async fn bomb_launcher_damage_void_lockbreaker_and_defender_interception() {
     let (ctx, _, char_id, ship_id, sys_id) = make_missile_and_aoe_ctx();
     let kwargs = HashMap::new();
     let low_sys = 30_000_200u32;
+    let _ = ctx.systems.get_or_spawn(sys_id);
     let sys_handle = ctx.systems.get_or_spawn(low_sys);
 
     spawn_missile_target_ball(&ctx, low_sys, ship_id, 587, DVec3::ZERO, 500.0, 500.0, 500.0, 500.0).await;

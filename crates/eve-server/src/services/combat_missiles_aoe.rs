@@ -64,16 +64,18 @@ pub(crate) async fn cleanup_destroyed_non_ship_ball(
     sys_id: u32,
     ball_id: i64,
 ) {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let sys_handle_opt = ctx.systems.get_handle(sys_id);
     crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(ctx, ball_id);
     with_mut_combat_runtime(ctx, |rt| {
         rt.container_lifetimes.remove(&ball_id);
     });
-    if crate::combat::death_pipeline::cleanup_destroyed_player_drone_sync(ctx, &sys_handle, ball_id) {
+    if let Some(ref sys_handle) = sys_handle_opt {
+        if crate::combat::death_pipeline::cleanup_destroyed_player_drone_sync(ctx, sys_handle, ball_id) {
+            let _ = sys_handle.remove_ball(ball_id).await;
+            return;
+        }
         let _ = sys_handle.remove_ball(ball_id).await;
-        return;
     }
-    let _ = sys_handle.remove_ball(ball_id).await;
     let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         if snap.items.get(&ball_id).is_some_and(|it| {
@@ -216,21 +218,18 @@ pub async fn step_missiles_and_breachers(
     solar_system_id: u32,
     dt: f64,
 ) -> Vec<InFlightMissileState> {
-    let handle_opt = ctx.systems.get_handle(solar_system_id);
+    let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) else {
+        return Vec::new();
+    };
     let has_sd = with_combat_runtime(ctx, |rt| {
         rt.self_destruct_countdowns
             .values()
             .any(|sd| sd.solar_system_id == solar_system_id)
     });
-    if let Some(ref h) = handle_opt {
-        let view = h.view();
-        if !view.has_active_weapon_effects && !view.weapon_effects_needs_sqlite_hydration && !has_sd {
-            return Vec::new();
-        }
-    } else if !has_sd {
+    let view = sys_handle.view();
+    if !view.has_active_weapon_effects && !view.weapon_effects_needs_sqlite_hydration && !has_sd {
         return Vec::new();
     }
-    let sys_handle = handle_opt.unwrap_or_else(|| ctx.systems.get_or_spawn(solar_system_id));
     let missiles = sys_handle.step_active_missiles_snapshot().await;
 
     let mut completed = Vec::new();
@@ -709,7 +708,15 @@ pub async fn activate_aoe_or_defender_module_with_options(
     deduct_capacitor: bool,
     commit_space_break: bool,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Some(Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "missile_aoe",
+            "Active ship is not spawned in space",
+        )));
+    };
     let needs_space_guard = matches!(mod_type.group_id, 72 | 80 | 353 | 842 | 1154);
     if needs_space_guard {
         if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::check_space_module_cloak_and_warp_readonly(

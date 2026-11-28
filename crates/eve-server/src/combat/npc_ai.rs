@@ -952,7 +952,10 @@ impl NpcSpawnManager {
             return;
         }
         let npc_ids: HashSet<i64> = self.entities.keys().copied().collect();
-        let (ball_kinematics, player_targets) = collect_ai_step_inputs(ctx, sys_id, &npc_ids);
+        let Some((ball_kinematics, player_targets)) = collect_ai_step_inputs(ctx, sys_id, &npc_ids)
+        else {
+            return;
+        };
         let plan = self.plan_ai_step_for_ids(
             None,
             &ctx.sde,
@@ -1520,7 +1523,10 @@ pub(crate) fn step_system_npc_spawns_ai_sync(
         }
         mgr.entities.keys().copied().collect()
     };
-    let (ball_kinematics, player_targets) = collect_ai_step_inputs(ctx, sys_id, &npc_ids);
+    let Some((ball_kinematics, player_targets)) = collect_ai_step_inputs(ctx, sys_id, &npc_ids)
+    else {
+        return;
+    };
     let plan = {
         let mut spawns = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner());
         let Some(mgr) = spawns.get_mut(&sys_id) else {
@@ -1562,8 +1568,8 @@ fn collect_ai_step_inputs(
     ctx: &ServerContext,
     sys_id: u32,
     npc_ids: &HashSet<i64>,
-) -> (HashMap<i64, AiBallKinematics>, Vec<(i64, DVec3, f64)>) {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+) -> Option<(HashMap<i64, AiBallKinematics>, Vec<(i64, DVec3, f64)>)> {
+    let sys_handle = ctx.systems.get_handle(sys_id)?;
     let view = sys_handle.view();
     let (mut ball_kinematics, mut cand_targets): (
         HashMap<i64, AiBallKinematics>,
@@ -1697,7 +1703,7 @@ fn collect_ai_step_inputs(
         })
     };
 
-    (ball_kinematics, player_targets)
+    Some((ball_kinematics, player_targets))
 }
 
 fn combat_state_ratios(bp: &eve_destiny::Ballpark, tid: i64) -> (f64, f64, f64) {
@@ -1944,7 +1950,9 @@ fn apply_ai_step_world_effects(
     dmg_actions: Vec<AiDamageAction>,
     ball_kinematics: &HashMap<i64, AiBallKinematics>,
 ) -> Vec<(i64, i64, Ball)> {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Vec::new();
+    };
     let target_sigs: HashMap<i64, f64> = ball_kinematics
         .iter()
         .map(|(&id, k)| (id, k.target_sig_radius))

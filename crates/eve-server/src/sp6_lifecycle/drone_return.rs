@@ -73,7 +73,15 @@ pub async fn handle_cmd_return_bay(
     let parsed_ids = extract_drone_target_ids(args, kwargs);
     let filter_drone_ids = if parsed_ids.is_empty() { None } else { Some(parsed_ids) };
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "CmdReturnBay",
+            format!("Active ship {ship_id} is not in space"),
+        ));
+    };
     let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
         return Err(BridgeRpcError::ship_not_in_space(
             ship_id,
@@ -943,7 +951,7 @@ pub fn abandon_drones_on_warp_sync(
     ship_id: i64,
     sys_id: u32,
 ) {
-    let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
+    let sys_handle_opt = ctx.systems.get_handle(sys_id);
     abandon_drones_on_warp_with_handle(ctx, char_id, ship_id, sys_id, sys_handle_opt.as_ref());
 }
 
@@ -1029,7 +1037,7 @@ pub fn abandon_drones_and_fighters_for_ship_sync(
     ship_id: i64,
     sys_id: u32,
 ) {
-    let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
+    let sys_handle_opt = ctx.systems.get_handle(sys_id);
     abandon_drones_and_fighters_with_handle(ctx, char_id, ship_id, sys_id, sys_handle_opt);
 }
 
@@ -1348,69 +1356,73 @@ pub async fn handle_cmd_abandon_drone(
     };
     let target_ids = extract_drone_target_ids(args, kwargs);
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let target_ids_for_mut = target_ids;
-    let abandoned_drones = sys_handle
-        .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
-            let mut abandoned = Vec::new();
-            for d in drones.values_mut() {
-                if d.ball_id > 0
-                    && d.solar_system_id == sys_id
-                    && d.owner_char_id == char_id
-                    && !d.is_abandoned
-                {
-                    let matches_filter = target_ids_for_mut.is_empty()
-                        || target_ids_for_mut.contains(&d.ball_id)
-                        || target_ids_for_mut.contains(&d.drone_item_id);
-                    if matches_filter {
-                        if try_stamp_pending_scoop_abandon(
-                            claimed,
-                            d,
-                            crate::system_actor::PendingScoopAbandonKind::Abandon,
-                            char_id,
-                            sys_id,
-                        ) {
-                            continue;
+    let abandoned_drones = if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+        let abandoned = sys_handle
+            .mutate_active_drones_with_claims(move |drones, _, _, claimed| {
+                let mut abandoned = Vec::new();
+                for d in drones.values_mut() {
+                    if d.ball_id > 0
+                        && d.solar_system_id == sys_id
+                        && d.owner_char_id == char_id
+                        && !d.is_abandoned
+                    {
+                        let matches_filter = target_ids_for_mut.is_empty()
+                            || target_ids_for_mut.contains(&d.ball_id)
+                            || target_ids_for_mut.contains(&d.drone_item_id);
+                        if matches_filter {
+                            if try_stamp_pending_scoop_abandon(
+                                claimed,
+                                d,
+                                crate::system_actor::PendingScoopAbandonKind::Abandon,
+                                char_id,
+                                sys_id,
+                            ) {
+                                continue;
+                            }
+                            d.is_abandoned = true;
+                            d.owner_char_id = 0;
+                            d.parent_ship_id = 0;
+                            d.target_id = None;
+                            d.activity_state = 0;
+                            d.assist_char_id = None;
+                            d.guard_char_id = None;
+                            abandoned.push((d.ball_id, d.drone_item_id, d.type_id));
                         }
-                        d.is_abandoned = true;
-                        d.owner_char_id = 0;
-                        d.parent_ship_id = 0;
-                        d.target_id = None;
-                        d.activity_state = 0;
-                        d.assist_char_id = None;
-                        d.guard_char_id = None;
-                        abandoned.push((d.ball_id, d.drone_item_id, d.type_id));
                     }
                 }
-            }
-            (!abandoned.is_empty(), abandoned)
-        })
-        .await
-        .unwrap_or_default();
-    let _ = sys_handle
-        .clear_drone_runtime_batch(abandoned_drones.iter().map(|&(bid, _, _)| bid).collect())
-        .await;
-    for &(bid, did, tid) in &abandoned_drones {
-        crate::services::combat_crimewatch::combat_npcs_drones::clear_drone_web_cycle(
-            &sys_handle,
-            bid,
-        )
-        .await;
+                (!abandoned.is_empty(), abandoned)
+            })
+            .await
+            .unwrap_or_default();
         let _ = sys_handle
-            .emit_destiny_event(
+            .clear_drone_runtime_batch(abandoned.iter().map(|&(bid, _, _)| bid).collect())
+            .await;
+        for &(bid, did, tid) in &abandoned {
+            crate::services::combat_crimewatch::combat_npcs_drones::clear_drone_web_cycle(
+                &sys_handle,
                 bid,
-                eve_destiny::DestinyEvent::OnDroneStateChange {
-                    drone_id: did,
-                    owner_id: 0,
-                    controller_id: 0,
-                    activity_state: 0,
-                    type_id: tid,
-                    controller_owner_id: 0,
-                    target_id: None,
-                },
             )
             .await;
-    }
+            let _ = sys_handle
+                .emit_destiny_event(
+                    bid,
+                    eve_destiny::DestinyEvent::OnDroneStateChange {
+                        drone_id: did,
+                        owner_id: 0,
+                        controller_id: 0,
+                        activity_state: 0,
+                        type_id: tid,
+                        controller_owner_id: 0,
+                        target_id: None,
+                    },
+                )
+                .await;
+        }
+        abandoned
+    } else {
+        Vec::new()
+    };
 
     for &(_, did, tid) in &abandoned_drones {
         emit_drone_control_lost_sync(ctx, sys_id, char_id, did, tid);
@@ -1456,26 +1468,30 @@ pub async fn handle_cmd_reconnect_to_drones(
         ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
     }
     let (max_drones_allowed, ship_bw, _) = crate::services::combat_crimewatch::combat_npcs_drones::pilot_drone_capacity(ctx, char_id, ship_id, ship_fit_opt.as_ref());
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let outcome = sys_handle
-        .reconnect_drones(crate::system_actor::ReconnectDronesReq {
+    let outcome = if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+        let outcome = sys_handle
+            .reconnect_drones(crate::system_actor::ReconnectDronesReq {
+                char_id,
+                ship_id,
+                max_drones_allowed,
+                max_bandwidth: ship_bw,
+                target_ids,
+            })
+            .await
+            .unwrap_or_default();
+
+        super::drone_reconnect_finish::finish_reconnect_drones(
+            ctx,
+            &sys_handle,
             char_id,
             ship_id,
-            max_drones_allowed,
-            max_bandwidth: ship_bw,
-            target_ids,
-        })
-        .await
-        .unwrap_or_default();
-
-    super::drone_reconnect_finish::finish_reconnect_drones(
-        ctx,
-        &sys_handle,
-        char_id,
-        ship_id,
-        &outcome.reconnected,
-    )
-    .await;
+            &outcome.reconnected,
+        )
+        .await;
+        outcome
+    } else {
+        Default::default()
+    };
 
     let mut errors_py: Vec<(PyRep, PyRep)> = Vec::new();
     for (k, v) in [

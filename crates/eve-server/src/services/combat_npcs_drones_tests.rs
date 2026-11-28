@@ -816,7 +816,8 @@ fn extract_v24_launch_entry(rep: &PyRep, source_item_id: i64) -> &[PyRep] {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn v24_launch_drones_partial_stack_respects_active_cap_and_returns_per_item_error_tuple() {
-    let (mut ctx, mut session, char_id, ship_id, _sys_id) = make_drone_test_ctx();
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_drone_test_ctx();
+    let _ = ctx.systems.get_or_spawn(sys_id);
     ctx.db
         .acquire_online_lock(1, session.session_id, Some(char_id), true, ctx.now_unix_secs())
         .expect("online lock");
@@ -911,7 +912,8 @@ async fn v24_launch_drones_partial_stack_respects_active_cap_and_returns_per_ite
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn v24_launch_drones_partial_stack_bandwidth_cap_and_zero_capacity_errors() {
-    let (mut ctx, mut session, char_id, ship_id, _sys_id) = make_drone_test_ctx();
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_drone_test_ctx();
+    let _ = ctx.systems.get_or_spawn(sys_id);
     ctx.db
         .acquire_online_lock(1, session.session_id, Some(char_id), true, ctx.now_unix_secs())
         .expect("online lock");
@@ -986,7 +988,8 @@ async fn v24_launch_drones_partial_stack_bandwidth_cap_and_zero_capacity_errors(
     );
 
     // With Drones skill 0 (max_drones_allowed == 0), V24 launch returns top-level NoDroneManagementAbilities.
-    let (ctx_no_skill, mut sess_no_skill, char2, ship2, _) = make_drone_test_ctx();
+    let (ctx_no_skill, mut sess_no_skill, char2, ship2, sys2) = make_drone_test_ctx();
+    let _ = ctx_no_skill.systems.get_or_spawn(sys2);
     seed_pilot_skill(&ctx_no_skill, char2, 3_436, 0);
     ctx_no_skill.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -1017,7 +1020,8 @@ async fn v24_launch_drones_partial_stack_bandwidth_cap_and_zero_capacity_errors(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn v24_launch_drones_multi_item_partial_and_per_item_errors() {
-    let (mut ctx, mut session, char_id, ship_id, _sys_id) = make_drone_test_ctx();
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_drone_test_ctx();
+    let _ = ctx.systems.get_or_spawn(sys_id);
     ctx.db
         .acquire_online_lock(1, session.session_id, Some(char_id), true, ctx.now_unix_secs())
         .expect("online lock");
@@ -1101,7 +1105,8 @@ async fn v24_launch_drones_partial_with_existing_space_drones_and_boundary_input
     let kwargs = HashMap::new();
 
     // 1. Existing 3/5 drones in space (15/25 Mbit/s) + launch 4 -> launches 2, leaves 2, emits 3 OnItemChange & 2 OnDroneStateChange.
-    let (mut ctx, mut session, char_id, ship_id, _sys_id) = make_drone_test_ctx();
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_drone_test_ctx();
+    let _ = ctx.systems.get_or_spawn(sys_id);
     ctx.db
         .acquire_online_lock(1, session.session_id, Some(char_id), true, ctx.now_unix_secs())
         .expect("online lock");
@@ -1173,7 +1178,8 @@ async fn v24_launch_drones_partial_with_existing_space_drones_and_boundary_input
     assert_eq!(notifs.iter().filter(|n| n.event == "OnDroneStateChange").count(), 2);
 
     // 2. Existing 10/25 Mbit/s bandwidth used (1x 10 Mbit/s) + launch 4x 10 Mbit/s -> launches 1, leaves 3, MaxBandwidthExceeded.
-    let (mut ctx_bw, mut sess_bw, char_bw, ship_bw, _) = make_drone_test_ctx();
+    let (mut ctx_bw, mut sess_bw, char_bw, ship_bw, sys_bw) = make_drone_test_ctx();
+    let _ = ctx_bw.systems.get_or_spawn(sys_bw);
     set_test_hull_bandwidth(&mut ctx_bw, 587, 25.0);
     ctx_bw.invalidate_ship_fitting(ship_bw);
     let med_seed = 710_030_i64;
@@ -1238,7 +1244,8 @@ async fn v24_launch_drones_partial_with_existing_space_drones_and_boundary_input
 
     // 3. Requesting more than stack quantity (8 requested from 3-unit stack) on empty 5-cap ship launches all 3 cleanly with NO error tuple,
     //    empty V24 LaunchDrones([], None, False) returns empty Dict, and legacy list [d1, d2] at 4/5 slots still rejects all-or-nothing.
-    let (mut ctx_edge, mut sess_edge, char_e, ship_e, _) = make_drone_test_ctx();
+    let (mut ctx_edge, mut sess_edge, char_e, ship_e, sys_e) = make_drone_test_ctx();
+    let _ = ctx_edge.systems.get_or_spawn(sys_e);
     set_test_hull_bandwidth(&mut ctx_edge, 587, 25.0);
     ctx_edge.invalidate_ship_fitting(ship_e);
     let over_req_stack = 710_040_i64;
@@ -2446,7 +2453,8 @@ async fn bf01_drone_commands_reject_active_upwell_structure_control() {
 async fn two_contexts_isolate_drone_reservation_id_allocation() {
     let pair =
         eve_testkit::process_global_ratchet::TwoContextPair::from_factory(make_drone_test_ctx);
-    let (ctx_a, mut sess_a, char_a, ship_a, _sys_a) = pair.left;
+    let (ctx_a, mut sess_a, char_a, ship_a, sys_a) = pair.left;
+    let _ = ctx_a.systems.get_or_spawn(sys_a);
     let (ctx_b, _sess_b, _char_b, _ship_b, _sys_b) = pair.right;
 
     assert_eq!(ctx_a.systems.drone_rt_state.alloc_drone_reservation_id(), -200_000);
