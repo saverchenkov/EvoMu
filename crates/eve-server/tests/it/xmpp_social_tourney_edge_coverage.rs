@@ -1441,7 +1441,7 @@ async fn test_notify_emitters_character_and_batch3_gm_slash_cmds() {
     ne::emit_invalidate_cache_for_locations(&ctx, eve_server::router::NotificationTarget::Character(PILOT_1), &[]);
     ne::emit_invalidate_cache_for_locations(&ctx, eve_server::router::NotificationTarget::Character(PILOT_1), &[60_003_760]);
     ne::emit_campaign_enrollment_changed(&ctx, PILOT_1);
-    ne::emit_challenge_expired(&ctx, PILOT_1, 77, PyRep::keyval([("id", PyRep::Integer(77))]));
+    ne::emit_challenge_expired(&ctx, PILOT_1, 77, PyRep::keyval([("challengeID", PyRep::Integer(77))]));
     ne::emit_contextual_offer_purchased(&ctx, PILOT_1, 0);
     ne::emit_contextual_offer_purchased(&ctx, PILOT_1, 88);
     ne::emit_crate_loot_spawned(&ctx, PILOT_1);

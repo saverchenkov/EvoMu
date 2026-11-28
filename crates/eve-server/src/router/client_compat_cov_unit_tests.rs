@@ -259,17 +259,7 @@ fn issue_776_reprocess_list_and_fw_battlefield_compat() {
         .iter()
         .any(|(k, v)| k.as_i64() == Some(805) && v.as_f64() == Some(120.0)));
 
-    // #977: entity.CmdEngage / CmdReturnHome / CmdReturnBay normalize non-Dict replies to {}
     // (#1188: DoDestinyUpdate filter for OnDroneActivityChange removed; server emits notify only).
-    for cmd in ["CmdEngage", "CmdReturnHome", "CmdReturnAndOrbit", "CmdReturnBay"] {
-        let cmd_rep = normalize_macho_rpc_reply(
-            "entity",
-            cmd,
-            Ok(PyRep::keyval([("ok", PyRep::Bool(true))])),
-        )
-        .expect("normalize drone cmd");
-        assert_eq!(cmd_rep, PyRep::Dict(Vec::new()));
-    }
     let destiny_norm = normalize_macho_notification(
         "DoDestinyUpdate",
         vec![

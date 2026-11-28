@@ -1784,7 +1784,6 @@ pub async fn handle_npcs_drones(
                 })
                 .cloned()
                 .collect();
-            let mut count = 0;
             for d in drones {
                 let Some((_, drone_ball)) = sys_handle.get_ball_snapshot(d.ball_id).await.ok().flatten() else {
                     continue;
@@ -1842,9 +1841,8 @@ pub async fn handle_npcs_drones(
                     );
                 }
                 crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 0, None);
-                count += 1;
             }
-            Some(Ok(PyRep::Integer(count as i64)))
+            Some(Ok(PyRep::Dict(Vec::new())))
         }
 
         ("entity", "CmdEngage") => {
@@ -2009,7 +2007,6 @@ pub async fn handle_npcs_drones(
             }
 
             let mut total_dmg_dealt = 0.0;
-            let mut total_repaired = 0.0;
             let mut ewar_applied = false;
             let mut target_destroyed = false;
             let victim_char_opt = cycle_ops::resolve_victim_character_for_ball(ctx, target_id);
@@ -2085,19 +2082,9 @@ pub async fn handle_npcs_drones(
                 if cycle_ready {
                     if d.group_id == 640 {
                         // Logistic drone (`feat:drones.logistic-drones`)
-                        if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
-                            if d.shield_repair_amount > 0.0 {
-                                let before = tcs.shield_hp;
-                                tcs.shield_hp = (tcs.shield_hp + d.shield_repair_amount).min(tcs.max_shield_hp);
-                                total_repaired += (tcs.shield_hp - before).max(0.0);
-                            }
-                            if d.armor_repair_amount > 0.0 {
-                                let before = tcs.armor_hp;
-                                tcs.armor_hp = (tcs.armor_hp + d.armor_repair_amount).min(tcs.max_armor_hp);
-                                total_repaired += (tcs.armor_hp - before).max(0.0);
-                            }
-                            let sh_rep = d.shield_repair_amount;
-                            let ar_rep = d.armor_repair_amount;
+                        let sh_rep = d.shield_repair_amount;
+                        let ar_rep = d.armor_repair_amount;
+                        if sh_rep > 0.0 || ar_rep > 0.0 {
                             let _ = sys_handle
                                 .modify_combat_state(target_id, move |live_cs| {
                                     if sh_rep > 0.0 {
@@ -2250,12 +2237,7 @@ pub async fn handle_npcs_drones(
                 .await;
             }
 
-            Some(Ok(PyRep::keyval([
-                ("targetID", PyRep::Integer(target_id)),
-                ("totalDamageDealt", PyRep::Real(total_dmg_dealt)),
-                ("totalRepairedHP", PyRep::Real(total_repaired)),
-                ("ewarApplied", PyRep::Bool(ewar_applied)),
-            ])))
+            Some(Ok(PyRep::Dict(Vec::new())))
         }
 
         ("entity", "CmdAssist") | ("entity", "CmdGuard") => {

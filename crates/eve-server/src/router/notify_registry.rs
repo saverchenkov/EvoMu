@@ -2280,13 +2280,35 @@ define_notifications! {
                     PyRep::Bool(only),
                 ]
             };
-            vec![
-                row(PyRep::Integer(-1), PyRep::Integer(-1), opt_outs_kv(), PyRep::Integer(-1), PyRep::Integer(-1), opt_outs_kv(), true),
-                row(PyRep::None, PyRep::None, opt_outs_kv(), PyRep::None, PyRep::None, opt_outs_kv(), false),
-                row(PyRep::Integer(-1), PyRep::Integer(-1), opt_outs_kv(), PyRep::None, PyRep::None, opt_outs_kv(), false),
-                row(PyRep::None, PyRep::None, opt_outs_kv(), PyRep::Integer(-1), PyRep::Integer(-1), opt_outs_kv(), false),
-                row(PyRep::Integer(-1), PyRep::Integer(-1), PyRep::List(Vec::new()), PyRep::Integer(-1), PyRep::Integer(-1), PyRep::List(Vec::new()), true),
-            ]
+            let states = [
+                (PyRep::None, PyRep::None),
+                (PyRep::Integer(-1), PyRep::None),
+                (PyRep::Integer(-1), PyRep::Integer(-1)),
+            ];
+            let mut samples = Vec::with_capacity(10);
+            for (ow, os) in &states {
+                for (nw, ns) in &states {
+                    samples.push(row(
+                        ow.clone(),
+                        os.clone(),
+                        opt_outs_kv(),
+                        nw.clone(),
+                        ns.clone(),
+                        opt_outs_kv(),
+                        false,
+                    ));
+                }
+            }
+            samples.push(row(
+                PyRep::Integer(-1),
+                PyRep::Integer(-1),
+                PyRep::List(Vec::new()),
+                PyRep::Integer(-1),
+                PyRep::Integer(-1),
+                PyRep::List(Vec::new()),
+                true,
+            ));
+            samples
         },
     },
     OnFleetMotdChanged => "OnFleetMotdChanged" ("fleetid") {

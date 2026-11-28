@@ -576,6 +576,8 @@ async fn test_entity_drone_space_commands() {
 
     // 1. rpc:entity.CmdEngage: command drones to engage hostile target
     let _ = sys_handle.add_target_lock(ship_id, eve_destiny::TargetLock { target_id: target_ball_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
+    let target_cs_before = sys_handle.get_combat_state(target_ball_id).await.unwrap().unwrap();
+    let hp_before = target_cs_before.shield_hp + target_cs_before.armor_hp + target_cs_before.structure_hp;
     let engage_res = rpc_call(
         &ctx,
         &mut sess,
@@ -587,26 +589,36 @@ async fn test_entity_drone_space_commands() {
     .await
     .expect("CmdEngage");
 
-    assert_eq!(dict_get(&engage_res, "targetID"), Some(&PyRep::Integer(target_ball_id)));
-    let dmg = dict_get(&engage_res, "totalDamageDealt").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    assert!(dmg > 0.0, "Engaged drones must deal combat damage");
+    assert_eq!(engage_res, PyRep::Dict(Vec::new()));
+    let target_cs_after = sys_handle.get_combat_state(target_ball_id).await.unwrap().unwrap();
+    let hp_after = target_cs_after.shield_hp + target_cs_after.armor_hp + target_cs_after.structure_hp;
+    assert!(hp_before - hp_after > 0.0, "Engaged drones must deal combat damage");
 
-    // Verify active drone in space updated its target_id
-    let drone_target = eve_server::services::drone_test_helpers::active_drone(&ctx, drone_ball_id)
-        .and_then(|d| d.target_id);
-    assert_eq!(drone_target, Some(target_ball_id));
+    // Verify active drone in space updated its target_id and activity_state
+    let drone_state = eve_server::services::drone_test_helpers::active_drone(&ctx, drone_ball_id)
+        .expect("active drone after CmdEngage");
+    assert_eq!(drone_state.target_id, Some(target_ball_id));
+    assert_eq!(drone_state.activity_state, 1);
 
     // 2. rpc:entity.CmdReturnHome: command drones to return home and orbit ship
     let home_res = rpc_call(&ctx, &mut sess, "entity", "CmdReturnHome", &[], &kw)
         .await
         .expect("CmdReturnHome");
-    let returned_count = home_res.as_i64().unwrap_or(0);
-    assert!(returned_count >= 1, "At least 1 drone returned home");
+    assert_eq!(home_res, PyRep::Dict(Vec::new()));
 
-    let drone_target_after_home =
+    let drone_after_home =
         eve_server::services::drone_test_helpers::active_drone(&ctx, drone_ball_id)
-            .and_then(|d| d.target_id);
-    assert_eq!(drone_target_after_home, None, "Returning home clears combat target");
+            .expect("active drone after CmdReturnHome");
+    assert_eq!(drone_after_home.target_id, None, "Returning home clears combat target");
+    assert_eq!(drone_after_home.activity_state, 0, "Returning home clears activity_state");
+    let (_, drone_ball_after_home) = sys_handle.get_ball_snapshot(drone_ball_id).await.unwrap().unwrap();
+    assert_eq!(
+        drone_ball_after_home.mode,
+        MovementMode::Orbit {
+            target_id: ship_id,
+            range: 1_000.0
+        }
+    );
 
     // 3. rpc:entity.CmdAssist & rpc:entity.CmdGuard: fleet commands
     let fleetmate_char_id = 90_000_888;

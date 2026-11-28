@@ -126,7 +126,7 @@ async fn drone_engage_combat_logi_ewar_and_step_engaged_drones() {
     assert_eq!(err_range.code, "OutOfDroneControlRange");
 
     // 2. Engage logi drone on damaged friend -> repairs shield + armor
-    let before_sh = sys_handle.get_combat_state(friend_id).await.unwrap().unwrap().shield_hp;
+    let before_friend_cs = sys_handle.get_combat_state(friend_id).await.unwrap().unwrap();
     let rep_res = handle_npcs_drones(
         &ctx,
         &mut session,
@@ -138,11 +138,15 @@ async fn drone_engage_combat_logi_ewar_and_step_engaged_drones() {
     .await
     .unwrap()
     .unwrap();
-    let repaired = py_dict_get(&rep_res, "totalRepairedHP").and_then(|v| v.as_f64()).unwrap();
+    assert_eq!(rep_res, PyRep::Dict(Vec::new()));
+    let after_friend_cs = sys_handle.get_combat_state(friend_id).await.unwrap().unwrap();
+    let repaired = (after_friend_cs.shield_hp - before_friend_cs.shield_hp)
+        + (after_friend_cs.armor_hp - before_friend_cs.armor_hp);
     assert!(repaired > 40.0);
-    assert!(sys_handle.get_combat_state(friend_id).await.unwrap().unwrap().shield_hp > before_sh);
+    assert!(after_friend_cs.shield_hp > before_friend_cs.shield_hp);
 
     // 3. Engage combat + EWAR drones on enemy -> deals damage, clears locks, drains cap, blooms sig, lowers speed
+    let before_enemy_cs = sys_handle.get_combat_state(enemy_id).await.unwrap().unwrap();
     let atk_res = handle_npcs_drones(
         &ctx,
         &mut session,
@@ -157,10 +161,12 @@ async fn drone_engage_combat_logi_ewar_and_step_engaged_drones() {
     .await
     .unwrap()
     .unwrap();
-    assert!(py_dict_get(&atk_res, "totalDamageDealt").and_then(|v| v.as_f64()).unwrap() > 10.0);
-    assert_eq!(py_dict_get(&atk_res, "ewarApplied").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(atk_res, PyRep::Dict(Vec::new()));
     assert!(sys_handle.get_target_locks(enemy_id).await.unwrap().is_empty());
     let enemy_cs = sys_handle.get_combat_state(enemy_id).await.unwrap().unwrap();
+    let enemy_hp_before = before_enemy_cs.shield_hp + before_enemy_cs.armor_hp + before_enemy_cs.structure_hp;
+    let enemy_hp_after = enemy_cs.shield_hp + enemy_cs.armor_hp + enemy_cs.structure_hp;
+    assert!(enemy_hp_before - enemy_hp_after > 10.0);
     assert!(enemy_cs.capacitor < 500.0 && enemy_cs.signature_radius > 40.0);
     let enemy_ball = sys_handle.get_ball_snapshot(enemy_id).await.unwrap().unwrap().1;
     assert!((enemy_ball.speed_fraction - 1.0).abs() < 1e-6);
@@ -328,7 +334,13 @@ async fn drone_assist_guard_auto_aggression_return_scoop_damage_and_salvage() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(ret.as_i64(), Some(2));
+    assert_eq!(ret, PyRep::Dict(Vec::new()));
+    for bid in [combat_bid, salvage_bid] {
+        let st = crate::services::drone_test_helpers::active_drone(&ctx, bid).unwrap();
+        assert_eq!((st.activity_state, st.target_id), (0, None));
+        let (_, ball) = sys_handle.get_ball_snapshot(bid).await.unwrap().unwrap();
+        assert_eq!(ball.mode, MovementMode::Orbit { target_id: ship_id, range: 1_000.0 });
+    }
 
     // 6. ScoopToDroneBay scoops combat_bid back into ship DroneBay (700_020)
     let scoop = handle_npcs_drones(
@@ -1007,12 +1019,27 @@ async fn drone_math_tractor_modifiers_launch_meta_engage_and_scoop_boundary_muta
     });
 
     // CmdReturnHome boundary: target at exact max_ctrl_range (56_000) vs 56_001
+    crate::services::drone_test_helpers::update_active_drone(&ctx, launched_bid, |d| {
+        d.target_id = Some(999_001);
+        d.activity_state = 1;
+    })
+    .unwrap();
+    let _ = sys_handle.set_movement_mode(launched_bid, MovementMode::Stop).await;
     let _ = sys_handle.set_ball_position(launched_bid, DVec3::new(56_001.0, 0.0, 0.0)).await;
     let ret_far = handle_npcs_drones(&ctx, &mut session, "entity", "CmdReturnHome", &[], &kwargs).await.unwrap().unwrap();
-    assert_eq!(ret_far.as_i64(), Some(0));
+    assert_eq!(ret_far, PyRep::Dict(Vec::new()));
+    let st_far = crate::services::drone_test_helpers::active_drone(&ctx, launched_bid).unwrap();
+    assert_eq!((st_far.activity_state, st_far.target_id), (1, Some(999_001)));
+    assert_eq!(sys_handle.get_ball_snapshot(launched_bid).await.unwrap().unwrap().1.mode, MovementMode::Stop);
     let _ = sys_handle.set_ball_position(launched_bid, DVec3::new(56_000.0, 0.0, 0.0)).await;
     let ret_edge = handle_npcs_drones(&ctx, &mut session, "entity", "CmdReturnHome", &[], &kwargs).await.unwrap().unwrap();
-    assert_eq!(ret_edge.as_i64(), Some(1));
+    assert_eq!(ret_edge, PyRep::Dict(Vec::new()));
+    let st_edge = crate::services::drone_test_helpers::active_drone(&ctx, launched_bid).unwrap();
+    assert_eq!((st_edge.activity_state, st_edge.target_id), (0, None));
+    assert_eq!(
+        sys_handle.get_ball_snapshot(launched_bid).await.unwrap().unwrap().1.mode,
+        MovementMode::Orbit { target_id: ship_id, range: 1_000.0 }
+    );
 
     // ScoopToDroneBay errors + ownership + surface range (2_500 vs 2_500.1) + rollback when bay full + abandoned other owner
     let (_, s_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
@@ -1104,7 +1131,7 @@ async fn drone_math_tractor_modifiers_launch_meta_engage_and_scoop_boundary_muta
         &[PyRep::List(vec![PyRep::Integer(tp_bid)]), PyRep::Integer(tp_target_id)],
         &kwargs,
     ).await.unwrap().unwrap();
-    assert_eq!(py_dict_get(&engage_tp, "ewarApplied"), Some(&PyRep::Bool(true)));
+    assert_eq!(engage_tp, PyRep::Dict(Vec::new()));
     let target_cs = sys_handle.get_combat_state(tp_target_id).await.unwrap().unwrap();
     assert_eq!(target_cs.tp_sig_multiplier, Some(2.0));
 }
@@ -1508,7 +1535,7 @@ async fn drone_web_out_of_range_engage_skips_ewar_and_applies_on_closing_step() 
     };
     let web_bid = bids[0].as_i64().unwrap();
 
-    // 1. Out-of-range CmdEngage (25km > SDE web optimal) must NOT report ewarApplied or record assist/aggression
+    // 1. Out-of-range CmdEngage (25km > SDE web optimal) must NOT apply EWAR or record assist/aggression
     let eng_oor = handle_npcs_drones(
         &ctx,
         &mut session,
@@ -1519,8 +1546,8 @@ async fn drone_web_out_of_range_engage_skips_ewar_and_applies_on_closing_step() 
     )
     .await
     .unwrap()
-    .expect("OOR CmdEngage succeeds with ewarApplied=false");
-    assert_eq!(eng_oor.dict_get("ewarApplied"), Some(&PyRep::Bool(false)));
+    .expect("OOR CmdEngage succeeds cleanly");
+    assert_eq!(eng_oor, PyRep::Dict(Vec::new()));
     assert!(
         !sys_handle
             .test_with_actor_state_async(move |st| {
@@ -1578,8 +1605,9 @@ async fn drone_web_out_of_range_engage_skips_ewar_and_applies_on_closing_step() 
     .await
     .unwrap()
     .expect("target switch succeeds on cooldown");
-    assert_eq!(switch_res.dict_get("ewarApplied"), Some(&PyRep::Bool(false)));
+    assert_eq!(switch_res, PyRep::Dict(Vec::new()));
     assert!((sys_handle.get_combat_state(target_a).await.unwrap().unwrap().web_velocity_multiplier - 1.0).abs() < 1e-6);
+    assert!((sys_handle.get_combat_state(target_b).await.unwrap().unwrap().web_velocity_multiplier - 1.0).abs() < 1e-6);
 
     let t2 = t1 + 120;
     step_engaged_drones(&ctx, t2).await;

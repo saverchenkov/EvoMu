@@ -661,17 +661,22 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
     )
     .await
     .expect("CmdEngage within 46km control range");
-    let dmg_dealt = dict_get(&engage_res, "totalDamageDealt")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let rep_done = dict_get(&engage_res, "totalRepairedHP")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
+    assert_eq!(engage_res, PyRep::Dict(Vec::new()));
+    let target_cs = sys_handle
+        .get_combat_state(target_ball_id)
+        .await
+        .unwrap()
+        .expect("target combat state after CmdEngage");
+    let dmg_dealt = 20_000.0 - target_cs.shield_hp;
     assert!(dmg_dealt > 150.0, "Gecko + Subverted + Mutated Hobgoblin must deal damage (got {dmg_dealt})");
-    assert!(rep_done > 0.0, "Light Armor Maintenance Bot I must repair damaged armor (got {rep_done})");
+    assert!(
+        target_cs.armor_hp > 5_000.0,
+        "Light Armor Maintenance Bot I must repair damaged armor (got {})",
+        target_cs.armor_hp
+    );
 
     // 4. Return & Orbit (`entity.CmdReturnAndOrbit`) and Recall to Bay (`entity.CmdReturnBay`)
-    let orbit_cnt = dispatch_combat_rpc(
+    let orbit_res = dispatch_combat_rpc(
         &ctx,
         &mut sess,
         "entity",
@@ -681,7 +686,19 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
     )
     .await
     .expect("CmdReturnAndOrbit");
-    assert_eq!(orbit_cnt.as_i64(), Some(3));
+    assert_eq!(orbit_res, PyRep::Dict(Vec::new()));
+    for &bid in &launched_balls {
+        let st = eve_server::services::drone_test_helpers::active_drone(&ctx, bid).unwrap();
+        assert_eq!((st.activity_state, st.target_id), (0, None));
+        let (_, ball) = sys_handle.get_ball_snapshot(bid).await.unwrap().unwrap();
+        assert_eq!(
+            ball.mode,
+            MovementMode::Orbit {
+                target_id: ship_id,
+                range: 1_000.0
+            }
+        );
+    }
 
     for &bid in &launched_balls {
         let _ = sys_handle
@@ -768,10 +785,16 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
     )
     .await
     .expect("CmdEngage with EWAR + Sentry + Augmented");
-    assert_eq!(
-        dict_get(&engage2, "ewarApplied").and_then(|v| v.as_bool()),
-        Some(true),
-        "Berserker SW-900 must apply stasis webifier EWAR"
+    assert_eq!(engage2, PyRep::Dict(Vec::new()));
+    let target_cs2 = sys_handle
+        .get_combat_state(target_ball_id)
+        .await
+        .unwrap()
+        .expect("target combat state after EWAR CmdEngage");
+    assert!(
+        target_cs2.web_velocity_multiplier < 1.0,
+        "Berserker SW-900 must apply stasis webifier EWAR (got mult={})",
+        target_cs2.web_velocity_multiplier
     );
 
     // Command Salvage Drone I (`entity.CmdSalvage`) on a wreck
