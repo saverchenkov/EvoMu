@@ -6671,7 +6671,7 @@ async fn stargate_rollback_guard_drop_under_world_lock_defers_atomic_rollback_wi
     .expect("commit_stargate_db_transition succeeds");
     guard.record_db_commit(db_rb);
 
-    let spawn_token = next_stargate_spawn_token();
+    let spawn_token = next_stargate_spawn_token(&ctx);
     let mut dest_ball = taken.ball.clone();
     dest_ball.position = DVec3::new(1_000.0, 0.0, 0.0);
     guard.record_dest_spawn_target(dest_handle.clone(), ship_id, spawn_token);
@@ -6732,7 +6732,7 @@ async fn stale_remove_ball_if_token_does_not_clobber_subsequent_retry_jump_ball_
         mode: MovementMode::Stop,
     };
 
-    let tok_1 = next_stargate_spawn_token();
+    let tok_1 = next_stargate_spawn_token(&ctx);
     dest_handle
         .spawn_ball_with_meta_tagged(
             make_ball(pos_v1),
@@ -6742,7 +6742,7 @@ async fn stale_remove_ball_if_token_does_not_clobber_subsequent_retry_jump_ball_
         )
         .await
         .expect("spawn ball v1");
-    let tok_2 = next_stargate_spawn_token();
+    let tok_2 = next_stargate_spawn_token(&ctx);
     dest_handle
         .spawn_ball_with_meta_tagged(
             make_ball(pos_v2),
@@ -7789,4 +7789,91 @@ async fn cmd_stargate_jump_rollback_keeps_db_and_origin_actor_cycles_in_sync_123
             "lock-broken targeted own cycle must emit OnGodmaShipEffect(active=0) on rollback"
         );
     }
+}
+
+#[tokio::test]
+async fn stargate_spawn_tokens_and_hooks_are_isolated_per_server_context() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn counting_hook(counter: &Arc<AtomicUsize>) -> PreTakeBallHook {
+        let counter = Arc::clone(counter);
+        Box::new(move || {
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+    }
+
+    let ctx_a = test_ctx();
+    let ctx_b = test_ctx();
+    let ctx_a_clone = ctx_a.clone();
+    let ctx_a_upgraded = ctx_a
+        .downgrade()
+        .upgrade()
+        .expect("live ServerContext weak upgrade");
+
+    // 1. Spawn tokens are per-context monotonic sequences starting at 1, shared across clones/upgrades.
+    assert_eq!(next_stargate_spawn_token(&ctx_a), 1);
+    assert_eq!(next_stargate_spawn_token(&ctx_a_clone), 2);
+    assert_eq!(next_stargate_spawn_token(&ctx_a_upgraded), 3);
+    assert_eq!(next_stargate_spawn_token(&ctx_b), 1);
+    assert_eq!(next_stargate_spawn_token(&ctx_b), 2);
+    assert_eq!(next_stargate_spawn_token(&ctx_a), 4);
+
+    // 2. Pre-take-ball and post-dest-spawn test hooks for the same char_id are isolated per context.
+    let char_id = 90_000_001_i64;
+    let hits_a_pre = Arc::new(AtomicUsize::new(0));
+    let hits_b_pre = Arc::new(AtomicUsize::new(0));
+    let hits_a_post = Arc::new(AtomicUsize::new(0));
+    let hits_b_post = Arc::new(AtomicUsize::new(0));
+
+    set_pre_take_ball_hook_for_test(&ctx_a, char_id, Some(counting_hook(&hits_a_pre)));
+    set_post_dest_spawn_hook_for_test(&ctx_a, char_id, Some(counting_hook(&hits_a_post)));
+
+    // Running hooks on ctx_b for the same char_id must not observe or consume ctx_a's hooks.
+    run_pre_take_ball_hook_for_test(&ctx_b, char_id).await;
+    run_post_dest_spawn_hook_for_test(&ctx_b, char_id).await;
+    assert_eq!(hits_a_pre.load(Ordering::SeqCst), 0);
+    assert_eq!(hits_a_post.load(Ordering::SeqCst), 0);
+
+    // Installing/clearing hooks on ctx_b must not clobber ctx_a's hooks for the same char_id.
+    set_pre_take_ball_hook_for_test(&ctx_b, char_id, Some(counting_hook(&hits_b_pre)));
+    set_post_dest_spawn_hook_for_test(&ctx_b, char_id, Some(counting_hook(&hits_b_post)));
+    set_pre_take_ball_hook_for_test(&ctx_b, char_id, None);
+    set_post_dest_spawn_hook_for_test(&ctx_b, char_id, None);
+    run_pre_take_ball_hook_for_test(&ctx_b, char_id).await;
+    run_post_dest_spawn_hook_for_test(&ctx_b, char_id).await;
+    assert_eq!(hits_b_pre.load(Ordering::SeqCst), 0);
+    assert_eq!(hits_b_post.load(Ordering::SeqCst), 0);
+
+    // Clones / upgraded handles of ctx_a still share ctx_a's one-shot hooks, and firing once consumes them.
+    run_pre_take_ball_hook_for_test(&ctx_a_upgraded, char_id).await;
+    run_post_dest_spawn_hook_for_test(&ctx_a_clone, char_id).await;
+    assert_eq!(hits_a_pre.load(Ordering::SeqCst), 1);
+    assert_eq!(hits_a_post.load(Ordering::SeqCst), 1);
+
+    run_pre_take_ball_hook_for_test(&ctx_a, char_id).await;
+    run_post_dest_spawn_hook_for_test(&ctx_a, char_id).await;
+    assert_eq!(hits_a_pre.load(Ordering::SeqCst), 1);
+    assert_eq!(hits_a_post.load(Ordering::SeqCst), 1);
+
+    // Independent hooks installed simultaneously on ctx_a and ctx_b each fire only on their own context.
+    set_pre_take_ball_hook_for_test(&ctx_a, char_id, Some(counting_hook(&hits_a_pre)));
+    set_pre_take_ball_hook_for_test(&ctx_b, char_id, Some(counting_hook(&hits_b_pre)));
+    set_post_dest_spawn_hook_for_test(&ctx_a, char_id, Some(counting_hook(&hits_a_post)));
+    set_post_dest_spawn_hook_for_test(&ctx_b, char_id, Some(counting_hook(&hits_b_post)));
+
+    run_pre_take_ball_hook_for_test(&ctx_b, char_id).await;
+    run_post_dest_spawn_hook_for_test(&ctx_b, char_id).await;
+    assert_eq!(hits_b_pre.load(Ordering::SeqCst), 1);
+    assert_eq!(hits_b_post.load(Ordering::SeqCst), 1);
+    assert_eq!(hits_a_pre.load(Ordering::SeqCst), 1);
+    assert_eq!(hits_a_post.load(Ordering::SeqCst), 1);
+
+    run_pre_take_ball_hook_for_test(&ctx_a, char_id).await;
+    run_post_dest_spawn_hook_for_test(&ctx_a, char_id).await;
+    assert_eq!(hits_a_pre.load(Ordering::SeqCst), 2);
+    assert_eq!(hits_a_post.load(Ordering::SeqCst), 2);
+    assert_eq!(hits_b_pre.load(Ordering::SeqCst), 1);
+    assert_eq!(hits_b_post.load(Ordering::SeqCst), 1);
 }

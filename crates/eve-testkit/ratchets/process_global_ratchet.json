@@ -20,7 +20,7 @@
     },
     "C_counters": {
       "zero_required": false,
-      "max_count": 4,
+      "max_count": 3,
       "rationale_required": false,
       "description": "Process-global monotonic ID/sequence counters whose values reach game state or wire messages (#1583 Group C)."
     },
@@ -32,7 +32,7 @@
     },
     "E_test_seams": {
       "zero_required": false,
-      "max_count": 5,
+      "max_count": 3,
       "rationale_required": false,
       "description": "Non-#[cfg(test)] test seams, hooks, and overrides remaining in production source files (#1583 Group E)."
     },
@@ -430,30 +430,6 @@
       "group": "G_process_wide_allowlist",
       "max_count": 1,
       "rationale": "Log-once deduplication set suppressing repeated fallback ship radius warnings per typeID."
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/space_warp_jump.rs",
-      "symbol": "NEXT_STARGATE_SPAWN_TOKEN",
-      "kind": "static_sync",
-      "group": "C_counters",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/space_warp_jump.rs",
-      "symbol": "POST_DEST_SPAWN_HOOKS",
-      "kind": "static_sync",
-      "group": "E_test_seams",
-      "max_count": 1
-    },
-    {
-      "crate_name": "eve-server",
-      "rel_file": "services/space_warp_jump.rs",
-      "symbol": "PRE_TAKE_BALL_HOOKS",
-      "kind": "static_sync",
-      "group": "E_test_seams",
-      "max_count": 1
     },
     {
       "crate_name": "eve-server",
