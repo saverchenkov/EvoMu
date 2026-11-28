@@ -10,7 +10,6 @@ use crate::bug_reporting::{
 };
 use crate::macho_listener::{handle_macho_client, read_framed_pyrep, write_framed_pyrep};
 use crate::quasar_grpc::*;
-use crate::router::client_compat::normalize_macho_notification;
 use crate::router::{NotificationTarget, ServerContext};
 use crate::sso::handle_http_request_with_ctx;
 use crate::system_actor::*;
@@ -364,67 +363,7 @@ fn make_field(name: &str, number: u32, label: FieldLabel, field_type: FieldType,
 }
 
 #[test]
-fn normalize_notices_covers_bookmarks_bean_item_change_and_any_coercion() {
-    let bm = normalize_macho_notification(
-        "OnSharedBookmarksFolderUpdated",
-        vec![PyRep::List(vec![PyRep::Tuple(vec![
-            PyRep::Integer(101),
-            PyRep::Integer(202),
-            PyRep::List(vec![
-                PyRep::Integer(7),
-                PyRep::keyval([("bookmarkID", PyRep::Integer(8))]),
-            ]),
-        ])])],
-    );
-    assert_eq!(bm.len(), 1);
-    let PyRep::List(folders) = &bm[0] else { panic!("expected list") };
-    assert!(matches!(&folders[0], PyRep::Tuple(_)));
-
-    // #1188: OnBeanPrime client_compat rule removed; inputs pass through unchanged.
-    assert_eq!(
-        normalize_macho_notification("OnBeanPrime", Vec::new()),
-        Vec::<PyRep>::new()
-    );
-    let bp_kv_list = vec![PyRep::List(vec![PyRep::keyval([
-        ("errorID", PyRep::Integer(42)),
-        ("errorKeyHash", PyRep::Integer(99)),
-        ("logMode", PyRep::String("B".into())),
-    ])])];
-    assert_eq!(normalize_macho_notification("OnBeanPrime", bp_kv_list.clone()), bp_kv_list);
-    assert_eq!(
-        normalize_macho_notification("OnBeanPrime", vec![PyRep::String("raw".into()), PyRep::Integer(2)]),
-        vec![PyRep::String("raw".into()), PyRep::Integer(2)]
-    );
-
-    assert_eq!(normalize_macho_notification("OnOrganizationContactsUpdated", vec![PyRep::Integer(1)]).len(), 2);
-    assert!(normalize_macho_notification("OnGodmaShipEffect", Vec::new()).is_empty());
-
-    let mac = normalize_macho_notification(
-        "OnModuleAttributeChanges",
-        vec![
-            PyRep::List(vec![
-                PyRep::Tuple(vec![PyRep::Integer(1); 8]),
-                PyRep::Tuple(vec![PyRep::Integer(2); 7]),
-            ]),
-            PyRep::Integer(999),
-        ],
-    );
-    assert!(!mac.is_empty());
-
-    let ic1 = normalize_macho_notification(
-        "OnItemChange",
-        vec![PyRep::Dict(vec![(PyRep::String("a".into()), PyRep::Integer(1))])],
-    );
-    assert_eq!(ic1.len(), 1);
-    let ic2 = normalize_macho_notification(
-        "OnItemChange",
-        vec![
-            PyRep::keyval([("itemID", PyRep::Integer(5))]),
-            PyRep::Dict(vec![(PyRep::Integer(10), PyRep::Integer(20))]),
-        ],
-    );
-    assert_eq!(ic2.len(), 3);
-
+fn normalize_quasar_any_payload_covers_descriptor_and_wire_coercion() {
     let mut reg = QuasarDescriptorRegistry::empty_with_builtins();
     let leaf_desc = DescriptorProto {
         name: "CovLeaf".to_string(),

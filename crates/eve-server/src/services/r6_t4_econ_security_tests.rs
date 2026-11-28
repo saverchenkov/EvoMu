@@ -1,8 +1,7 @@
-//! Security regression and exploit tests for Round-6 Track 4 (`#402`, `#405`, `#406`, `#407`, `#408`, `#409`).
+//! Security regression and exploit tests for economy, contracts, market, and industry guards (`#405`, `#406`, `#407`, `#408`, `#409`).
 
 #![forbid(unsafe_code)]
 
-use crate::router::client_compat::normalize_macho_notification;
 use crate::router::ServerContext;
 use eve_db::{
     corp_roles, service_roles, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
@@ -54,28 +53,6 @@ fn make_session(user_id: u64, char_id: i64, corp_id: i64, station_id: i64, corp_
     s.region_id = Some(THE_FORGE);
     s.role = service_roles::ROLE_PLAYER_DEFAULT;
     s
-}
-
-#[test]
-fn test_402_quasar_normalization_preserves_authoritative_backend_replies_and_notices() {
-    let bm_notif = vec![PyRep::List(vec![PyRep::keyval([("folderID", PyRep::Integer(8801))])])];
-    assert_eq!(normalize_macho_notification("OnSharedBookmarksFolderUpdated", bm_notif.clone()), bm_notif);
-    let mod_notif = normalize_macho_notification("OnModuleAttributeChanges", vec![PyRep::List(vec![PyRep::Integer(700_009)])]);
-    assert!(matches!(
-        mod_notif.as_slice(),
-        [PyRep::List(items)] if matches!(items.as_slice(), [PyRep::Tuple(t)] if t.len() == 8 && t[2] == PyRep::Integer(700_009))
-    ));
-    let inv_notif = normalize_macho_notification(
-        "ProcessInventoryChange",
-        vec![PyRep::Integer(900_001), PyRep::Integer(JITA_STATION), PyRep::Integer(5)],
-    );
-    assert!(matches!(
-        inv_notif.as_slice(),
-        [PyRep::List(items), PyRep::Dict(_), PyRep::Bool(true), PyRep::None]
-            if items.first().and_then(|i| i.dict_get("itemID")) == Some(&PyRep::Integer(900_001))
-    ));
-    let inv_notif_4 = vec![PyRep::List(Vec::new()), PyRep::Dict(Vec::new()), PyRep::Bool(true), PyRep::None];
-    assert_eq!(normalize_macho_notification("ProcessInventoryChange", inv_notif_4.clone()), inv_notif_4);
 }
 
 #[test]

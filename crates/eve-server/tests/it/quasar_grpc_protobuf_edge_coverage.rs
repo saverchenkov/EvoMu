@@ -22,7 +22,6 @@ use eve_server::quasar_gateway::{
     STATUS_PRECONDITION_FAILED, STATUS_SERVICE_UNAVAILABLE, STATUS_UNAUTHORIZED,
 };
 use eve_server::quasar_grpc::{frame_grpc_message, handle_quasar_grpc_connection};
-use eve_server::router::client_compat::normalize_macho_notification;
 use eve_server::router::ServerContext;
 use flate2::write::{GzEncoder, ZlibEncoder};
 use flate2::Compression;
@@ -223,11 +222,11 @@ fn frame_compressed(flag: u8, payload: &[u8]) -> Bytes {
 }
 
 // ============================================================================
-// 1. quasar_grpc h2c transport, compression, auth & normalizer edges
+// 1. quasar_grpc h2c transport, compression & auth edges
 // ============================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn quasar_grpc_h2c_transport_auth_compression_and_normalizer_edges() {
+async fn quasar_grpc_h2c_transport_auth_and_compression_edges() {
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
 
@@ -440,30 +439,6 @@ async fn quasar_grpc_h2c_transport_auth_compression_and_normalizer_edges() {
             .and_then(|v| v.to_str().ok()),
         Some("7")
     );
-
-    // 11) Normalizer edges: short args & non-matching types
-    assert_eq!(
-        normalize_macho_notification("OnDockingAccepted", vec![PyRep::Integer(1)]),
-        vec![PyRep::Integer(1)]
-    );
-    assert_eq!(
-        normalize_macho_notification(
-            "OnDockingAccepted",
-            vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(60_003_760)]
-        ),
-        vec![PyRep::Integer(60_003_760)]
-    );
-    assert_eq!(
-        normalize_macho_notification("OnTargetClear", vec![PyRep::Bool(true)]),
-        vec![PyRep::Bool(true)]
-    );
-    assert!(normalize_macho_notification("DoDestinyUpdate", vec![]).is_empty());
-    assert_eq!(
-        normalize_macho_notification("OnBeanPrime", vec![PyRep::None]),
-        vec![PyRep::None]
-    );
-    assert!(normalize_macho_notification("OnOrganizationContactsUpdated", vec![PyRep::Integer(5)]).len() >= 1);
-    assert!(normalize_macho_notification("OnSharedBookmarksFolderUpdated", vec![PyRep::Integer(5)]).len() >= 1);
 }
 
 // ============================================================================

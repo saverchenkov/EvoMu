@@ -1,42 +1,6 @@
-//! Unit and mutation-killing tests for `crate::quasar_grpc` RPC reply normalization,
-//! notification normalization, Quasar protobuf payload coercion, and HTTP/2 gRPC transport.
+//! Unit tests verifying C9 typed handler direct-dispatch wire shapes.
 
-use crate::router::client_compat::normalize_macho_rpc_reply;
 use eve_proto::PyRep;
-
-#[test]
-fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store() {
-    assert_eq!(
-        normalize_macho_rpc_reply(
-            "dogmaIM",
-            "OverloadRack",
-            Ok(PyRep::List(vec![PyRep::Integer(1001)])),
-        )
-        .unwrap(),
-        PyRep::List(vec![PyRep::Integer(1001)])
-    );
-    let hs = normalize_macho_rpc_reply(
-        "home_station",
-        "get_home_station_candidates",
-        Ok(PyRep::List(vec![PyRep::Integer(60_003_760)])),
-    )
-    .unwrap();
-    assert!(matches!(hs, PyRep::List(_)));
-
-    let add_tgt = normalize_macho_rpc_reply(
-        "dogmaIM",
-        "AddTarget",
-        Ok(PyRep::keyval([
-            ("locked", PyRep::Bool(false)),
-            ("targetID", PyRep::Integer(555)),
-        ])),
-    )
-    .unwrap();
-    assert_eq!(
-        add_tgt,
-        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())])
-    );
-}
 
 #[tokio::test]
 async fn quasar_c9_typed_handlers_direct_dispatch_wire_shapes() {

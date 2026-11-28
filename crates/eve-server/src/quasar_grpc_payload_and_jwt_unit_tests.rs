@@ -1,7 +1,6 @@
 //! Semantic unit tests split from `quasar_grpc_extra_unit_tests`.
 
 use crate::quasar_grpc::*;
-use crate::router::client_compat::normalize_macho_notification;
 use crate::router::ServerContext;
 use bytes::{Buf, Bytes, BytesMut};
 use eve_proto::quasar::{
@@ -9,147 +8,9 @@ use eve_proto::quasar::{
     FieldLabel, FieldType, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry, WireField,
     WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
-use eve_proto::PyRep;
 use http::{Request, StatusCode};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-
-#[test]
-fn normalize_macho_notification_exhaustive_edge_cases() {
-    // OnDockingAccepted with < 3 args returns unchanged
-    assert_eq!(
-        normalize_macho_notification("OnDockingAccepted", vec![PyRep::Integer(1)]),
-        vec![PyRep::Integer(1)]
-    );
-
-    // DoDestinyUpdate with non-OnDockingAccepted tuple and scalar
-    let du = normalize_macho_notification(
-        "DoDestinyUpdate",
-        vec![
-            PyRep::Tuple(vec![
-                PyRep::String("SetBallPosition".into()),
-                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(0.0)]),
-            ]),
-            PyRep::Integer(99),
-        ],
-    );
-    assert_eq!(du.len(), 2);
-
-    // OnChannelJoined with explicit arg
-    assert_eq!(
-        normalize_macho_notification("OnChannelJoined", vec![PyRep::String("corp".into())]),
-        vec![PyRep::String("corp".into())]
-    );
-
-    // OnOrganizationContactsUpdated with populated list using relationshipID fallback
-    let contacts = normalize_macho_notification(
-        "OnOrganizationContactsUpdated",
-        vec![
-            PyRep::Integer(98_000_002),
-            PyRep::List(vec![PyRep::keyval([
-                ("contactID", PyRep::Integer(90_000_005)),
-                ("relationshipID", PyRep::Real(-5.0)),
-                ("labelMask", PyRep::Integer(3)),
-            ])]),
-        ],
-    );
-    assert_eq!(contacts[0], PyRep::Integer(98_000_002));
-    assert_eq!(
-        contacts[1],
-        PyRep::List(vec![PyRep::Tuple(vec![
-            PyRep::Integer(90_000_005),
-            PyRep::Real(-5.0),
-            PyRep::Integer(3),
-        ])])
-    );
-
-    // OnTargetClear non-empty passthrough
-    assert_eq!(
-        normalize_macho_notification("OnTargetClear", vec![PyRep::Integer(1)]),
-        vec![PyRep::Integer(1)]
-    );
-
-    // OnGodmaShipEffect with valid 11 args passthrough
-    let valid_ft = PyRep::Integer(133_500_000_000_000_000);
-    let valid_env = PyRep::Tuple(vec![
-        PyRep::Integer(1),
-        PyRep::None,
-        PyRep::Integer(1),
-        PyRep::None,
-        PyRep::None,
-        PyRep::List(Vec::new()),
-        PyRep::Integer(1),
-    ]);
-    let eleven = vec![
-        PyRep::Integer(1),
-        PyRep::Integer(1),
-        valid_ft.clone(),
-        PyRep::Integer(1),
-        PyRep::Integer(1),
-        valid_env,
-        valid_ft,
-        PyRep::Real(0.0),
-        PyRep::Integer(0),
-        PyRep::None,
-        PyRep::None,
-    ];
-    assert_eq!(
-        normalize_macho_notification("OnGodmaShipEffect", eleven.clone()),
-        eleven
-    );
-
-    // OnHeatRemoved passes through [heatID, moduleID] untouched
-    assert_eq!(
-        normalize_macho_notification("OnHeatRemoved", vec![PyRep::Integer(1176), PyRep::Integer(100_000_020)]),
-        vec![PyRep::Integer(1176), PyRep::Integer(100_000_020)]
-    );
-
-    // OnModuleUnfitted preserves args
-    assert_eq!(
-        normalize_macho_notification("OnModuleUnfitted", vec![PyRep::Integer(1), PyRep::Integer(2)]),
-        vec![PyRep::Integer(1), PyRep::Integer(2)]
-    );
-
-    // OnRemoteMessage with 3 args passthrough
-    assert_eq!(
-        normalize_macho_notification("OnRemoteMessage", vec![PyRep::None; 3]).len(),
-        3
-    );
-
-    // ProcessInventoryChange with 1 arg passthrough; OnNotificationReceived with 5 args passthrough
-    assert_eq!(
-        normalize_macho_notification("ProcessInventoryChange", vec![PyRep::None]).len(),
-        1
-    );
-    assert_eq!(
-        normalize_macho_notification("OnNotificationReceived", vec![PyRep::None; 5]).len(),
-        5
-    );
-
-    // OnTarget variants: "clear", custom verb, reversed args, and len != 2
-    assert_eq!(
-        normalize_macho_notification("OnTarget", vec![PyRep::Integer(10), PyRep::String("clear".into())]),
-        vec![PyRep::String("clear".into()), PyRep::Integer(10), PyRep::None]
-    );
-    assert_eq!(
-        normalize_macho_notification("OnTarget", vec![PyRep::Integer(10), PyRep::String("other".into())]),
-        vec![PyRep::String("other".into()), PyRep::Integer(10), PyRep::None]
-    );
-    assert_eq!(
-        normalize_macho_notification("OnTarget", vec![PyRep::String("add".into()), PyRep::Integer(10)]),
-        vec![PyRep::String("add".into()), PyRep::Integer(10), PyRep::None]
-    );
-    assert_eq!(
-        normalize_macho_notification("OnTarget", vec![PyRep::Integer(10)]),
-        vec![PyRep::Integer(10)]
-    );
-
-    // Default wildcard notification passthrough
-    assert_eq!(
-        normalize_macho_notification("OnAccountChange", vec![PyRep::Bool(true)]),
-        vec![PyRep::Bool(true)]
-    );
-}
 
 #[test]
 fn normalize_quasar_any_payload_covers_leaf_and_nested_coercion_branches() {

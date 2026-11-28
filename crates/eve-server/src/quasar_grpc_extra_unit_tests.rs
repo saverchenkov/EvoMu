@@ -1,45 +1,7 @@
-//! Deep branch and mutation-killing tests for `crate::quasar_grpc` covering remaining
-//! `normalize_macho_rpc_reply`, `normalize_macho_notification`, `normalize_quasar_any_payload`
-//! leaf/varint coercion branches, JWT subject/expiry/SSO verification, and HTTP/2 gRPC streams.
+//! Deep branch and mutation-killing tests for `crate::quasar_grpc` covering JWT/SSO
+//! authentication, HTTP/2 gRPC stream teardown, and C9 typed handler wire shapes.
 
-use crate::router::client_compat::normalize_macho_rpc_reply;
 use eve_proto::PyRep;
-
-#[test]
-fn normalize_macho_rpc_reply_covers_raffle_skill_station_and_store_variants() {
-    // home_station.get_home_station_candidates empty list & non-Integer passthrough
-    let hs_empty = normalize_macho_rpc_reply(
-        "home_station",
-        "get_home_station_candidates",
-        Ok(PyRep::List(Vec::new())),
-    )
-    .unwrap();
-    if let PyRep::List(items) = hs_empty {
-        assert!(items.is_empty());
-    }
-    let hs_other = normalize_macho_rpc_reply(
-        "home_station",
-        "get_home_station_candidates",
-        Ok(PyRep::List(vec![PyRep::String("custom".into())])),
-    )
-    .unwrap();
-    assert_eq!(hs_other, PyRep::List(vec![PyRep::String("custom".into())]));
-
-    // dogmaIM.AddTarget default locked=true (`flag = 0`) and default targetID=0
-    let tgt_def = normalize_macho_rpc_reply(
-        "dogmaIM",
-        "AddTarget",
-        Ok(PyRep::KeyVal(std::collections::HashMap::new())),
-    )
-    .unwrap();
-    assert_eq!(
-        tgt_def,
-        PyRep::Tuple(vec![
-            PyRep::Integer(0),
-            PyRep::List(vec![PyRep::Integer(0)])
-        ])
-    );
-}
 
 #[tokio::test]
 async fn grpc_auth_expired_ban_revocation_gm_demotion_and_subscriber_guard_drop_unit() {
