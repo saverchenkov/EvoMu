@@ -385,7 +385,7 @@ pub(crate) async fn spawn_wreck_ball_in_ballpark(
                 mass: 50_000.0,
                 radius: 30.0,
                 speed_fraction: 0.0,
-                mode: MovementMode::Rigid,
+                mode: MovementMode::Stop,
             },
             ctx.build_type_combat_state(wreck_type_id),
             SlimItemMeta {
@@ -407,8 +407,8 @@ pub(crate) async fn spawn_wreck_ball_in_ballpark(
 }
 
 /// Inserts a wreck and its loot items in `WorldRepository` via
-/// [`spawn_npc_wreck_and_loot_in_snap`] and spawns the matching rigid ballpark ball (`#1193`),
-/// rolling back persisted DB rows if the ballpark spawn fails.
+/// [`spawn_npc_wreck_and_loot_in_snap`] and spawns the matching stationary (`MovementMode::Stop`)
+/// grid-local ballpark ball (`#1193`), rolling back persisted DB rows if the ballpark spawn fails.
 pub async fn spawn_wreck_with_loot_in_ballpark(
     ctx: &ServerContext,
     handle: &SystemHandle,
@@ -1610,7 +1610,83 @@ mod tests {
             .await
             .expect("wreck query")
             .expect("wreck ball live");
-        assert_eq!(wreck_ball.mode, MovementMode::Rigid);
+        assert_eq!(wreck_ball.mode, MovementMode::Stop);
+        assert!(
+            !handle.hydrated_view().is_static_ball(wreck_out.wreck_id),
+            "wreck must be a grid-local dynamic ball, not a static celestial"
+        );
+        let on_grid = handle
+            .list_dynamic_balls_in_bubble(spawned_id)
+            .await
+            .expect("same-grid dynamic balls");
+        assert!(on_grid.iter().any(|b| b.id == wreck_out.wreck_id));
+
+        let far_obs_id = spawn_entity_in_ballpark(
+            &ctx,
+            &handle,
+            SpawnEntityInBallparkRequest {
+                entity_id: None,
+                db_item: None,
+                ball: Ball {
+                    id: 0,
+                    type_id: 587,
+                    position: ship_pos + DVec3::new(10_000_000.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                payload: SpawnBallPayload::Meta {
+                    combat_state: ctx.build_type_combat_state(587),
+                    slim_meta: ctx.build_ship_slim_meta(cid, 587),
+                },
+                mark_non_interactive: false,
+            },
+        )
+        .await
+        .expect("spawn off-grid observer");
+        let off_grid = handle
+            .list_balls_in_bubble(far_obs_id)
+            .await
+            .expect("off-grid balls");
+        assert!(
+            !off_grid.iter().any(|b| b.id == wreck_out.wreck_id),
+            "wreck must stay grid-local and must not leak to off-grid observers"
+        );
+        let _ = despawn_entity_in_ballpark(
+            &ctx,
+            Some(&handle),
+            DespawnEntityInBallparkRequest {
+                entity_id: far_obs_id,
+                remove_from_db: false,
+                remove_warp_bubble: false,
+                clean_npc_runtime_system: None,
+            },
+        )
+        .await;
+
+        let _ = handle.drain_observer_updates_with_seq(spawned_id).await;
+        let moved_pos = ship_pos + DVec3::new(250.0, 0.0, 0.0);
+        assert!(
+            handle
+                .set_ball_position(wreck_out.wreck_id, moved_pos)
+                .await,
+            "set_ball_position on grid-local wreck must succeed"
+        );
+        let (_, moved_events, _, _) = handle
+            .drain_observer_updates_with_seq(spawned_id)
+            .await
+            .expect("drain observer events after wreck move");
+        assert!(
+            moved_events.iter().any(|ev| matches!(
+                ev,
+                DestinyEvent::SetBallPosition { ball_id, .. } if *ball_id == wreck_out.wreck_id
+            )),
+            "moving a stationary Stop wreck via Tractor Beam must emit SetBallPosition"
+        );
 
         let despawned_wreck = despawn_entity_in_ballpark(
             &ctx,
