@@ -26,7 +26,6 @@ use crate::services::mining_cycle::{ActiveMiningCycle, MiningKind};
 use crate::services::quasar_daily_goals::DailyGoalTemplate;
 use crate::services::quasar_social_chat::load_wormhole_speakers_from_db;
 use crate::services::space_destiny::record_session_change_timer;
-use crate::services::tactical_modules::db_ptr_key;
 
 static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
 
@@ -201,12 +200,6 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             .write()
             .unwrap()
             .push((sys_id as i64, "Jita IV".into(), 1.0, 2.0, 3.0));
-        {
-            let dk = db_ptr_key(&ctx.db);
-            let mut tac = ctx.tactical_state.write().unwrap();
-            tac.lance_caster_lock_until
-                .insert((dk, ship_id), 1_700_000_120);
-        }
         ctx.fleet_extras
             .lock()
             .unwrap()
@@ -268,6 +261,8 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             cw.pending_bounty_ticks.insert((sys_id, cid), 125_000.0);
             cw.bounty_tick_next_flush_unix
                 .insert((sys_id, cid), 1_700_001_200);
+            cw.lance_caster_lock_until.insert(ship_id, 1_700_000_120);
+            cw.lance_victim_debuff_until.insert(ship_id, 1_700_000_240);
             cw.tsb_self_penalty_until.insert(ship_id, 1_700_000_300);
             cw.record_destroyed_item_id(888_777_666);
         });
@@ -396,14 +391,22 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             .unwrap()
             .iter()
             .any(|(s, n, ..)| *s == sys_id as i64 && n == "Jita IV"));
-        {
-            let dk = db_ptr_key(&ctx2.db);
-            let tac = ctx2.tactical_state.read().unwrap();
-            assert_eq!(
-                tac.lance_caster_lock_until.get(&(dk, ship_id)),
-                Some(&1_700_000_120)
-            );
-        }
+        assert_eq!(
+            crate::services::tactical_modules::tactical_test_helpers::get_lance_caster_lock_until_for_scope(
+                &ctx2,
+                crate::services::tactical_modules::tactical_test_helpers::TacticalKeyScope::Db,
+                ship_id
+            ),
+            Some(1_700_000_120)
+        );
+        assert_eq!(
+            crate::services::tactical_modules::tactical_test_helpers::get_lance_victim_debuff_until_for_scope(
+                &ctx2,
+                crate::services::tactical_modules::tactical_test_helpers::TacticalKeyScope::Db,
+                ship_id
+            ),
+            Some(1_700_000_240)
+        );
         assert_eq!(
             crate::services::tactical_modules::tactical_test_helpers::get_tsb_self_penalty_until(
                 &ctx2, ship_id
@@ -464,6 +467,14 @@ fn sqlite_restart_preserves_server_context_combat_and_quasar_runtime_state() {
             assert_eq!(
                 cw.bounty_tick_next_flush_unix.get(&(sys_id, cid)),
                 Some(&1_700_001_200)
+            );
+            assert_eq!(
+                cw.lance_caster_lock_until.get(&ship_id),
+                Some(&1_700_000_120)
+            );
+            assert_eq!(
+                cw.lance_victim_debuff_until.get(&ship_id),
+                Some(&1_700_000_240)
             );
             assert_eq!(
                 cw.tsb_self_penalty_until.get(&ship_id),
@@ -991,15 +1002,15 @@ async fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync(
         ctx.tactical_state
             .write()
             .unwrap()
-            .lance_caster_lock_until
-            .insert((999_888_777, 1), 100);
+            .system_sim_time_s
+            .insert((999_888_777, 30_000_142), 100.0);
         ctx.persist_server_runtime_to_db();
         assert!(
             !db.with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn))
                 .expect("check checkpoints"),
             "foreign tag must not persist"
         );
-        ctx.tactical_state.write().unwrap().lance_caster_lock_until.clear();
+        ctx.tactical_state.write().unwrap().system_sim_time_s.clear();
 
         let assert_tac_persists = |label: &str, set: &dyn Fn(&mut crate::services::tactical_modules::TacticalModulesState, usize)| {
             {
@@ -1023,19 +1034,20 @@ async fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync(
             );
         };
 
-        assert_tac_persists("lance_caster_lock_until_inst", &|ts, _| {
-            ts.lance_caster_lock_until.insert((inst, 11), 500);
-        });
-        assert_tac_persists("lance_victim_debuff_until", &|ts, k| {
-            ts.lance_victim_debuff_until.insert((k, 12), 600);
-        });
         assert_tac_persists("system_sim_time_s", &|ts, k| {
             ts.system_sim_time_s.insert((k, 30_000_142), 12.5);
         });
+        assert_tac_persists("system_sim_time_s_inst", &|ts, _| {
+            ts.system_sim_time_s.insert((inst, 30_000_143), 15.0);
+        });
         {
             use crate::services::tactical_modules::tactical_test_helpers::{
-                get_tsb_self_penalty_until, set_tsb_self_penalty_until,
+                get_lance_caster_lock_until_for_scope, get_lance_victim_debuff_until_for_scope,
+                get_tsb_self_penalty_until, set_lance_caster_lock_until,
+                set_lance_victim_debuff_until, set_tsb_self_penalty_until, TacticalKeyScope,
             };
+            set_lance_caster_lock_until(&ctx, 11, 500);
+            set_lance_victim_debuff_until(&ctx, 12, 600);
             set_tsb_self_penalty_until(&ctx, 18, 700);
             ctx.persist_server_runtime_to_db();
             assert!(
@@ -1043,16 +1055,24 @@ async fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync(
                     eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn)
                 })
                 .expect("check checkpoints"),
-                "snapshot-owned tsb_self_penalty_until must NOT emit system_checkpoint rows"
+                "snapshot-owned lance_caster_lock_until, lance_victim_debuff_until, and tsb_self_penalty_until must NOT emit system_checkpoint rows"
             );
             let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
             ctx2.hydrate_server_runtime_from_db();
+            assert_eq!(
+                get_lance_caster_lock_until_for_scope(&ctx2, TacticalKeyScope::Db, 11),
+                Some(500)
+            );
+            assert_eq!(
+                get_lance_victim_debuff_until_for_scope(&ctx2, TacticalKeyScope::Db, 12),
+                Some(600)
+            );
             assert_eq!(get_tsb_self_penalty_until(&ctx2, 18), Some(700));
             db.with_mut_snapshot(|snap| {
-                snap.combat_crimewatch_state
-                    .as_inner_mut()
-                    .tsb_self_penalty_until
-                    .clear();
+                let cw = snap.combat_crimewatch_state.as_inner_mut();
+                cw.lance_caster_lock_until.clear();
+                cw.lance_victim_debuff_until.clear();
+                cw.tsb_self_penalty_until.clear();
             });
         }
 

@@ -359,6 +359,8 @@ impl_decomposed_domain_struct!(
         ess_reserve_bank_thefts,
         ess_main_bank_thefts,
         tsb_self_penalty_until,
+        lance_caster_lock_until,
+        lance_victim_debuff_until,
     ],
     sorted_set_maps: [],
     sets: [],

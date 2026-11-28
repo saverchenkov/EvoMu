@@ -467,9 +467,7 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
 
     // 2. Populate tactical_state with both instance_id-keyed (tag 1) and db_ptr_key-keyed (tag 0) entries
     set_lance_caster_lock_until_for_scope(&ctx1, TacticalKeyScope::Instance, ship_a, 1_001);
-    set_lance_caster_lock_until_for_scope(&ctx1, TacticalKeyScope::Db, ship_b, 1_002);
     set_lance_victim_debuff_until_for_scope(&ctx1, TacticalKeyScope::Instance, ship_a, 2_001);
-    set_lance_victim_debuff_until_for_scope(&ctx1, TacticalKeyScope::Db, ship_b, 2_002);
     set_tsb_self_penalty_until(&ctx1, ship_a, 3_001);
     insert_active_entosis_link(
         &ctx1,
@@ -581,8 +579,10 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
         })
         .expect("load durable tactical rows");
     assert!(
-        !durable_rows.iter().any(|(_, key, _)| key.starts_with("tsb|")),
-        "tsb_self_penalty_until must live in WorldStateSnapshot, not KIND_TACTICAL_DURABLE"
+        !durable_rows.iter().any(|(_, key, _)| {
+            key.starts_with("tsb|") || key.starts_with("lcl|") || key.starts_with("lvd|")
+        }),
+        "lance/TSB durable fields must live in WorldStateSnapshot, not KIND_TACTICAL_DURABLE"
     );
     let sim_rows = ctx1
         .db
@@ -606,7 +606,23 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
                     1_700_000_000,
                 )?;
             }
-            // Seed a legacy `tsb|0|<ship_b>` checkpoint row directly in db2 to verify migration.
+            // Seed legacy `lcl|0|<ship_b>`, `lvd|0|<ship_b>`, and `tsb|0|<ship_b>` checkpoint rows directly in db2 to verify migration.
+            eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                conn,
+                eve_db::sqlite_store::system_checkpoint::CLUSTER_SYSTEM_ID,
+                eve_db::sqlite_store::system_checkpoint::KIND_TACTICAL_DURABLE,
+                &format!("lcl|0|{ship_b}"),
+                &serde_json::json!({ "LanceCasterLockUntil": [0, ship_b, 1_002] }),
+                1_700_000_000,
+            )?;
+            eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                conn,
+                eve_db::sqlite_store::system_checkpoint::CLUSTER_SYSTEM_ID,
+                eve_db::sqlite_store::system_checkpoint::KIND_TACTICAL_DURABLE,
+                &format!("lvd|0|{ship_b}"),
+                &serde_json::json!({ "LanceVictimDebuffUntil": [0, ship_b, 2_002] }),
+                1_700_000_000,
+            )?;
             eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
                 conn,
                 eve_db::sqlite_store::system_checkpoint::CLUSTER_SYSTEM_ID,
@@ -750,18 +766,26 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
         assert_eq!(p.warp_end_ft, None);
     }
 
-    // Verify tactical_state cross-context key migration (durable kinds kept, crash-lost entosis dropped)
+    // Verify DB-owned tactical durable migration/isolation (`lcl`/`lvd`/`tsb` migrated, crash-lost entosis dropped)
+    assert_eq!(
+        get_lance_caster_lock_until_for_scope(&ctx1, TacticalKeyScope::Instance, ship_a),
+        Some(1_001)
+    );
     assert_eq!(
         get_lance_caster_lock_until_for_scope(&ctx2, TacticalKeyScope::Instance, ship_a),
-        Some(1_001)
+        None
     );
     assert_eq!(
         get_lance_caster_lock_until_for_scope(&ctx2, TacticalKeyScope::Db, ship_b),
         Some(1_002)
     );
     assert_eq!(
-        get_lance_victim_debuff_until_for_scope(&ctx2, TacticalKeyScope::Instance, ship_a),
+        get_lance_victim_debuff_until_for_scope(&ctx1, TacticalKeyScope::Instance, ship_a),
         Some(2_001)
+    );
+    assert_eq!(
+        get_lance_victim_debuff_until_for_scope(&ctx2, TacticalKeyScope::Instance, ship_a),
+        None
     );
     assert_eq!(
         get_lance_victim_debuff_until_for_scope(&ctx2, TacticalKeyScope::Db, ship_b),

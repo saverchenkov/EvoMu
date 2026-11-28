@@ -1448,3 +1448,556 @@ async fn two_server_contexts_isolate_tsb_self_penalty_until() {
     assert!((attrs_b[&208] - 20.0).abs() < 1e-6);
 }
 
+const TEST_NULL_SYS_ID: u32 = 30_004_759;
+const TEST_TITAN_TID: u32 = 11_567;
+const TEST_DD_TID: u32 = 24_550;
+const TEST_LANCER_TID: u32 = 77_281;
+const TEST_LANCE_TID: u32 = 77_398;
+const TEST_SIEGE_TID: u32 = 20_280;
+
+fn configure_lance_and_doomsday_sde(sde: &mut SdeRegistry, include_titan: bool) {
+    sde.solar_systems.entry(TEST_NULL_SYS_ID).or_insert(eve_sde::SolarSystem {
+        solar_system_id: TEST_NULL_SYS_ID,
+        constellation_id: 20_000_700,
+        region_id: 10_000_060,
+        name: "1DQ1-A".into(),
+        security_status: -0.9,
+        radius: 1.0e12,
+        galactic_pos_ly: [0.0; 3],
+        planet_ids: Vec::new(),
+        stations: Vec::new(),
+        wormhole_class_id: None,
+    });
+    if include_titan {
+        sde.types.insert(
+            TEST_TITAN_TID,
+            custom_inv_type(sde, TEST_TITAN_TID, 30, 6, "Avatar", &[]),
+        );
+        sde.types.insert(
+            TEST_DD_TID,
+            custom_inv_type(
+                sde,
+                TEST_DD_TID,
+                588,
+                7,
+                "Bosonic Field Generator",
+                &[
+                    (1074, 1.0),
+                    (54, 150_000.0),
+                    (713, 16_274.0),
+                    (714, 100.0),
+                    (114, 25_000.0),
+                    (2427, 300_000.0),
+                    (669, 300_000.0),
+                    (73, 300_000.0),
+                ],
+            ),
+        );
+    }
+    sde.types.insert(
+        TEST_LANCER_TID,
+        custom_inv_type(
+            sde,
+            TEST_LANCER_TID,
+            4594,
+            6,
+            "Bane",
+            &[(5418, 20.0), (5417, 10.0)],
+        ),
+    );
+    sde.types.insert(
+        TEST_LANCE_TID,
+        custom_inv_type(
+            sde,
+            TEST_LANCE_TID,
+            588,
+            7,
+            "Disruptive Lance",
+            &[
+                (6, 1_000.0),
+                (54, 50_000.0),
+                (713, 16_274.0),
+                (714, 100.0),
+                (114, 5_000.0),
+                (2264, 5_000.0),
+                (2265, 1_000.0),
+                (2263, 2_500.0),
+                (2259, 10_000.0),
+                (5412, 60_000.0),
+                (73, 300_000.0),
+            ],
+        ),
+    );
+    if !sde.types.contains_key(&TEST_SIEGE_TID) {
+        let siege_type = custom_inv_type(sde, TEST_SIEGE_TID, 515, 7, "Siege Module I", &[]);
+        sde.types.insert(TEST_SIEGE_TID, siege_type);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lance_locks_and_debuffs_survive_sqlite_restart_including_titan_aoe_doomsday_visibility() {
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = TempDirGuard(std::env::temp_dir().join(format!(
+        "evomu_lance_restart_{}_{nanos}",
+        std::process::id()
+    )));
+    std::fs::create_dir_all(&dir.0).expect("create temp dir");
+    let db_path = dir.0.join("lance_world.sqlite");
+
+    let null_sys_id = TEST_NULL_SYS_ID;
+    let titan_tid = TEST_TITAN_TID;
+    let dd_tid = TEST_DD_TID;
+    let lancer_tid = TEST_LANCER_TID;
+    let lance_tid = TEST_LANCE_TID;
+    let siege_tid = TEST_SIEGE_TID;
+
+    let mut sde = (*shared_sde()).clone();
+    configure_lance_and_doomsday_sde(&mut sde, true);
+    let sde = Arc::new(sde);
+
+    let now = 1_800_000_000_u64;
+    let titan_char = 947_001_i64;
+    let titan_ship = 947_100_i64;
+    let dd_mod = 947_200_i64;
+    let titan_lance_probe_mod = 947_201_i64;
+    let titan_siege_mod = 947_202_i64;
+    let titan_fuel = 947_203_i64;
+
+    let lancer_char = 947_002_i64;
+    let lancer_ship = 947_300_i64;
+    let lance_mod = 947_400_i64;
+    let lancer_siege_mod = 947_401_i64;
+    let lancer_fuel = 947_402_i64;
+
+    let victim_char = 947_003_i64;
+    let victim_ship = 947_500_i64;
+
+    {
+        let db = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite boot 1"));
+        let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db));
+        ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now)));
+        ctx.db.with_mut_snapshot(|snap| {
+            for (cid, sid) in [
+                (titan_char, titan_ship),
+                (lancer_char, lancer_ship),
+                (victim_char, victim_ship),
+            ] {
+                snap.characters.insert(
+                    cid,
+                    eve_db::CharacterRecord {
+                        character_id: cid,
+                        user_id: cid as u64,
+                        name: format!("Pilot {cid}"),
+                        corporation_id: 1_000_125,
+                        solar_system_id: null_sys_id,
+                        active_ship_id: sid,
+                        security_status: 5.0,
+                        clone_grade: 2,
+                        ..Default::default()
+                    },
+                );
+            }
+            for cid in [titan_char, lancer_char] {
+                let sk = snap.skills.entry(cid).or_default();
+                for skill_tid in [77_739_u32, 77_738_u32] {
+                    sk.insert(
+                        skill_tid,
+                        eve_db::TrainedSkillRecord {
+                            type_id: skill_tid,
+                            level: 5,
+                            skill_points: 256_000.0,
+                        },
+                    );
+                }
+            }
+        });
+        for (cid, sid, corp) in [
+            (titan_char, titan_ship, 1_000_125),
+            (lancer_char, lancer_ship, 1_000_125),
+            (victim_char, victim_ship, 1_000_126),
+        ] {
+            ensure_char(&ctx, cid, corp, null_sys_id, sid, 2);
+        }
+
+        // Titan setup: Bosonic Doomsday + extra lance & active siege to verify cross-op pre-check visibility
+        insert_item(&ctx, titan_ship, titan_tid, titan_char, i64::from(null_sys_id), InventoryFlag::None, 1, true);
+        insert_item(&ctx, dd_mod, dd_tid, titan_char, titan_ship, InventoryFlag::HiSlot0, 1, true);
+        insert_item(&ctx, titan_lance_probe_mod, lance_tid, titan_char, titan_ship, InventoryFlag::HiSlot1, 1, true);
+        insert_item(&ctx, titan_siege_mod, siege_tid, titan_char, titan_ship, InventoryFlag::HiSlot2, 1, true);
+        insert_item(&ctx, titan_fuel, 16_274, titan_char, titan_ship, InventoryFlag::Cargo, 500, false);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.module_online_states.insert(dd_mod, true);
+            snap.module_online_states.insert(titan_lance_probe_mod, true);
+            snap.module_active_states.insert(titan_siege_mod);
+        });
+        spawn_ship_ball_with_cs(&ctx, null_sys_id, titan_ship, titan_tid, titan_char, 1_000_125, DVec3::new(0.0, 500_000.0, 0.0), 100_000.0).await;
+
+        // 1. Titan AoE Doomsday writes onto PersistedCombatCrimewatchState (fixing instance_id vs db_ptr_key split-brain)
+        crate::services::doomsday_aoe_ops::activate_cone_doomsday(
+            &ctx,
+            titan_char,
+            titan_ship,
+            null_sys_id,
+            dd_mod,
+            &[
+                PyRep::Integer(dd_mod),
+                PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+            ],
+        )
+        .await
+        .expect("activate cone doomsday");
+
+        assert!(has_lance_caster_lock(&ctx, titan_ship));
+        assert_eq!(
+            check_ship_navigation_lock(&ctx, titan_ship, "warp").unwrap_err().code,
+            "LanceFiringLockActive"
+        );
+        assert_eq!(ship_navigation_lock_expiry_unix(&ctx, titan_ship), now + 300);
+        let precheck_err = activate_superweapon_or_lance(
+            &ctx,
+            titan_char,
+            titan_ship,
+            null_sys_id,
+            titan_lance_probe_mod,
+            "Activate",
+            None,
+        )
+        .await
+        .expect_err("lance reactivation pre-check must observe Titan AoE doomsday lock");
+        assert_eq!(precheck_err.code, "ModuleInReactivationDelay");
+
+        // 2. Lancer Dreadnought fires Disruptive Lance hitting victim_ship
+        insert_item(&ctx, lancer_ship, lancer_tid, lancer_char, i64::from(null_sys_id), InventoryFlag::None, 1, true);
+        insert_item(&ctx, lance_mod, lance_tid, lancer_char, lancer_ship, InventoryFlag::HiSlot0, 1, true);
+        insert_item(&ctx, lancer_siege_mod, siege_tid, lancer_char, lancer_ship, InventoryFlag::HiSlot1, 1, true);
+        insert_item(&ctx, lancer_fuel, 16_274, lancer_char, lancer_ship, InventoryFlag::Cargo, 500, false);
+        insert_item(&ctx, victim_ship, 587, victim_char, i64::from(null_sys_id), InventoryFlag::None, 1, true);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.module_online_states.insert(lance_mod, true);
+            snap.module_active_states.insert(lancer_siege_mod);
+        });
+        spawn_ship_ball_with_cs(&ctx, null_sys_id, lancer_ship, lancer_tid, lancer_char, 1_000_125, DVec3::ZERO, 100_000.0).await;
+        spawn_ship_ball_with_cs(&ctx, null_sys_id, victim_ship, 587, victim_char, 1_000_126, DVec3::new(10_000.0, 0.0, 0.0), 10_000.0).await;
+
+        let lance_rep = activate_superweapon_or_lance(
+            &ctx,
+            lancer_char,
+            lancer_ship,
+            null_sys_id,
+            lance_mod,
+            "Activate",
+            Some(victim_ship),
+        )
+        .await
+        .expect("activate disruptive lance");
+        assert_eq!(lance_rep.dict_get("hitCount").and_then(|v| v.as_i64()), Some(1));
+        assert!(has_lance_caster_lock(&ctx, lancer_ship));
+        assert!((incoming_remote_repair_multiplier(&ctx, victim_ship) - 0.50).abs() < 1e-6);
+        assert_eq!(
+            check_ship_navigation_lock(&ctx, victim_ship, "dock").unwrap_err().code,
+            "DisruptiveLanceDebuffActive"
+        );
+    }
+
+    // Reopen fresh DB + ServerContext and verify round-trip without KIND_TACTICAL_DURABLE rows
+    let db2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite boot 2"));
+    let tac_rows = db2
+        .with_sqlite_conn(|conn| {
+            eve_db::sqlite_store::system_checkpoint::load_all_checkpoints_for_kind::<serde_json::Value>(
+                conn,
+                eve_db::sqlite_store::system_checkpoint::KIND_TACTICAL_DURABLE,
+            )
+        })
+        .expect("load tactical durable checkpoints");
+    assert!(
+        tac_rows.is_empty(),
+        "lance/doomsday locks and debuffs must NOT write KIND_TACTICAL_DURABLE rows (got {tac_rows:?})"
+    );
+    db2.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        assert_eq!(cw.lance_caster_lock_until.get(&titan_ship), Some(&(now + 300)));
+        assert_eq!(cw.lance_caster_lock_until.get(&lancer_ship), Some(&(now + 300)));
+        assert_eq!(cw.lance_victim_debuff_until.get(&victim_ship), Some(&(now + 60)));
+    });
+
+    let ctx2 = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&db2));
+    ctx2.hydrate_server_runtime_from_db();
+    ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now + 5)));
+    assert!(has_lance_caster_lock(&ctx2, titan_ship));
+    assert!(has_lance_caster_lock(&ctx2, lancer_ship));
+    assert_eq!(
+        check_ship_navigation_lock(&ctx2, titan_ship, "warp").unwrap_err().code,
+        "LanceFiringLockActive"
+    );
+    assert_eq!(
+        check_ship_navigation_lock(&ctx2, lancer_ship, "warp").unwrap_err().code,
+        "LanceFiringLockActive"
+    );
+    assert_eq!(
+        check_ship_navigation_lock(&ctx2, victim_ship, "dock").unwrap_err().code,
+        "DisruptiveLanceDebuffActive"
+    );
+    assert!((incoming_remote_repair_multiplier(&ctx2, victim_ship) - 0.50).abs() < 1e-6);
+
+    // Re-check lance reactivation pre-check after restart on Titan (re-enabling active siege after crash-lost module_active_states reset)
+    ctx2.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(titan_siege_mod);
+    });
+    spawn_ship_ball_with_cs(&ctx2, null_sys_id, titan_ship, titan_tid, titan_char, 1_000_125, DVec3::new(0.0, 500_000.0, 0.0), 100_000.0).await;
+    let restart_precheck = activate_superweapon_or_lance(
+        &ctx2,
+        titan_char,
+        titan_ship,
+        null_sys_id,
+        titan_lance_probe_mod,
+        "Activate",
+        None,
+    )
+    .await
+    .expect_err("lance reactivation pre-check must observe persisted lock after restart");
+    assert_eq!(restart_precheck.code, "ModuleInReactivationDelay");
+
+    // Exact boundary expiry: victim debuff lifts at now + 60 while caster lock stays until now + 300
+    ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now + 60)));
+    assert!((incoming_remote_repair_multiplier(&ctx2, victim_ship) - 1.0).abs() < 1e-6);
+    assert!(check_ship_navigation_lock(&ctx2, victim_ship, "dock").is_ok());
+    assert!(has_lance_caster_lock(&ctx2, titan_ship));
+    assert!(has_lance_caster_lock(&ctx2, lancer_ship));
+
+    ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now + 300)));
+    assert!(!has_lance_caster_lock(&ctx2, titan_ship));
+    assert!(!has_lance_caster_lock(&ctx2, lancer_ship));
+    assert!(check_ship_navigation_lock(&ctx2, titan_ship, "warp").is_ok());
+    assert!(check_ship_navigation_lock(&ctx2, lancer_ship, "warp").is_ok());
+}
+
+#[test]
+fn legacy_lance_checkpoints_and_payload_migrate_with_max_zero_lock_rank_violation_and_prune() {
+    use eve_db::sqlite_store::system_checkpoint::{
+        load_all_checkpoints_for_kind, upsert_system_checkpoint, CLUSTER_SYSTEM_ID,
+        KIND_TACTICAL_DURABLE,
+    };
+
+    // 1. Legacy `lcl|...` and `lvd|...` checkpoint rows migrate via `max(existing, v)` across
+    //    tag 0 / tag 1 without lock-rank violations, and re-persisting prunes obsolete rows.
+    let ctx = test_ctx_with_custom_types(|_| {});
+    ctx.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.lance_caster_lock_until.insert(901, 1_800_005_000);
+        cw.lance_victim_debuff_until.insert(911, 1_800_006_000);
+    });
+    ctx.db
+        .with_sqlite_conn(|conn| -> Result<(), String> {
+            upsert_system_checkpoint(
+                conn,
+                CLUSTER_SYSTEM_ID,
+                KIND_TACTICAL_DURABLE,
+                "lcl|0|900",
+                &serde_json::json!({ "LanceCasterLockUntil": [0, 900, 1_800_001_100] }),
+                1_800_000_000,
+            )?;
+            upsert_system_checkpoint(
+                conn,
+                CLUSTER_SYSTEM_ID,
+                KIND_TACTICAL_DURABLE,
+                "lcl|1|900",
+                &serde_json::json!({ "LanceCasterLockUntil": [1, 900, 1_800_001_200] }),
+                1_800_000_000,
+            )?;
+            upsert_system_checkpoint(
+                conn,
+                CLUSTER_SYSTEM_ID,
+                KIND_TACTICAL_DURABLE,
+                "lcl|0|901",
+                &serde_json::json!({ "LanceCasterLockUntil": [0, 901, 1_800_001_500] }),
+                1_800_000_000,
+            )?;
+            upsert_system_checkpoint(
+                conn,
+                CLUSTER_SYSTEM_ID,
+                KIND_TACTICAL_DURABLE,
+                "lvd|0|910",
+                &serde_json::json!({ "LanceVictimDebuffUntil": [0, 910, 1_800_002_300] }),
+                1_800_000_000,
+            )?;
+            upsert_system_checkpoint(
+                conn,
+                CLUSTER_SYSTEM_ID,
+                KIND_TACTICAL_DURABLE,
+                "lvd|1|910",
+                &serde_json::json!({ "LanceVictimDebuffUntil": [1, 910, 1_800_002_100] }),
+                1_800_000_000,
+            )?;
+            upsert_system_checkpoint(
+                conn,
+                CLUSTER_SYSTEM_ID,
+                KIND_TACTICAL_DURABLE,
+                "lvd|0|911",
+                &serde_json::json!({ "LanceVictimDebuffUntil": [0, 911, 1_800_002_500] }),
+                1_800_000_000,
+            )
+        })
+        .expect("seed legacy lance durable checkpoints");
+
+    ctx.hydrate_server_runtime_from_db();
+    ctx.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        assert_eq!(cw.lance_caster_lock_until.get(&900), Some(&1_800_001_200));
+        assert_eq!(cw.lance_caster_lock_until.get(&901), Some(&1_800_005_000));
+        assert_eq!(cw.lance_victim_debuff_until.get(&910), Some(&1_800_002_300));
+        assert_eq!(cw.lance_victim_debuff_until.get(&911), Some(&1_800_006_000));
+    });
+
+    ctx.persist_server_runtime_to_db();
+    let pruned_keys: Vec<String> = ctx
+        .db
+        .with_sqlite_conn(|conn| {
+            load_all_checkpoints_for_kind::<serde_json::Value>(conn, KIND_TACTICAL_DURABLE)
+        })
+        .expect("reload tactical durable keys")
+        .into_iter()
+        .map(|(_, k, _)| k)
+        .collect();
+    assert!(pruned_keys.is_empty());
+
+    // 2. Legacy `server_runtime_json` payload entries migrate via `max` across tags without deadlock.
+    let ctx_json = test_ctx_with_custom_types(|_| {});
+    ctx_json.db.with_mut_snapshot(|snap| {
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        cw.lance_caster_lock_until.insert(920, 1_800_007_000);
+        cw.lance_victim_debuff_until.insert(930, 1_800_008_000);
+        snap.cluster_and_runtime.server_runtime_json = Some(
+            serde_json::json!({
+                "tactical_state": {
+                    "lance_caster_lock_until": [[[0, 920], 1_800_003_000], [[0, 921], 1_800_004_100], [[1, 921], 1_800_004_500]],
+                    "lance_victim_debuff_until": [[[0, 930], 1_800_003_500], [[0, 931], 1_800_004_800], [[1, 931], 1_800_004_200]]
+                }
+            })
+            .to_string(),
+        );
+    });
+    ctx_json.hydrate_server_runtime_from_db();
+    ctx_json.db.with_snapshot(|snap| {
+        let cw = &snap.combat_crimewatch_state;
+        assert_eq!(cw.lance_caster_lock_until.get(&920), Some(&1_800_007_000));
+        assert_eq!(cw.lance_caster_lock_until.get(&921), Some(&1_800_004_500));
+        assert_eq!(cw.lance_victim_debuff_until.get(&930), Some(&1_800_008_000));
+        assert_eq!(cw.lance_victim_debuff_until.get(&931), Some(&1_800_004_800));
+        assert!(snap.cluster_and_runtime.server_runtime_json.is_none());
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lance_activation_rollback_restores_or_clears_caster_lock_on_failure() {
+    let null_sys_id = TEST_NULL_SYS_ID;
+    let lancer_tid = TEST_LANCER_TID;
+    let lance_tid = TEST_LANCE_TID;
+    let siege_tid = TEST_SIEGE_TID;
+
+    let ctx = test_ctx_with_custom_types(|sde| {
+        configure_lance_and_doomsday_sde(sde, false);
+    });
+
+    let now = ctx.now_unix_secs();
+    let char_id = 948_001_i64;
+    let ship_id = 948_100_i64;
+    let lance_mod = 948_200_i64;
+    let siege_mod = 948_201_i64;
+    let fuel_id = 948_202_i64;
+
+    ensure_char(&ctx, char_id, 1_000_125, null_sys_id, ship_id, 2);
+    insert_item(&ctx, ship_id, lancer_tid, char_id, i64::from(null_sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, lance_mod, lance_tid, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, siege_mod, siege_tid, char_id, ship_id, InventoryFlag::HiSlot1, 1, true);
+    insert_item(&ctx, fuel_id, 16_274, char_id, ship_id, InventoryFlag::Cargo, 500, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        let sk = snap.skills.entry(char_id).or_default();
+        for skill_tid in [77_739_u32, 77_738_u32] {
+            sk.insert(
+                skill_tid,
+                eve_db::TrainedSkillRecord {
+                    type_id: skill_tid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        snap.module_online_states.insert(lance_mod, true);
+        snap.module_active_states.insert(siege_mod);
+    });
+    spawn_ship_ball_with_cs(&ctx, null_sys_id, ship_id, lancer_tid, char_id, 1_000_125, DVec3::ZERO, 100_000.0).await;
+
+    // Seed an active cycle on `(ship_id, lance_mod)` so activation passes prechecks,
+    // writes provisional `lance_caster_lock_until`, and then fails at actor commit
+    // (`ModuleAlreadyActive`), exercising `restore_lance_lock()`.
+    let sys = ctx.systems.get_or_spawn(null_sys_id);
+    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+        ship_id,
+        module_id: lance_mod,
+        module_type_id: lance_tid,
+        owner_char_id: Some(char_id),
+        effect_name: "superWeaponLance".into(),
+        duration_s: 30.0,
+        ..Default::default()
+    })
+    .await
+    .expect("seed active lance cycle");
+
+    // 1. When no prior entry existed, failure removes `lance_caster_lock_until`.
+    let err_absent = activate_superweapon_or_lance(
+        &ctx,
+        char_id,
+        ship_id,
+        null_sys_id,
+        lance_mod,
+        "Activate",
+        None,
+    )
+    .await
+    .expect_err("active cycle must fail after provisional lock write");
+    assert_eq!(err_absent.code, "ModuleAlreadyActive");
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap
+            .combat_crimewatch_state
+            .lance_caster_lock_until
+            .contains_key(&ship_id));
+    });
+    assert!(!has_lance_caster_lock(&ctx, ship_id));
+
+    // 2. When a prior expired entry existed, failure restores that exact prior timestamp.
+    let prev_expired = now - 10;
+    tactical_test_helpers::set_lance_caster_lock_until(&ctx, ship_id, prev_expired);
+    let err_prev = activate_superweapon_or_lance(
+        &ctx,
+        char_id,
+        ship_id,
+        null_sys_id,
+        lance_mod,
+        "Activate",
+        None,
+    )
+    .await
+    .expect_err("active cycle must fail after provisional lock overwrite");
+    assert_eq!(err_prev.code, "ModuleAlreadyActive");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.combat_crimewatch_state
+                .lance_caster_lock_until
+                .get(&ship_id)
+                .copied(),
+            Some(prev_expired)
+        );
+    });
+    assert!(!has_lance_caster_lock(&ctx, ship_id));
+}
+

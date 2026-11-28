@@ -538,15 +538,12 @@ where
             let _ = sys.set_combat_state(ship_id, cs).await;
             titan_ball_initial.max_velocity
         };
-    {
-        let db_key = ctx.instance_id as usize;
-        let mut st = ctx
-            .tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        st.lance_caster_lock_until
-            .insert((db_key, ship_id), now_unix + no_jump_secs);
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .as_inner_mut()
+            .lance_caster_lock_until
+            .insert(ship_id, now_unix + no_jump_secs);
+    });
 
     ctx.crimewatch
         .write()

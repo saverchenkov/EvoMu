@@ -418,6 +418,8 @@ fn empty_collections_negative_sorting_and_remaining_durable_domain_roundtrips() 
     combat.bounty_tick_next_flush_unix.insert((30_000_142, 90_001), 1_700_001_200);
     combat.pending_bounty_tick_started_unix.insert((30_000_142, 90_001), 1_700_000_000);
     combat.tsb_self_penalty_until.insert(80_001, 1_700_009_500);
+    combat.lance_caster_lock_until.insert(80_002, 1_700_009_600);
+    combat.lance_victim_debuff_until.insert(80_003, 1_700_009_700);
     combat.record_destroyed_item_id(1_897_080_352);
     combat.record_destroyed_item_id(1_897_080_353);
     let combat_json = serde_json::to_string(&combat).unwrap();
@@ -425,12 +427,10 @@ fn empty_collections_negative_sorting_and_remaining_durable_domain_roundtrips() 
         serde_json::from_str::<PersistedCombatCrimewatchState>(&combat_json).unwrap(),
         combat
     );
-    assert!(
-        serde_json::from_str::<PersistedCombatCrimewatchState>("{}")
-            .unwrap()
-            .tsb_self_penalty_until
-            .is_empty()
-    );
+    let empty_combat: PersistedCombatCrimewatchState = serde_json::from_str("{}").unwrap();
+    assert!(empty_combat.tsb_self_penalty_until.is_empty());
+    assert!(empty_combat.lance_caster_lock_until.is_empty());
+    assert!(empty_combat.lance_victim_debuff_until.is_empty());
 
     // FIFO ring-buffer cap (1,024) + deduplication + <= 0 guard on PersistedCombatCrimewatchState
     let mut ring = PersistedCombatCrimewatchState::default();

@@ -237,8 +237,6 @@ impl Drop for ActiveFuelReserveGuard {
 #[derive(Default)]
 pub struct TacticalModulesState {
     pub remote_assistance: HashMap<(usize, i64), Vec<ProjectedRemoteAssistance>>,
-    pub lance_caster_lock_until: HashMap<(usize, i64), u64>,
-    pub lance_victim_debuff_until: HashMap<(usize, i64), u64>,
     pub pending_wubble_probes: Vec<(usize, PendingWubbleProbe)>,
     pub active_wubble_debuffs: HashMap<(usize, i64), ActiveWubbleDebuff>,
     pub active_interdiction_probes: HashMap<(usize, i64), super::tactical_module_mechanics::ActiveInterdictionProbe>,
@@ -266,20 +264,19 @@ pub(crate) fn db_ptr_key(db: &Arc<eve_db::WorldRepository>) -> usize { Arc::as_p
 
 /// Returns the latest Unix expiry timestamp of any active navigation-locking effect or link on `ship_id`.
 pub fn ship_navigation_lock_expiry_unix(ctx: &ServerContext, ship_id: i64) -> u64 {
-    let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
-    let mut max_exp = 0_u64;
-    {
-        let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-        for k in [db_key, inst_key] {
-            if let Some(&u) = st.lance_caster_lock_until.get(&(k, ship_id)) {
-                max_exp = max_exp.max(u);
-            }
-            if let Some(&u) = st.lance_victim_debuff_until.get(&(k, ship_id)) {
-                max_exp = max_exp.max(u);
-            }
-        }
-    }
     let db_exp = ctx.db.with_snapshot(|snap| {
+        let lance_caster_exp = snap
+            .combat_crimewatch_state
+            .lance_caster_lock_until
+            .get(&ship_id)
+            .copied()
+            .unwrap_or(0);
+        let lance_victim_exp = snap
+            .combat_crimewatch_state
+            .lance_victim_debuff_until
+            .get(&ship_id)
+            .copied()
+            .unwrap_or(0);
         let ent_exp = snap
             .sov_runtime
             .entosis_active_links
@@ -293,43 +290,55 @@ pub fn ship_navigation_lock_expiry_unix(ctx: &ServerContext, ship_id: i64) -> u6
             .map(|&(_, _, completes_at, _)| completes_at)
             .max()
             .unwrap_or(0);
-        ent_exp.max(skyhook_exp)
+        lance_caster_exp
+            .max(lance_victim_exp)
+            .max(ent_exp)
+            .max(skyhook_exp)
     });
-    max_exp = max_exp.max(db_exp);
-    max_exp = max_exp.max(crate::services::pve_crab_beacons::ship_crab_link_expiry_unix(ctx, ship_id));
-    max_exp
+    db_exp.max(crate::services::pve_crab_beacons::ship_crab_link_expiry_unix(ctx, ship_id))
 }
 
 pub fn has_lance_caster_lock(ctx: &ServerContext, ship_id: i64) -> bool {
     let now_unix = ctx.now_unix_secs();
-    let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
-    let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-    st.lance_caster_lock_until.get(&(db_key, ship_id)).or_else(|| st.lance_caster_lock_until.get(&(inst_key, ship_id))).is_some_and(|&until| now_unix < until)
+    ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .lance_caster_lock_until
+            .get(&ship_id)
+            .is_some_and(|&until| now_unix < until)
+    })
 }
 
 /// Returns `Err` if `ship_id` is an anchored Upwell structure or is under a Disruptive Lance 300s caster lock, 60s victim debuff, or active Entosis Link cycle.
 pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &str) -> Result<(), BridgeRpcError> {
     crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, action)?;
     let now_unix = ctx.now_unix_secs();
-    let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
-    let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-    if let Some(&until) = st.lance_caster_lock_until.get(&(db_key, ship_id)).or_else(|| st.lance_caster_lock_until.get(&(inst_key, ship_id))) {
+    let (caster_until, victim_until, entosis_expires) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.combat_crimewatch_state
+                .lance_caster_lock_until
+                .get(&ship_id)
+                .copied(),
+            snap.combat_crimewatch_state
+                .lance_victim_debuff_until
+                .get(&ship_id)
+                .copied(),
+            snap.sov_runtime
+                .entosis_active_links
+                .get(&ship_id)
+                .map(|ent| ent.expires_unix),
+        )
+    });
+    if let Some(until) = caster_until {
         if now_unix < until {
             return Err(BridgeRpcError { code: "LanceFiringLockActive".into(), message: format!("Cannot {action} while Disruptive Lance 5-minute firing lock is active ({}s remaining)", until - now_unix), client_error: None });
         }
     }
-    if let Some(&until) = st.lance_victim_debuff_until.get(&(db_key, ship_id)).or_else(|| st.lance_victim_debuff_until.get(&(inst_key, ship_id))) {
+    if let Some(until) = victim_until {
         if now_unix < until {
             return Err(BridgeRpcError { code: "DisruptiveLanceDebuffActive".into(), message: format!("Cannot {action} while Disruptive Lance debuff is active ({}s remaining)", until - now_unix), client_error: None });
         }
     }
-    drop(st);
-    if let Some(expires_unix) = ctx.db.with_snapshot(|snap| {
-        snap.sov_runtime
-            .entosis_active_links
-            .get(&ship_id)
-            .map(|ent| ent.expires_unix)
-    }) {
+    if let Some(expires_unix) = entosis_expires {
         if now_unix < expires_unix {
             return Err(BridgeRpcError { code: "EntosisLinkActive".into(), message: format!("Cannot {action} while Entosis Link cycle is active ({}s remaining)", expires_unix - now_unix), client_error: None });
         }
@@ -349,9 +358,13 @@ pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &st
 /// Returns the incoming remote repair multiplier for `target_ship_id` (`0.50` when under a Disruptive Lance victim debuff, `1.0` otherwise).
 pub fn incoming_remote_repair_multiplier(ctx: &ServerContext, target_ship_id: i64) -> f64 {
     let now_unix = ctx.now_unix_secs();
-    let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
-    let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-    if st.lance_victim_debuff_until.get(&(db_key, target_ship_id)).or_else(|| st.lance_victim_debuff_until.get(&(inst_key, target_ship_id))).is_some_and(|&u| now_unix < u) { 0.50 } else { 1.0 }
+    let debuff_active = ctx.db.with_snapshot(|snap| {
+        snap.combat_crimewatch_state
+            .lance_victim_debuff_until
+            .get(&target_ship_id)
+            .is_some_and(|&u| now_unix < u)
+    });
+    if debuff_active { 0.50 } else { 1.0 }
 }
 
 /// Clears Entosis Link warm-up state when `ship_id` unlocks `target_id` (or all targets when `target_id_opt` is `None`).
@@ -1441,6 +1454,7 @@ pub mod tactical_test_helpers {
         Db,
     }
 
+    #[cfg(test)]
     fn scope_key(ctx: &ServerContext, scope: TacticalKeyScope) -> usize {
         match scope {
             TacticalKeyScope::Instance => ctx.instance_id as usize,
@@ -1457,16 +1471,16 @@ pub mod tactical_test_helpers {
     /// Sets the Disruptive Lance caster navigation lock expiry timestamp for `ship_id` under `scope`.
     pub fn set_lance_caster_lock_until_for_scope(
         ctx: &ServerContext,
-        scope: TacticalKeyScope,
+        _scope: TacticalKeyScope,
         ship_id: i64,
         until_unix: u64,
     ) {
-        let key = scope_key(ctx, scope);
-        ctx.tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .lance_caster_lock_until
-            .insert((key, ship_id), until_unix);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .lance_caster_lock_until
+                .insert(ship_id, until_unix);
+        });
     }
 
     /// Sets the Disruptive Lance caster navigation lock expiry timestamp for `ship_id`.
@@ -1478,47 +1492,50 @@ pub mod tactical_test_helpers {
     #[cfg(test)]
     pub(crate) fn get_lance_caster_lock_until_for_scope(
         ctx: &ServerContext,
-        scope: TacticalKeyScope,
+        _scope: TacticalKeyScope,
         ship_id: i64,
     ) -> Option<u64> {
-        let key = scope_key(ctx, scope);
-        ctx.tactical_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .lance_caster_lock_until
-            .get(&(key, ship_id))
-            .copied()
+        ctx.db.with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .lance_caster_lock_until
+                .get(&ship_id)
+                .copied()
+        })
     }
 
-    /// Clears any Disruptive Lance caster lock on `ship_id` across both DB and instance scopes.
+    /// Clears any Disruptive Lance caster lock on `ship_id`.
     pub fn clear_lance_caster_lock(ctx: &ServerContext, ship_id: i64) {
-        let db_key = db_key_of(ctx);
-        let inst_key = ctx.instance_id as usize;
-        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        st.lance_caster_lock_until.remove(&(db_key, ship_id));
-        st.lance_caster_lock_until.remove(&(inst_key, ship_id));
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .lance_caster_lock_until
+                .remove(&ship_id);
+        });
     }
 
-    /// Clears all Disruptive Lance caster navigation locks on `ctx` across DB and instance scopes.
+    /// Clears all Disruptive Lance caster navigation locks on `ctx`.
     pub fn clear_all_lance_caster_locks(ctx: &ServerContext) {
-        let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
-        ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner())
-            .lance_caster_lock_until.retain(|&(k, _), _| k != db_key && k != inst_key);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .lance_caster_lock_until
+                .clear();
+        });
     }
 
     /// Sets the Disruptive Lance victim debuff expiry timestamp for `ship_id` under `scope`.
     pub fn set_lance_victim_debuff_until_for_scope(
         ctx: &ServerContext,
-        scope: TacticalKeyScope,
+        _scope: TacticalKeyScope,
         ship_id: i64,
         until_unix: u64,
     ) {
-        let key = scope_key(ctx, scope);
-        ctx.tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .lance_victim_debuff_until
-            .insert((key, ship_id), until_unix);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .lance_victim_debuff_until
+                .insert(ship_id, until_unix);
+        });
     }
 
     /// Sets the Disruptive Lance victim debuff expiry timestamp for `ship_id`.
@@ -1530,25 +1547,25 @@ pub mod tactical_test_helpers {
     #[cfg(test)]
     pub(crate) fn get_lance_victim_debuff_until_for_scope(
         ctx: &ServerContext,
-        scope: TacticalKeyScope,
+        _scope: TacticalKeyScope,
         ship_id: i64,
     ) -> Option<u64> {
-        let key = scope_key(ctx, scope);
-        ctx.tactical_state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .lance_victim_debuff_until
-            .get(&(key, ship_id))
-            .copied()
+        ctx.db.with_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .lance_victim_debuff_until
+                .get(&ship_id)
+                .copied()
+        })
     }
 
-    /// Clears any Disruptive Lance victim debuff on `ship_id` across both DB and instance scopes.
+    /// Clears any Disruptive Lance victim debuff on `ship_id`.
     pub fn clear_lance_victim_debuff(ctx: &ServerContext, ship_id: i64) {
-        let db_key = db_key_of(ctx);
-        let inst_key = ctx.instance_id as usize;
-        let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        st.lance_victim_debuff_until.remove(&(db_key, ship_id));
-        st.lance_victim_debuff_until.remove(&(inst_key, ship_id));
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .lance_victim_debuff_until
+                .remove(&ship_id);
+        });
     }
 
     /// Sets the Target Spectrum Breaker self sensor-penalty expiry timestamp for `ship_id`.

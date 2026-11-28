@@ -911,6 +911,8 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
     db.crimewatch_timer_triggered_at.insert(char_id, [9; 5]);
     db.npc_sec_gain_intervals.insert((char_id, 5), (90, 99.0));
     db.tsb_self_penalty_until.insert(88_001, 1_700_009_500);
+    db.lance_caster_lock_until.insert(88_002, 1_700_009_600);
+    db.lance_victim_debuff_until.insert(88_003, 1_700_009_700);
 
     let mut ram = PersistedCombatCrimewatchState::default();
     ram.drone_settings.insert(other_id, (false, false));
@@ -932,6 +934,8 @@ fn with_mut_combat_runtime_preserves_db_owned_migrated_fields_no_clobber() {
     assert_eq!(merged.crimewatch_timer_triggered_at, db.crimewatch_timer_triggered_at);
     assert_eq!(merged.npc_sec_gain_intervals, db.npc_sec_gain_intervals);
     assert_eq!(merged.tsb_self_penalty_until, db.tsb_self_penalty_until);
+    assert_eq!(merged.lance_caster_lock_until, db.lance_caster_lock_until);
+    assert_eq!(merged.lance_victim_debuff_until, db.lance_victim_debuff_until);
 }
 
 #[test]

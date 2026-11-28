@@ -1011,6 +1011,12 @@ pub struct PersistedCombatCrimewatchState {
     /// Target Spectrum Breaker self scan-resolution/sensor-strength penalty expiry timestamps (Unix secs) keyed by `ship_id` (`#1541` Track G2b-3).
     #[serde(default)]
     pub tsb_self_penalty_until: HashMap<i64, u64>,
+    /// Disruptive Lance and superweapon caster navigation lock expiry timestamps (Unix secs) keyed by `ship_id` (`#1541` Track G2b-4).
+    #[serde(default)]
+    pub lance_caster_lock_until: HashMap<i64, u64>,
+    /// Disruptive Lance victim debuff expiry timestamps (Unix secs) keyed by `ship_id` (`#1541` Track G2b-4).
+    #[serde(default)]
+    pub lance_victim_debuff_until: HashMap<i64, u64>,
     #[serde(default)]
     pub recently_destroyed_item_ids: VecDeque<i64>,
     #[serde(default)]

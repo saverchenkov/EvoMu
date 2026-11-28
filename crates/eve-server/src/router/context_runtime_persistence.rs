@@ -93,18 +93,8 @@ impl PersistedTacticalModulesPayload {
                 .filter(|(&(k, _), _)| keep_key(k))
                 .map(|(&(k, sid), v)| ((tag_of(k), sid), v.clone()))
                 .collect(),
-            lance_caster_lock_until: st
-                .lance_caster_lock_until
-                .iter()
-                .filter(|(&(k, _), _)| keep_key(k))
-                .map(|(&(k, sid), &v)| ((tag_of(k), sid), v))
-                .collect(),
-            lance_victim_debuff_until: st
-                .lance_victim_debuff_until
-                .iter()
-                .filter(|(&(k, _), _)| keep_key(k))
-                .map(|(&(k, sid), &v)| ((tag_of(k), sid), v))
-                .collect(),
+            lance_caster_lock_until: Vec::new(),
+            lance_victim_debuff_until: Vec::new(),
             pending_wubble_probes: st
                 .pending_wubble_probes
                 .iter()
@@ -138,8 +128,6 @@ impl PersistedTacticalModulesPayload {
                 .collect(),
         };
         payload.remote_assistance.sort_by_key(|(k, _)| *k);
-        payload.lance_caster_lock_until.sort_by_key(|(k, _)| *k);
-        payload.lance_victim_debuff_until.sort_by_key(|(k, _)| *k);
         payload.active_wubble_debuffs.sort_by_key(|(k, _)| *k);
         payload.active_interdiction_probes.sort_by_key(|(k, _)| *k);
         payload.launcher_last_fire.sort_by_key(|(k, _)| *k);
@@ -165,20 +153,10 @@ impl PersistedTacticalModulesPayload {
         st: &mut TacticalModulesState,
         cur_db_key: usize,
         cur_inst_key: usize,
-    ) -> Vec<(i64, u64)> {
+    ) -> LegacyTacticalDurableEntries {
         let untag = |tag: u8| -> usize { if tag == 1 { cur_inst_key } else { cur_db_key } };
         st.remote_assistance = self
             .remote_assistance
-            .into_iter()
-            .map(|((tag, sid), v)| ((untag(tag), sid), v))
-            .collect();
-        st.lance_caster_lock_until = self
-            .lance_caster_lock_until
-            .into_iter()
-            .map(|((tag, sid), v)| ((untag(tag), sid), v))
-            .collect();
-        st.lance_victim_debuff_until = self
-            .lance_victim_debuff_until
             .into_iter()
             .map(|((tag, sid), v)| ((untag(tag), sid), v))
             .collect();
@@ -207,48 +185,89 @@ impl PersistedTacticalModulesPayload {
             .into_iter()
             .map(|((tag, sys), v)| ((untag(tag), sys), v))
             .collect();
-        self.tsb_self_penalty_until
-            .into_iter()
-            .map(|((_, sid), v)| (sid, v))
-            .collect()
+        let mut legacy = LegacyTacticalDurableEntries::default();
+        for ((_, sid), v) in self.lance_caster_lock_until {
+            collect_max_u64(&mut legacy.lance_caster_lock_until, sid, v);
+        }
+        for ((_, sid), v) in self.lance_victim_debuff_until {
+            collect_max_u64(&mut legacy.lance_victim_debuff_until, sid, v);
+        }
+        for ((_, sid), v) in self.tsb_self_penalty_until {
+            collect_max_u64(&mut legacy.tsb_self_penalty_until, sid, v);
+        }
+        legacy
     }
 }
 
-/// One-way legacy migration (`#1541` Track G2b-3): merges legacy TSB penalty rows/payload entries
-/// into `WorldStateSnapshot.combat_crimewatch_state.tsb_self_penalty_until` via `max(existing, v)`,
-/// strictly outside any `ctx.tactical_state` lock (`RANK_WORLD_INNER` 40 < `RANK_LEAF` 60) and
-/// performing zero DB writes when empty or already dominated.
-fn merge_legacy_tsb_self_penalty_into_db(
+#[derive(Default)]
+struct LegacyTacticalDurableEntries {
+    lance_caster_lock_until: HashMap<i64, u64>,
+    lance_victim_debuff_until: HashMap<i64, u64>,
+    tsb_self_penalty_until: HashMap<i64, u64>,
+}
+
+impl LegacyTacticalDurableEntries {
+    fn is_empty(&self) -> bool {
+        self.lance_caster_lock_until.is_empty()
+            && self.lance_victim_debuff_until.is_empty()
+            && self.tsb_self_penalty_until.is_empty()
+    }
+}
+
+fn collect_max_u64(map: &mut HashMap<i64, u64>, ship_id: i64, until_unix: u64) {
+    map.entry(ship_id)
+        .and_modify(|cur| {
+            if until_unix > *cur {
+                *cur = until_unix;
+            }
+        })
+        .or_insert(until_unix);
+}
+
+fn map_has_dominated_upgrade(existing: &HashMap<i64, u64>, incoming: &HashMap<i64, u64>) -> bool {
+    incoming
+        .iter()
+        .any(|(&sid, &v)| existing.get(&sid).is_none_or(|&cur| v > cur))
+}
+
+fn merge_max_u64_map(dst: &mut HashMap<i64, u64>, src: HashMap<i64, u64>) {
+    for (ship_id, until_unix) in src {
+        collect_max_u64(dst, ship_id, until_unix);
+    }
+}
+
+/// One-way legacy migration (`#1541` Track G2b-3/G2b-4): merges legacy durable tactical rows
+/// (`lcl|...`, `lvd|...`, `tsb|...`) and legacy payload entries into `WorldStateSnapshot.combat_crimewatch_state`
+/// via `max(existing, v)`, strictly outside any `ctx.tactical_state` lock (`RANK_WORLD_INNER` 40 < `RANK_LEAF` 60)
+/// and performing zero DB writes when empty or already dominated.
+fn merge_legacy_tactical_durable_into_db(
     db: &eve_db::WorldRepository,
-    entries: Vec<(i64, u64)>,
+    entries: LegacyTacticalDurableEntries,
     can_write_db: bool,
 ) {
     if entries.is_empty() || !can_write_db {
         return;
     }
     let needs_write = db.with_snapshot(|snap| {
-        let existing = &snap.combat_crimewatch_state.tsb_self_penalty_until;
-        entries
-            .iter()
-            .any(|&(sid, v)| existing.get(&sid).is_none_or(|&cur| v > cur))
+        let cw = &snap.combat_crimewatch_state;
+        map_has_dominated_upgrade(&cw.lance_caster_lock_until, &entries.lance_caster_lock_until)
+            || map_has_dominated_upgrade(
+                &cw.lance_victim_debuff_until,
+                &entries.lance_victim_debuff_until,
+            )
+            || map_has_dominated_upgrade(&cw.tsb_self_penalty_until, &entries.tsb_self_penalty_until)
     });
     if !needs_write {
         return;
     }
     db.with_mut_snapshot(|snap| {
-        let map = &mut snap
-            .combat_crimewatch_state
-            .as_inner_mut()
-            .tsb_self_penalty_until;
-        for (ship_id, until_unix) in entries {
-            map.entry(ship_id)
-                .and_modify(|cur| {
-                    if until_unix > *cur {
-                        *cur = until_unix;
-                    }
-                })
-                .or_insert(until_unix);
-        }
+        let cw = snap.combat_crimewatch_state.as_inner_mut();
+        merge_max_u64_map(&mut cw.lance_caster_lock_until, entries.lance_caster_lock_until);
+        merge_max_u64_map(
+            &mut cw.lance_victim_debuff_until,
+            entries.lance_victim_debuff_until,
+        );
+        merge_max_u64_map(&mut cw.tsb_self_penalty_until, entries.tsb_self_penalty_until);
     });
 }
 
@@ -558,12 +577,12 @@ impl PersistedServerRuntimeState {
 
         let cur_db_key = db_ptr_key(&ctx.db);
         let cur_inst_key = ctx.instance_id as usize;
-        let legacy_tsb = {
+        let legacy_durable = {
             let mut tac = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
             self.tactical_state
                 .apply_to_state(&mut tac, cur_db_key, cur_inst_key)
         };
-        merge_legacy_tsb_self_penalty_into_db(&ctx.db, legacy_tsb, can_write_db);
+        merge_legacy_tactical_durable_into_db(&ctx.db, legacy_durable, can_write_db);
 
         self.fleet_extras_runtime.apply_to_ctx(ctx);
         self.social_extras_runtime.apply_to_ctx(ctx);
@@ -634,34 +653,13 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let (sim_times_raw, durable_tac_raw) = {
+    let sim_times_raw = {
         let tac = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-        let sim: Vec<_> = tac
-            .system_sim_time_s
+        tac.system_sim_time_s
             .iter()
             .filter(|(&(k, _), _)| keep_tac_key(k))
             .map(|(&(k, sys), &val)| ((tac_tag(k), sys), val))
-            .collect();
-        let mut dur = Vec::new();
-        for (&(k, sid), &v) in &tac.lance_caster_lock_until {
-            if keep_tac_key(k) {
-                let tag = tac_tag(k);
-                dur.push((
-                    format!("lcl|{tag}|{sid}"),
-                    DurableTacticalEntry::LanceCasterLockUntil(tag, sid, v),
-                ));
-            }
-        }
-        for (&(k, sid), &v) in &tac.lance_victim_debuff_until {
-            if keep_tac_key(k) {
-                let tag = tac_tag(k);
-                dur.push((
-                    format!("lvd|{tag}|{sid}"),
-                    DurableTacticalEntry::LanceVictimDebuffUntil(tag, sid, v),
-                ));
-            }
-        }
-        (sim, dur)
+            .collect::<Vec<_>>()
     };
     let fleet_extras = PersistedFleetExtrasPayload::from_ctx(ctx);
     let social_extras = PersistedSocialExtrasRuntimePayload::from_ctx(ctx);
@@ -723,10 +721,7 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         push_checked_row(&mut sim_rows, *sys_id, tag.to_string(), &((*tag, *sys_id), *sim_s));
     }
 
-    let mut durable_tac_rows = Vec::with_capacity(durable_tac_raw.len());
-    for (key, entry) in &durable_tac_raw {
-        push_checked_row(&mut durable_tac_rows, CLUSTER_SYSTEM_ID, key.clone(), entry);
-    }
+    let durable_tac_rows = Vec::new();
 
     let mut fleet_rows = Vec::new();
     if !fleet_extras.is_empty() {
@@ -860,30 +855,28 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext, can_write_db: bool) -> Checkpo
             cur_db_key
         }
     };
-    let mut legacy_tsb = Vec::new();
+    let mut legacy_durable = LegacyTacticalDurableEntries::default();
+    for (_, _, entry) in durable_tac {
+        match entry {
+            DurableTacticalEntry::LanceCasterLockUntil(_tag, sid, v) => {
+                collect_max_u64(&mut legacy_durable.lance_caster_lock_until, sid, v);
+            }
+            DurableTacticalEntry::LanceVictimDebuffUntil(_tag, sid, v) => {
+                collect_max_u64(&mut legacy_durable.lance_victim_debuff_until, sid, v);
+            }
+            DurableTacticalEntry::TsbSelfPenaltyUntil(_tag, sid, v) => {
+                collect_max_u64(&mut legacy_durable.tsb_self_penalty_until, sid, v);
+            }
+        }
+    }
     {
         let mut tac = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        tac.lance_caster_lock_until.clear();
-        tac.lance_victim_debuff_until.clear();
         tac.system_sim_time_s.clear();
         for (_, _, ((tag, sys), sim_s)) in sim_times {
             tac.system_sim_time_s.insert((untag(tag), sys), sim_s);
         }
-        for (_, _, entry) in durable_tac {
-            match entry {
-                DurableTacticalEntry::LanceCasterLockUntil(tag, sid, v) => {
-                    tac.lance_caster_lock_until.insert((untag(tag), sid), v);
-                }
-                DurableTacticalEntry::LanceVictimDebuffUntil(tag, sid, v) => {
-                    tac.lance_victim_debuff_until.insert((untag(tag), sid), v);
-                }
-                DurableTacticalEntry::TsbSelfPenaltyUntil(_tag, sid, v) => {
-                    legacy_tsb.push((sid, v));
-                }
-            }
-        }
     }
-    merge_legacy_tsb_self_penalty_into_db(&ctx.db, legacy_tsb, can_write_db);
+    merge_legacy_tactical_durable_into_db(&ctx.db, legacy_durable, can_write_db);
 
     if let Some((_, _, payload)) = fleet_extras.into_iter().next() {
         payload.apply_to_ctx(ctx);
@@ -1187,9 +1180,6 @@ mod tests {
             }],
         );
         st.remote_assistance.insert((db_k, 10), Vec::new());
-        st.lance_caster_lock_until.insert((inst_k, 30), 100);
-        st.lance_caster_lock_until.insert((db_k, 40), 200);
-        st.lance_victim_debuff_until.insert((db_k, 50), 300);
         st.pending_wubble_probes.push((
             inst_k,
             PendingWubbleProbe {
@@ -1235,20 +1225,15 @@ mod tests {
         // Tag `0` (`db_k`) sorts before tag `1` (`inst_k`)
         assert_eq!(payload.remote_assistance[0].0, (0, 10));
         assert_eq!(payload.remote_assistance[1].0, (1, 20));
-        assert_eq!(payload.lance_caster_lock_until[0].0, (0, 40));
-        assert_eq!(payload.lance_caster_lock_until[1].0, (1, 30));
 
         // Remap into a fresh `new_db_k` and `new_inst_k`
         let new_db_k = 8_888_usize;
         let new_inst_k = 9_999_usize;
         let mut restored = TacticalModulesState::default();
-        let legacy_tsb = payload.apply_to_state(&mut restored, new_db_k, new_inst_k);
-        assert!(legacy_tsb.is_empty());
+        let legacy_durable = payload.apply_to_state(&mut restored, new_db_k, new_inst_k);
+        assert!(legacy_durable.is_empty());
         assert!(restored.remote_assistance.contains_key(&(new_db_k, 10)));
         assert!(restored.remote_assistance.contains_key(&(new_inst_k, 20)));
-        assert_eq!(restored.lance_caster_lock_until[&(new_db_k, 40)], 200);
-        assert_eq!(restored.lance_caster_lock_until[&(new_inst_k, 30)], 100);
-        assert_eq!(restored.lance_victim_debuff_until[&(new_db_k, 50)], 300);
         assert_eq!(restored.pending_wubble_probes[0].0, new_inst_k);
         assert!(restored.active_wubble_debuffs.contains_key(&(new_db_k, 100)));
         assert!(restored.active_interdiction_probes.contains_key(&(new_db_k, 130)));
@@ -1457,15 +1442,16 @@ mod tests {
         let empty_p = PersistedTacticalModulesPayload::from_state(&st, 200);
         assert!(empty_p.is_empty());
 
-        st.lance_caster_lock_until.insert((100, 5001), 99);
-        st.lance_caster_lock_until.insert((200, 5002), 88);
+        st.system_sim_time_s.insert((100, 30_000_142), 99.0);
+        st.system_sim_time_s.insert((200, 30_000_144), 88.0);
         let non_empty_p = PersistedTacticalModulesPayload::from_state(&st, 200);
         assert!(!non_empty_p.is_empty());
 
         let mut restored = TacticalModulesState::default();
-        non_empty_p.apply_to_state(&mut restored, 300, 400);
-        assert_eq!(restored.lance_caster_lock_until.get(&(300, 5001)), Some(&99));
-        assert_eq!(restored.lance_caster_lock_until.get(&(400, 5002)), Some(&88));
+        let legacy_durable = non_empty_p.apply_to_state(&mut restored, 300, 400);
+        assert!(legacy_durable.is_empty());
+        assert_eq!(restored.system_sim_time_s.get(&(300, 30_000_142)), Some(&99.0));
+        assert_eq!(restored.system_sim_time_s.get(&(400, 30_000_144)), Some(&88.0));
 
         // session_transition helpers: clear_session_character_state, apply_session_from_character, build_session_state_keyval, spec builders
         let ctx = ServerContext::new();
@@ -1698,17 +1684,16 @@ mod tests {
             load_checkpoints_into_ctx(&ctx, true),
             CheckpointLoadOutcome::Loaded
         ));
-        let db_k = db_ptr_key(&ctx.db);
-        assert_eq!(
-            ctx.tactical_state
-                .read()
-                .unwrap()
-                .lance_caster_lock_until
-                .get(&(db_k, 500)),
-            Some(&1_800_000_999)
-        );
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(
+                snap.combat_crimewatch_state
+                    .lance_caster_lock_until
+                    .get(&500),
+                Some(&1_800_000_999)
+            );
+        });
 
-        // Re-persisting drops the obsolete `cvb|...` rows while keeping valid durable entries.
+        // Re-persisting drops the obsolete `cvb|...` and migrated `lcl|...` rows while keeping DB-owned state.
         ctx.persist_server_runtime_to_db();
         let remaining_keys: Vec<String> = ctx
             .db
@@ -1719,7 +1704,18 @@ mod tests {
             .into_iter()
             .map(|(_, k, _)| k)
             .collect();
-        assert_eq!(remaining_keys, vec!["lcl|0|500".to_string()]);
+        assert!(
+            remaining_keys.is_empty(),
+            "expected all legacy KIND_TACTICAL_DURABLE rows to be pruned, got {remaining_keys:?}"
+        );
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(
+                snap.combat_crimewatch_state
+                    .lance_caster_lock_until
+                    .get(&500),
+                Some(&1_800_000_999)
+            );
+        });
 
         // Genuinely corrupt non-`cvb|` row still produces CheckpointLoadOutcome::Error.
         ctx.db
@@ -1740,7 +1736,7 @@ mod tests {
         ));
 
         // 2. Legacy PersistedServerRuntimeState / PersistedTacticalModulesPayload JSON carrying
-        //    the removed field deserializes cleanly and hydrates remaining fields.
+        //    the removed field deserializes cleanly and hydrates/migrates remaining fields.
         let ctx_legacy = test_ctx();
         let legacy_field = ["clone_vat_bay", "activated_ships"].join("_");
         let legacy_payload = serde_json::json!({
@@ -1767,36 +1763,30 @@ mod tests {
             snap.cluster_and_runtime.server_runtime_json = Some(legacy_payload.to_string());
         });
         ctx_legacy.hydrate_server_runtime_from_db();
-        assert_eq!(
-            ctx_legacy
-                .tactical_state
-                .read()
-                .unwrap()
-                .lance_caster_lock_until
-                .get(&(db_ptr_key(&ctx_legacy.db), 500)),
-            Some(&1_800_000_777)
-        );
-        assert_eq!(ctx_legacy.map_landmarks.read().unwrap().len(), 1);
         ctx_legacy.db.with_snapshot(|snap| {
+            assert_eq!(
+                snap.combat_crimewatch_state
+                    .lance_caster_lock_until
+                    .get(&500),
+                Some(&1_800_000_777)
+            );
             assert!(snap.sov_runtime.entosis_active_links.is_empty());
             assert!(snap.sov_runtime.entosis_target_cycles.is_empty());
         });
+        assert_eq!(ctx_legacy.map_landmarks.read().unwrap().len(), 1);
     }
 
     #[test]
-    fn legacy_tsb_checkpoint_and_payload_migrate_with_max_and_clean_hydrate_is_zero_write() {
-        // 1. Legacy `tsb|...` checkpoint rows migrate via `max(existing, v)` into
-        //    `combat_crimewatch_state.tsb_self_penalty_until`, outside any `tactical_state` lock.
+    fn legacy_tsb_and_lance_checkpoints_and_payload_migrate_with_max_and_clean_hydrate_is_zero_write() {
+        // 1. Legacy `tsb|...`, `lcl|...`, and `lvd|...` checkpoint rows migrate via `max(existing, v)`
+        //    into `combat_crimewatch_state`, strictly outside any `tactical_state` lock.
         let ctx = test_ctx();
         ctx.db.with_mut_snapshot(|snap| {
-            snap.combat_crimewatch_state
-                .as_inner_mut()
-                .tsb_self_penalty_until
-                .insert(110, 700);
-            snap.combat_crimewatch_state
-                .as_inner_mut()
-                .tsb_self_penalty_until
-                .insert(111, 200);
+            let cw = snap.combat_crimewatch_state.as_inner_mut();
+            cw.tsb_self_penalty_until.insert(110, 700);
+            cw.tsb_self_penalty_until.insert(111, 200);
+            cw.lance_caster_lock_until.insert(501, 1_800_001_000);
+            cw.lance_victim_debuff_until.insert(601, 1_800_002_000);
         });
         ctx.db
             .with_sqlite_conn(|conn| -> Result<(), String> {
@@ -1839,16 +1829,60 @@ mod tests {
                     "lcl|0|500",
                     &DurableTacticalEntry::LanceCasterLockUntil(0, 500, 1_800_000_888),
                     1_800_000_000,
+                )?;
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "lcl|1|500",
+                    &DurableTacticalEntry::LanceCasterLockUntil(1, 500, 1_800_000_999),
+                    1_800_000_000,
+                )?;
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "lcl|0|501",
+                    &DurableTacticalEntry::LanceCasterLockUntil(0, 501, 1_800_000_500),
+                    1_800_000_000,
+                )?;
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "lvd|0|600",
+                    &DurableTacticalEntry::LanceVictimDebuffUntil(0, 600, 1_800_001_555),
+                    1_800_000_000,
+                )?;
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "lvd|1|600",
+                    &DurableTacticalEntry::LanceVictimDebuffUntil(1, 600, 1_800_001_444),
+                    1_800_000_000,
+                )?;
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    CLUSTER_SYSTEM_ID,
+                    KIND_TACTICAL_DURABLE,
+                    "lvd|0|601",
+                    &DurableTacticalEntry::LanceVictimDebuffUntil(0, 601, 1_800_001_000),
+                    1_800_000_000,
                 )
             })
-            .expect("seed legacy tsb checkpoints");
+            .expect("seed legacy tactical durable checkpoints");
 
         ctx.hydrate_server_runtime_from_db();
         ctx.db.with_snapshot(|snap| {
-            let map = &snap.combat_crimewatch_state.tsb_self_penalty_until;
-            assert_eq!(map.get(&110), Some(&700), "existing higher timestamp must win");
-            assert_eq!(map.get(&111), Some(&300), "legacy higher timestamp must upgrade existing");
-            assert_eq!(map.get(&112), Some(&600), "duplicate legacy tags must take max");
+            let cw = &snap.combat_crimewatch_state;
+            assert_eq!(cw.tsb_self_penalty_until.get(&110), Some(&700), "existing higher timestamp must win");
+            assert_eq!(cw.tsb_self_penalty_until.get(&111), Some(&300), "legacy higher timestamp must upgrade existing");
+            assert_eq!(cw.tsb_self_penalty_until.get(&112), Some(&600), "duplicate legacy tags must take max");
+            assert_eq!(cw.lance_caster_lock_until.get(&500), Some(&1_800_000_999));
+            assert_eq!(cw.lance_caster_lock_until.get(&501), Some(&1_800_001_000));
+            assert_eq!(cw.lance_victim_debuff_until.get(&600), Some(&1_800_001_555));
+            assert_eq!(cw.lance_victim_debuff_until.get(&601), Some(&1_800_002_000));
         });
 
         // Re-hydrating when already dominated performs ZERO DB writes.
@@ -1858,7 +1892,7 @@ mod tests {
         assert_eq!(ctx.db.tx_commit_count(), tx_before_noop);
         assert_eq!(ctx.db.state_epoch(), epoch_before_noop);
 
-        // Re-persisting drops legacy `tsb|...` checkpoint rows while preserving DB-owned state.
+        // Re-persisting drops all legacy `tsb|...`, `lcl|...`, and `lvd|...` checkpoint rows while preserving DB-owned state.
         ctx.persist_server_runtime_to_db();
         let remaining_keys: Vec<String> = ctx
             .db
@@ -1869,15 +1903,15 @@ mod tests {
             .into_iter()
             .map(|(_, k, _)| k)
             .collect();
-        assert_eq!(remaining_keys, vec!["lcl|0|500".to_string()]);
+        assert!(remaining_keys.is_empty());
         ctx.db.with_snapshot(|snap| {
-            assert_eq!(
-                snap.combat_crimewatch_state.tsb_self_penalty_until.get(&112),
-                Some(&600)
-            );
+            let cw = &snap.combat_crimewatch_state;
+            assert_eq!(cw.tsb_self_penalty_until.get(&112), Some(&600));
+            assert_eq!(cw.lance_caster_lock_until.get(&500), Some(&1_800_000_999));
+            assert_eq!(cw.lance_victim_debuff_until.get(&600), Some(&1_800_001_555));
         });
 
-        // Clean hydrate with non-TSB checkpoints performs ZERO DB writes.
+        // Clean hydrate with pruned checkpoints performs ZERO DB writes.
         let tx_clean = ctx.db.tx_commit_count();
         let epoch_clean = ctx.db.state_epoch();
         ctx.hydrate_server_runtime_from_db();
@@ -1892,22 +1926,22 @@ mod tests {
         assert_eq!(ctx_empty.db.tx_commit_count(), tx_empty);
         assert_eq!(ctx_empty.db.state_epoch(), epoch_empty);
 
-        // 3. Legacy `PersistedTacticalModulesPayload` JSON carrying `tsb_self_penalty_until`
-        //    is non-empty and migrates via `max(existing, v)` without deadlock.
+        // 3. Legacy `PersistedTacticalModulesPayload` JSON carrying `tsb_self_penalty_until`,
+        //    `lance_caster_lock_until`, and `lance_victim_debuff_until` is non-empty and
+        //    migrates via `max(existing, v)` without deadlock.
         let ctx_json = test_ctx();
         ctx_json.db.with_mut_snapshot(|snap| {
-            snap.combat_crimewatch_state
-                .as_inner_mut()
-                .tsb_self_penalty_until
-                .insert(210, 750);
-            snap.combat_crimewatch_state
-                .as_inner_mut()
-                .tsb_self_penalty_until
-                .insert(211, 150);
+            let cw = snap.combat_crimewatch_state.as_inner_mut();
+            cw.tsb_self_penalty_until.insert(210, 750);
+            cw.tsb_self_penalty_until.insert(211, 150);
+            cw.lance_caster_lock_until.insert(220, 850);
+            cw.lance_victim_debuff_until.insert(230, 950);
         });
         let legacy_json = serde_json::json!({
             "tactical_state": {
-                "tsb_self_penalty_until": [[[0, 210], 400], [[1, 211], 650], [[0, 212], 500]]
+                "tsb_self_penalty_until": [[[0, 210], 400], [[1, 211], 650], [[0, 212], 500]],
+                "lance_caster_lock_until": [[[0, 220], 400], [[1, 221], 900], [[0, 221], 800]],
+                "lance_victim_debuff_until": [[[0, 230], 500], [[1, 231], 910], [[0, 231], 920]]
             }
         });
         let parsed_legacy: PersistedServerRuntimeState =
@@ -1919,10 +1953,14 @@ mod tests {
         });
         ctx_json.hydrate_server_runtime_from_db();
         ctx_json.db.with_snapshot(|snap| {
-            let map = &snap.combat_crimewatch_state.tsb_self_penalty_until;
-            assert_eq!(map.get(&210), Some(&750));
-            assert_eq!(map.get(&211), Some(&650));
-            assert_eq!(map.get(&212), Some(&500));
+            let cw = &snap.combat_crimewatch_state;
+            assert_eq!(cw.tsb_self_penalty_until.get(&210), Some(&750));
+            assert_eq!(cw.tsb_self_penalty_until.get(&211), Some(&650));
+            assert_eq!(cw.tsb_self_penalty_until.get(&212), Some(&500));
+            assert_eq!(cw.lance_caster_lock_until.get(&220), Some(&850));
+            assert_eq!(cw.lance_caster_lock_until.get(&221), Some(&900));
+            assert_eq!(cw.lance_victim_debuff_until.get(&230), Some(&950));
+            assert_eq!(cw.lance_victim_debuff_until.get(&231), Some(&920));
             assert!(snap.cluster_and_runtime.server_runtime_json.is_none());
         });
         let json_keys: Vec<String> = ctx_json
@@ -1930,30 +1968,48 @@ mod tests {
             .with_sqlite_conn(|conn| {
                 load_all_checkpoints_for_kind::<serde_json::Value>(conn, KIND_TACTICAL_DURABLE)
             })
-            .expect("check no tsb checkpoints emitted")
+            .expect("check no tactical durable checkpoints emitted")
             .into_iter()
             .map(|(_, k, _)| k)
             .collect();
         assert!(json_keys.is_empty());
 
-        // 4. Write-lock guard: calling legacy TSB migration / apply_to_ctx while holding
+        // 4. Write-lock guard: calling legacy migration / apply_to_ctx while holding
         //    `with_mut_snapshot` must skip DB writes without deadlocking.
         let ctx_locked = test_ctx();
         let legacy_locked: PersistedServerRuntimeState = serde_json::from_value(serde_json::json!({
             "tactical_state": {
-                "tsb_self_penalty_until": [[[0, 333], 999]]
+                "tsb_self_penalty_until": [[[0, 333], 999]],
+                "lance_caster_lock_until": [[[0, 334], 999]],
+                "lance_victim_debuff_until": [[[0, 335], 999]]
             }
         }))
         .expect("parse legacy locked payload");
         ctx_locked.db.with_mut_snapshot(|snap| {
             let can_write = !ctx_locked.db.is_write_locked_by_current_thread();
             assert!(!can_write);
-            merge_legacy_tsb_self_penalty_into_db(&ctx_locked.db, vec![(333, 999)], can_write);
+            merge_legacy_tactical_durable_into_db(
+                &ctx_locked.db,
+                LegacyTacticalDurableEntries {
+                    lance_caster_lock_until: HashMap::from([(334, 999)]),
+                    lance_victim_debuff_until: HashMap::from([(335, 999)]),
+                    tsb_self_penalty_until: HashMap::from([(333, 999)]),
+                },
+                can_write,
+            );
             legacy_locked.apply_to_ctx(&ctx_locked, can_write);
             assert!(!snap
                 .combat_crimewatch_state
                 .tsb_self_penalty_until
                 .contains_key(&333));
+            assert!(!snap
+                .combat_crimewatch_state
+                .lance_caster_lock_until
+                .contains_key(&334));
+            assert!(!snap
+                .combat_crimewatch_state
+                .lance_victim_debuff_until
+                .contains_key(&335));
         });
     }
 }

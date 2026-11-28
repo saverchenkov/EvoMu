@@ -798,15 +798,13 @@ async fn activate_superweapon_with_args_inner(
 
         // Re-read wall clock after async prechecks so `lance_caster_lock_until` is never stale (`P2-R8-04`).
         let now_unix = ctx.now_unix_secs();
-        let db_key = db_key_of(ctx);
         let new_lock_until = now_unix + caster_lock_secs;
-        let prev_lance_lock = {
-            let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-            if st
-                .lance_caster_lock_until
-                .get(&(db_key, ship_id))
-                .is_some_and(|&until| now_unix < until)
-            {
+        let prev_lance_lock = ctx.db.try_with_mut_snapshot(|snap| {
+            let map = &mut snap
+                .combat_crimewatch_state
+                .as_inner_mut()
+                .lance_caster_lock_until;
+            if map.get(&ship_id).is_some_and(|&until| now_unix < until) {
                 let msg = format!(
                     "Disruptive Lance {module_id} on ship {ship_id} is already in reactivation delay"
                 );
@@ -816,17 +814,25 @@ async fn activate_superweapon_with_args_inner(
                     eve_proto::ClientError::CustomInfo(msg),
                 ));
             }
-            st.lance_caster_lock_until.insert((db_key, ship_id), new_lock_until)
-        };
+            Ok(map.insert(ship_id, new_lock_until))
+        })?;
         let restore_lance_lock = || {
-            let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-            if st.lance_caster_lock_until.get(&(db_key, ship_id)) == Some(&new_lock_until) {
-                if let Some(prev) = prev_lance_lock {
-                    st.lance_caster_lock_until.insert((db_key, ship_id), prev);
+            let _ = ctx.db.try_with_mut_snapshot(|snap| {
+                let map = &mut snap
+                    .combat_crimewatch_state
+                    .as_inner_mut()
+                    .lance_caster_lock_until;
+                if map.get(&ship_id) == Some(&new_lock_until) {
+                    if let Some(prev) = prev_lance_lock {
+                        map.insert(ship_id, prev);
+                    } else {
+                        map.remove(&ship_id);
+                    }
+                    Ok(())
                 } else {
-                    st.lance_caster_lock_until.remove(&(db_key, ship_id));
+                    Err(())
                 }
-            }
+            });
         };
 
         let (consumed_fuel, _consumed_stacks, fuel_reserved, fuel_diffs, fuel_guard) =
@@ -888,14 +894,15 @@ async fn activate_superweapon_with_args_inner(
         };
         emit_superweapon_fuel_item_diffs(ctx, char_id, &fuel_diffs, fuel_guard);
         let now_unix = ctx.now_unix_secs();
-        {
-            let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-            st.lance_caster_lock_until
-                .insert((db_key, ship_id), now_unix + caster_lock_secs as u64);
+        ctx.db.with_mut_snapshot(|snap| {
+            let cw = snap.combat_crimewatch_state.as_inner_mut();
+            cw.lance_caster_lock_until
+                .insert(ship_id, now_unix + caster_lock_secs);
             for &vid in &hit_targets {
-                st.lance_victim_debuff_until.insert((db_key, vid), now_unix + victim_debuff_secs);
+                cw.lance_victim_debuff_until
+                    .insert(vid, now_unix + victim_debuff_secs);
             }
-        }
+        });
         ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).weapon_timer_until_unix = now_unix + 60;
         ctx.record_module_reactivation_delay(ship_id, module_id, caster_lock_secs as f64);
         ctx.persist_server_runtime_to_db();
@@ -1179,11 +1186,12 @@ async fn activate_superweapon_with_args_inner(
         }
         emit_superweapon_fuel_item_diffs(ctx, char_id, &fuel_diffs, fuel_guard);
         let now_unix = ctx.now_unix_secs();
-        ctx.tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .lance_caster_lock_until
-            .insert((db_key_of(ctx), ship_id), now_unix + lock_secs);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .lance_caster_lock_until
+                .insert(ship_id, now_unix + lock_secs);
+        });
     } else if let Some(tb) = single_target_ball {
         // Validate & commit 30s immobilize cycle, cap deduction, and protection break atomically
         // BEFORE applying Doomsday damage or locking navigation (`#1486` BF-02 / F-05).
@@ -1230,11 +1238,12 @@ async fn activate_superweapon_with_args_inner(
             };
         emit_superweapon_fuel_item_diffs(ctx, char_id, &fuel_diffs, fuel_guard);
         let now_unix = ctx.now_unix_secs();
-        ctx.tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .lance_caster_lock_until
-            .insert((db_key_of(ctx), ship_id), now_unix + lock_secs);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.combat_crimewatch_state
+                .as_inner_mut()
+                .lance_caster_lock_until
+                .insert(ship_id, now_unix + lock_secs);
+        });
         crate::services::combat_crimewatch::record_killmail_assist_action(
             ctx,
             tb.id,
