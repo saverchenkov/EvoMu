@@ -181,14 +181,18 @@ pub(super) async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
             continue;
         };
 
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let target_pos = sys_handle
-            .get_ball_snapshot(target_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|(_, b)| b.position)
-            .unwrap_or(fallback_pos);
+        let sys_handle_opt = ctx.systems.get_handle(sys_id);
+        let target_pos = if let Some(ref sys_handle) = sys_handle_opt {
+            sys_handle
+                .get_ball_snapshot(target_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.position)
+                .unwrap_or(fallback_pos)
+        } else {
+            fallback_pos
+        };
 
         let all_links: Vec<(i64, i64, i64, i64, f64, u64)> = ctx.db.with_snapshot(|snap| {
             snap.sov_runtime
@@ -202,12 +206,16 @@ pub(super) async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
         });
         let mut valid_links = Vec::new();
         for (sid, cid, side, mid, cdur, exp) in all_links {
-            let in_range = sys_handle
-                .get_ball_snapshot(sid)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|(_, sb)| sb.position.distance(target_pos) <= ENTOSIS_MAX_RANGE_M);
+            let in_range = if let Some(ref sys_handle) = sys_handle_opt {
+                sys_handle
+                    .get_ball_snapshot(sid)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|(_, sb)| sb.position.distance(target_pos) <= ENTOSIS_MAX_RANGE_M)
+            } else {
+                false
+            };
             if !in_range {
                 remove_ship_entosis_link(ctx, sid);
                 if sid == ship_id {
@@ -365,7 +373,9 @@ pub(super) async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
                 },
             );
         } else {
-            let _ = sys_handle.remove_ball(target_id).await;
+            if let Some(ref sys_handle) = sys_handle_opt {
+                let _ = sys_handle.remove_ball(target_id).await;
+            }
             complete_command_node_capture(ctx, target_id, char_id, alliance_id).await;
         }
     }
@@ -561,10 +571,14 @@ async fn complete_command_node_capture(
             remaining_nodes,
         }) => {
             for (nid, nsys) in remaining_nodes {
-                let _ = ctx.systems.get_or_spawn(nsys).remove_ball(nid).await;
+                if let Some(h) = ctx.systems.get_handle(nsys) {
+                    let _ = h.remove_ball(nid).await;
+                }
             }
             if !defender_won {
-                let _ = ctx.systems.get_or_spawn(hub_sys).remove_ball(hub_id).await;
+                if let Some(h) = ctx.systems.get_handle(hub_sys) {
+                    let _ = h.remove_ball(hub_id).await;
+                }
                 crate::services::sov_services::emit_sovereignty_changed(ctx, hub_sys, None, None);
             }
             emit_sov_structures_updated(ctx, hub_sys, &[hub_id]);

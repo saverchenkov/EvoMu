@@ -456,7 +456,9 @@ pub async fn pulse_abyssal_automated_pylons(
         }
         map
     });
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return (0, 0);
+    };
     let balls = sys_handle.list_balls().await.unwrap_or_default();
     let mut suppressors: Vec<(Option<i64>, DVec3, f64, eve_destiny::DamageVector)> = Vec::new();
     let mut tracking_pylons: Vec<(Option<i64>, DVec3, f64, f64)> = Vec::new();
@@ -596,9 +598,10 @@ pub fn prune_out_of_bounds_abyssal_probes(ctx: &ServerContext, sys_id: SolarSyst
     }
     if !removed_probes.is_empty() {
         crate::services::space_probe_scanning::sync_scanner_probes_to_db(ctx);
-        let handle = ctx.systems.get_or_spawn(sys_id);
-        for pid in removed_probes {
-            handle.try_remove_ball(pid);
+        if let Some(handle) = ctx.systems.get_handle(sys_id) {
+            for pid in removed_probes {
+                handle.try_remove_ball(pid);
+            }
         }
     }
 }

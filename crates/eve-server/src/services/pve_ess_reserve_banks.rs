@@ -989,7 +989,15 @@ pub async fn try_activate_ess_acceleration_gate(
         return None;
     }
     ensure_ess_intrusion_site_balls(ctx, sys_id).await;
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Some(Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "ess_reserve_bank",
+            "Ship is not in space",
+        )));
+    };
     let Some((current_tick, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
         return Some(Err(BridgeRpcError::ship_not_in_space(
             ship_id,
@@ -1087,7 +1095,9 @@ pub async fn check_ess_warp_destination_allowed(
     if !is_kspace_nullsec(&ctx.sde, sys_id) {
         return Ok(());
     }
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Ok(());
+    };
     let balls = sys_handle.list_balls().await.unwrap_or_default();
     let hits_bubble = balls.iter().any(|b| {
         is_ess_beacon_ball(b, sys_id)
@@ -1115,7 +1125,9 @@ pub async fn check_ess_intrusion_bubble_restriction(
     if !is_kspace_nullsec(&ctx.sde, sys_id) {
         return Ok(());
     }
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Ok(());
+    };
     let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
         return Ok(());
     };
@@ -1413,14 +1425,15 @@ pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> 
         });
         let mut range_ok = false;
         if let Some(ship_id) = ship_id_opt {
-            let sys_h = ctx.systems.get_or_spawn(sys_id);
-            if let Some((_, ship_ball)) = sys_h.get_ball_snapshot(ship_id).await.ok().flatten() {
-                if !matches!(ship_ball.mode, MovementMode::Warp { .. }) {
-                    let balls = sys_h.list_balls().await.unwrap_or_default();
-                    if let Some(ess) = balls.into_iter().find(|b| {
-                        b.type_id == ESS_BEACON_TYPE_ID || b.type_id == 56002 || b.id == ESS_BEACON_ID_BASE + sys_id as i64
-                    }) {
-                        range_ok = ship_ball.position.distance(ess.position) <= 2_500.0;
+            if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
+                if let Some((_, ship_ball)) = sys_h.get_ball_snapshot(ship_id).await.ok().flatten() {
+                    if !matches!(ship_ball.mode, MovementMode::Warp { .. }) {
+                        let balls = sys_h.list_balls().await.unwrap_or_default();
+                        if let Some(ess) = balls.into_iter().find(|b| {
+                            b.type_id == ESS_BEACON_TYPE_ID || b.type_id == 56002 || b.id == ESS_BEACON_ID_BASE + sys_id as i64
+                        }) {
+                            range_ok = ship_ball.position.distance(ess.position) <= 2_500.0;
+                        }
                     }
                 }
             }

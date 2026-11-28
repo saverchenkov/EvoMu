@@ -74,8 +74,9 @@ pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) ->
         });
     }
     for (sys_id, ball_id) in removed_wreck_balls.into_iter().chain(removed_mission_npcs) {
-        let handle = ctx.systems.get_or_spawn(sys_id);
-        handle.try_remove_ball(ball_id);
+        if let Some(handle) = ctx.systems.get_handle(sys_id) {
+            handle.try_remove_ball(ball_id);
+        }
     }
 
     crate::services::fleet_social::execute_pending_auto_kicks_on_downtime(ctx);
@@ -291,8 +292,9 @@ pub fn recover_scanner_probes_on_downtime(ctx: &ServerContext) -> (usize, usize)
     }
 
     for p in recovered.iter().chain(purged_expired.iter()) {
-        let handle = ctx.systems.get_or_spawn(p.solar_system_id);
-        handle.try_remove_ball(p.probe_id);
+        if let Some(handle) = ctx.systems.get_handle(p.solar_system_id) {
+            handle.try_remove_ball(p.probe_id);
+        }
     }
 
     (recovered.len(), purged_expired.len())

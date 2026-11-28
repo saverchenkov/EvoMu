@@ -184,19 +184,20 @@ pub async fn check_not_in_deadspace_pocket(
             "Cannot activate filament while inside a deadspace pocket",
         ));
     }
-    let sys_handle = ctx.systems.get_or_spawn(cur_sys);
-    if let Ok(balls) = sys_handle.list_balls().await {
-        for b in balls {
-            let is_accel_gate = ctx
-                .sde
-                .types
-                .get(&b.type_id)
-                .is_some_and(|t| t.group_id == 366);
-            if is_accel_gate && b.position.distance(ship_pos) < 250_000.0 {
-                return Err(rpc_err(
-                    "ShipInDungeon",
-                    "Cannot activate filament near a deadspace acceleration gate",
-                ));
+    if let Some(sys_handle) = ctx.systems.get_handle(cur_sys) {
+        if let Ok(balls) = sys_handle.list_balls().await {
+            for b in balls {
+                let is_accel_gate = ctx
+                    .sde
+                    .types
+                    .get(&b.type_id)
+                    .is_some_and(|t| t.group_id == 366);
+                if is_accel_gate && b.position.distance(ship_pos) < 250_000.0 {
+                    return Err(rpc_err(
+                        "ShipInDungeon",
+                        "Cannot activate filament near a deadspace acceleration gate",
+                    ));
+                }
             }
         }
     }
@@ -342,22 +343,23 @@ pub async fn check_filament_1000km_proximity(
             format!("Cannot activate filament within 1,000 km of Abyssal trace {tid} ({d:.0} m)"),
         ));
     }
-    let sys_handle = ctx.systems.get_or_spawn(cur_sys);
-    if let Ok(balls) = sys_handle.list_balls().await {
-        for b in balls {
-            let is_restricted_obj = b.type_id == ABYSSAL_TRACE_TYPE_ID
-                || crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, b.type_id)
-                || ctx.sde.types.get(&b.type_id).is_some_and(|t| {
-                    matches!(t.category_id, 3 | 22 | 65)
-                        || matches!(t.group_id, 10 | 1246 | 1991)
-                });
-            if is_restricted_obj {
-                let d = b.position.distance(ship_pos);
-                if d < FILAMENT_PROXIMITY_RESTRICTION_RANGE_M {
-                    return Err(rpc_err(
-                        "ProximityRestriction",
-                        format!("Cannot activate filament within 1,000 km of object {} ({d:.0} m)", b.id),
-                    ));
+    if let Some(sys_handle) = ctx.systems.get_handle(cur_sys) {
+        if let Ok(balls) = sys_handle.list_balls().await {
+            for b in balls {
+                let is_restricted_obj = b.type_id == ABYSSAL_TRACE_TYPE_ID
+                    || crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, b.type_id)
+                    || ctx.sde.types.get(&b.type_id).is_some_and(|t| {
+                        matches!(t.category_id, 3 | 22 | 65)
+                            || matches!(t.group_id, 10 | 1246 | 1991)
+                    });
+                if is_restricted_obj {
+                    let d = b.position.distance(ship_pos);
+                    if d < FILAMENT_PROXIMITY_RESTRICTION_RANGE_M {
+                        return Err(rpc_err(
+                            "ProximityRestriction",
+                            format!("Cannot activate filament within 1,000 km of object {} ({d:.0} m)", b.id),
+                        ));
+                    }
                 }
             }
         }
@@ -406,16 +408,22 @@ pub async fn validate_abyssal_filaments_with_mode(
 
     crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
 
-    let sys_handle = ctx.systems.get_or_spawn(cur_sys);
-    if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
-        if cs.is_cloaked {
-            return Err(rpc_err("ShipIsCloaked", "Cannot activate filament while cloaked"));
-        }
-        if cs.is_tethered {
-            return Err(rpc_err("ShipIsTethered", "Cannot activate filament while tethered"));
+    let sys_handle_opt = ctx.systems.get_handle(cur_sys);
+    if let Some(sys_handle) = sys_handle_opt.as_ref() {
+        if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
+            if cs.is_cloaked {
+                return Err(rpc_err("ShipIsCloaked", "Cannot activate filament while cloaked"));
+            }
+            if cs.is_tethered {
+                return Err(rpc_err("ShipIsTethered", "Cannot activate filament while tethered"));
+            }
         }
     }
-    let ship_pos = if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+    let ship_ball_opt = match sys_handle_opt.as_ref() {
+        Some(sys_handle) => sys_handle.get_ball_snapshot(ship_id).await.ok().flatten(),
+        None => None,
+    };
+    let ship_pos = if let Some((_, ball)) = ship_ball_opt {
         ball.position
     } else {
         let p = ctx.db.with_snapshot(|snap| snap.item_positions.get(&ship_id).copied().unwrap_or([0.0, 0.0, 0.0]));
@@ -778,7 +786,7 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
     if sys_id == crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID {
         return None;
     }
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let sys_handle = ctx.systems.get_handle(sys_id)?;
     let (_, ship_ball) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten()?;
     let is_excluded_ship = ctx.db.with_snapshot(|snap| {
         let pvp = crate::services::pvp_filament_mgr::load_pvp_store(snap);

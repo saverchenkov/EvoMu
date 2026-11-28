@@ -310,16 +310,19 @@ pub(crate) async fn handle_set_password(
 
     let in_space_balls = if session.station_id.is_none() && session.structure_id.is_none() {
         if let Some(sys_id) = session.solar_system_id {
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let sb = match session.ship_id {
-                Some(sid) => sys_handle.get_ball_snapshot(sid).await.ok().flatten(),
-                None => None,
-            };
-            let cloaked = session
-                .ship_id
-                .is_some_and(|sid| sys_handle.view().is_ball_cloaked(sid));
-            let cb = sys_handle.get_ball_snapshot(container_id).await.ok().flatten();
-            Some((sys_id, sb, cloaked, cb))
+            if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+                let sb = match session.ship_id {
+                    Some(sid) => sys_handle.get_ball_snapshot(sid).await.ok().flatten(),
+                    None => None,
+                };
+                let cloaked = session
+                    .ship_id
+                    .is_some_and(|sid| sys_handle.view().is_ball_cloaked(sid));
+                let cb = sys_handle.get_ball_snapshot(container_id).await.ok().flatten();
+                Some((sys_id, sb, cloaked, cb))
+            } else {
+                Some((sys_id, None, false, None))
+            }
         } else {
             None
         }

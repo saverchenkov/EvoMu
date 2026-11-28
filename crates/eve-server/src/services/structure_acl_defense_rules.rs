@@ -907,8 +907,8 @@ pub fn is_cyno_inhibited(
         if let Some(test_pos) = pos {
             let live_or_snap_pos = ctx
                 .systems
-                .get_or_spawn(sys_id)
-                .get_ball_position_sync(i.item_id)
+                .get_handle(sys_id)
+                .and_then(|h| h.get_ball_position_sync(i.item_id))
                 .or_else(|| snap.item_positions.get(&i.item_id).map(|p| DVec3::from_array(*p)));
             if let Some(inhibitor_pos) = live_or_snap_pos {
                 return test_pos.distance(inhibitor_pos) <= MOBILE_CYNO_INHIBITOR_RANGE_M;
@@ -1216,7 +1216,9 @@ pub fn snapshot_system_balls_for_inventory(
     if sys_id == 0 {
         return HashMap::new();
     }
-    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_h) = ctx.systems.get_handle(sys_id) else {
+        return HashMap::new();
+    };
     sys_h
         .view()
         .balls

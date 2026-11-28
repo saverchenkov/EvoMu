@@ -255,7 +255,9 @@ async fn check_requirements(ctx: &ServerContext, cycle: &ActiveMiningCycle) -> R
     if !in_space {
         return Err(err(MiningStopReason::NotInSpace, "Ship is not in space".into()));
     }
-    let sys = ctx.systems.get_or_spawn(cycle.solar_system_id);
+    let Some(sys) = ctx.systems.get_handle(cycle.solar_system_id) else {
+        return Err(err(MiningStopReason::NotInSpace, format!("Ship {} has no ball in space", cycle.ship_id)));
+    };
     let Some((_, ship_ball)) = sys.get_ball_snapshot(cycle.ship_id).await.unwrap_or(None) else {
         return Err(err(MiningStopReason::NotInSpace, format!("Ship {} has no ball in space", cycle.ship_id)));
     };
@@ -360,7 +362,9 @@ async fn check_requirements(ctx: &ServerContext, cycle: &ActiveMiningCycle) -> R
 async fn consume_cycle_capacitor(ctx: &ServerContext, cycle: &ActiveMiningCycle) -> Result<(), BridgeRpcError> {
     let fit = ctx.get_or_rebuild_ship_fitting(cycle.char_id, cycle.ship_id)?;
     let need = module_attr(ctx, &fit, cycle.ship_id, cycle.module_id, attr::CAPACITOR_NEED);
-    let sys = ctx.systems.get_or_spawn(cycle.solar_system_id);
+    let Some(sys) = ctx.systems.get_handle(cycle.solar_system_id) else {
+        return Err(err(MiningStopReason::NotInSpace, format!("Ship {} has no ball in space", cycle.ship_id)));
+    };
     let cs = match sys.get_combat_state(cycle.ship_id).await.ok().flatten() {
         Some(cs) => cs,
         None => {
@@ -645,9 +649,9 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
         ctx.systems.belt_respawn_interval_secs(),
         ctx.systems.downtime_utc_secs_of_day(),
     );
-    ctx.systems
-        .get_or_spawn(cycle.solar_system_id)
-        .sync_asteroid_quantity(cycle.target_id, remaining.max(0) as u64, due_unix);
+    if let Some(sys) = ctx.systems.get_handle(cycle.solar_system_id) {
+        sys.sync_asteroid_quantity(cycle.target_id, remaining.max(0) as u64, due_unix);
+    }
     let now_unix = ctx.now_unix_secs();
     if delivered > 0 || residue_units > 0 {
         let _ = ctx.db.record_mining_ledger_entry_with_waste(
@@ -708,7 +712,9 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
 
     let free_after = free_units - delivered;
     let stop = if remaining == 0 {
-        ctx.systems.get_or_spawn(cycle.solar_system_id).try_remove_ball(cycle.target_id);
+        if let Some(sys) = ctx.systems.get_handle(cycle.solar_system_id) {
+            sys.try_remove_ball(cycle.target_id);
+        }
         let ast_pos = DVec3::new(asteroid.position.0, asteroid.position.1, asteroid.position.2);
         clear_emptied_sites(ctx, cycle.solar_system_id, ast_pos);
         let _ = ctx.notify_asteroid_terminated(cycle.solar_system_id, cycle.target_id);

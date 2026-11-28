@@ -204,14 +204,14 @@ pub async fn is_pos_forcefield_protected(
     if candidates.is_empty() {
         return false;
     }
-    let mut sys_handle_opt = None;
+    let sys_handle_opt = ctx.systems.get_handle(sys_id);
     for (tid, rad, pos_opt) in candidates {
         let tp = match pos_opt {
             Some(p) => Some(p),
-            None => {
-                let h = sys_handle_opt.get_or_insert_with(|| ctx.systems.get_or_spawn(sys_id));
-                h.get_ball_snapshot(tid).await.ok().flatten().map(|(_, b)| b.position)
-            }
+            None => match sys_handle_opt.as_ref() {
+                Some(h) => h.get_ball_snapshot(tid).await.ok().flatten().map(|(_, b)| b.position),
+                None => None,
+            },
         };
         if let Some(tp) = tp {
             if pos.distance(tp) <= rad {
@@ -357,15 +357,17 @@ pub async fn check_pos_forcefield_coverage(
         }
         list
     });
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let sys_opt = ctx.systems.get_handle(sys_id);
     for (tower_id, shield_rad, mut pos_opt) in towers {
         if pos_opt.is_none() {
-            pos_opt = sys
-                .get_ball_snapshot(tower_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|(_, b)| b.position);
+            if let Some(sys) = sys_opt.as_ref() {
+                pos_opt = sys
+                    .get_ball_snapshot(tower_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(_, b)| b.position);
+            }
         }
         let Some(tower_pos) = pos_opt else { continue; };
         for &pos in positions {

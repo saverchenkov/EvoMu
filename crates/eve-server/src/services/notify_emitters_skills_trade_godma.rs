@@ -869,8 +869,7 @@ pub(crate) async fn commit_dogma_take_module_offline(
         ));
         crate::services::tactical_modules::remove_projected_remote_assistance(ctx, ship_id, mid);
     }
-    if let Some(sys_id) = session.solar_system_id {
-        let sys = ctx.systems.get_or_spawn(sys_id);
+    if let Some(sys) = session.solar_system_id.and_then(|sys_id| ctx.systems.get_handle(sys_id)) {
         let is_cycle_gated = ctx
             .db
             .with_snapshot(|s| s.items.get(&module_id).map(|i| i.type_id))
@@ -968,8 +967,7 @@ pub async fn handle_dogma_set_module_online(
     .await?;
 
     if session.station_id.is_none() && session.structure_id.is_none() {
-        if let Some(sys_id) = session.solar_system_id {
-            let sys = ctx.systems.get_or_spawn(sys_id);
+        if let Some(sys) = session.solar_system_id.and_then(|sys_id| ctx.systems.get_handle(sys_id)) {
             if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
                 if cs.max_capacitor > 0.0 && cs.capacitor < 0.75 * cs.max_capacitor {
                     return Err(err(
