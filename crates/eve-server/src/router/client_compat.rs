@@ -213,35 +213,7 @@ pub fn normalize_macho_rpc_reply_at(
             return Ok(PyRep::Dict(out));
         }
     }
-    if service == "dogmaIM" && method == "AddTarget" {
-        if let Ok(PyRep::KeyVal(map)) = rpc_res {
-            let locked = map
-                .get("locked")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            let target_ids = if locked {
-                match map.get("targetIDs") {
-                    Some(PyRep::List(ids)) => ids.clone(),
-                    _ => vec![map
-                        .get("targetID")
-                        .cloned()
-                        .unwrap_or(PyRep::Integer(0))],
-                }
-            } else {
-                Vec::new()
-            };
-            // V24.01 `TargetMgr._LockTarget` (`targetMgr.pyj:1589-1592`):
-            //   flag, targetList = self.GetDogmaLM().AddTarget(tid)
-            //   if not flag:
-            //       self.OnTargetAdded(tid)
-            // `flag = 1` (`!locked`) means asynchronous target lock in progress (`targetList = []`),
-            // whereas `flag = 0` (`locked`) means already/instantly locked (`targetList = [tid, ...]`).
-            return Ok(PyRep::Tuple(vec![
-                PyRep::Integer(i64::from(!locked)),
-                PyRep::List(target_ids),
-            ]));
-        }
-    } else if service == "agentMgr" && matches!(method, "DoAction" | "GetOffer") {
+    if service == "agentMgr" && matches!(method, "DoAction" | "GetOffer") {
         if let Ok(rep) = rpc_res {
             return Ok(normalize_agent_do_action_rep(rep));
         }

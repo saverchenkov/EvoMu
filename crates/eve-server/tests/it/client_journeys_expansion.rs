@@ -469,8 +469,7 @@ async fn test_journey_pve_combat() {
 
     let kw = HashMap::new();
     let lock_res = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(target_id)], &kw, None).await.expect("AddTarget");
-    let PyRep::KeyVal(ref lock_kv) = lock_res else { panic!("AddTarget must return KeyVal, got {lock_res:?}"); };
-    assert_eq!(lock_kv.get("targetID"), Some(&PyRep::Integer(target_id)));
+    assert_eq!(lock_res, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
 
     for _ in 0..4 {
         ctx.advance_secs(1);

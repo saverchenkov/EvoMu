@@ -1116,15 +1116,11 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
     assert!(expected_sec > 1.0 && expected_sec < 5.0);
     let add_ret = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(near_target_id)], &kw, None).await
         .expect("AddTarget near_target_id");
-    let PyRep::KeyVal(add_kv) = add_ret else {
-        panic!("Expected KeyVal from AddTarget, got {add_ret:?}");
-    };
-    assert_eq!(add_kv.get("targetID"), Some(&PyRep::Integer(near_target_id)));
-    assert_eq!(add_kv.get("locked"), Some(&PyRep::Bool(false)));
-    let Some(PyRep::Real(lock_ms)) = add_kv.get("lockTimeMs") else {
-        panic!("Expected lockTimeMs Real in AddTarget KeyVal");
-    };
-    assert!((lock_ms - expected_sec * 1000.0).abs() < 1.0);
+    assert_eq!(
+        add_ret,
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]),
+        "Expected canonical (1, []) 2-tuple from AddTarget, got {add_ret:?}"
+    );
     let notes = sess.drain_notifications();
     assert!(
         !notes.iter().any(|(n, _)| n == "OnTarget" || n == "OnMultiEvent"),
@@ -1133,7 +1129,9 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
 
     let locks_before = sys.get_target_locks(ship_id).await.expect("get_target_locks");
     assert_eq!(locks_before.len(), 1);
+    assert_eq!(locks_before[0].target_id, near_target_id);
     assert!(!locks_before[0].locked);
+    assert!((locks_before[0].lock_time_ms - expected_sec * 1000.0).abs() < 1.0);
 
     // Step 4 seconds -> lock completes
     for _ in 0..4 {

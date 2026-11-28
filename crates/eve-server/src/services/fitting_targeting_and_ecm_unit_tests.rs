@@ -236,6 +236,17 @@ async fn add_target_ecm_cloak_tether_range_passive_targeter_and_targeters_list()
     ctx.db.with_mut_snapshot(|snap| {
         let base = snap.characters.values().next().cloned().unwrap();
         for (cid, sid) in [(char_id, ship_id), (enemy_char_id, enemy_ship_id)] {
+            snap.accounts.insert(
+                format!("u_{cid}"),
+                eve_db::AccountRecord {
+                    user_id: cid as u64,
+                    username: format!("u_{cid}"),
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
             let mut ch = base.clone();
             ch.character_id = cid;
             ch.user_id = cid as u64;
@@ -353,11 +364,23 @@ async fn add_target_ecm_cloak_tether_range_passive_targeter_and_targeters_list()
         }
     }
 
+    ctx.db
+        .acquire_online_lock(enemy_char_id as u64, 1, Some(enemy_char_id), false, ctx.now_unix())
+        .expect("enemy pilot online lock");
+    ctx.pending_notifications.write().unwrap().remove(&enemy_char_id);
     let lock_res =
         call_dogma_im(&ctx, &mut session, None, "AddTarget", &[PyRep::Integer(enemy_ship_id)])
             .await
             .unwrap();
-    assert_eq!(lock_res.dict_get("passiveLock"), Some(&PyRep::Bool(true)));
+    assert_eq!(lock_res, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
+    assert!(
+        !ctx.pending_notifications
+            .read()
+            .unwrap()
+            .get(&enemy_char_id)
+            .is_some_and(|v| !v.is_empty()),
+        "active passive targeter must suppress yellow-box notification"
+    );
 
     let _ = sys
         .add_target_lock(

@@ -631,7 +631,7 @@ async fn warp_fails_pending_lock_via_target_service_and_allows_retry() {
 
     // 1. CancelAddTarget clears pending lock with zero FailLockTarget/OnTarget/OnMultiEvent notifications, including across tick
     let add_cancel = rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(ship2)]).await;
-    assert_eq!(add_cancel.dict_get("locked"), Some(&PyRep::Bool(false)));
+    assert_eq!(add_cancel, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
     let _ = ctx.drain_notifications_for_char(C1);
     let _ = ctx.drain_notifications_for_char(C2);
     let _ = rpc(&ctx, &mut s1, "dogmaIM", "CancelAddTarget", &[PyRep::Integer(ship2)]).await;
@@ -660,7 +660,7 @@ async fn warp_fails_pending_lock_via_target_service_and_allows_retry() {
 
     // 2. Initiate pending lock then enter warp -> target.FailLockTarget(ship2), no OnTarget add, empty GetTargets
     let add_pending = rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(ship2)]).await;
-    assert_eq!(add_pending.dict_get("locked"), Some(&PyRep::Bool(false)));
+    assert_eq!(add_pending, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
     let _ = ctx.drain_notifications_for_char(C1);
 
     sys.set_movement_mode(
@@ -701,7 +701,15 @@ async fn warp_fails_pending_lock_via_target_service_and_allows_retry() {
     sys.set_ball_position(ship1, DVec3::ZERO).await;
     let _ = sys.modify_combat_state(ship1, |cs| { cs.clear_action_invuln(); }).await;
     let relock = rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(ship2)]).await;
-    let lock_ms = relock.dict_get("lockTimeMs").and_then(|v| v.as_f64()).unwrap_or(1_000.0);
+    assert_eq!(relock, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
+    let lock_ms = sys
+        .get_target_locks(ship1)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|l| l.target_id == ship2)
+        .map(|l| l.lock_time_ms)
+        .unwrap_or(1_000.0);
     let _ = sys.step_manual((lock_ms / 1000.0) + 1.0).await.expect("complete relock");
     assert_eq!(
         rpc(&ctx, &mut s1, "dogmaIM", "GetTargets", &[]).await,
@@ -736,7 +744,7 @@ async fn warp_fails_pending_lock_via_target_service_and_allows_retry() {
 
     // 5. Target destroyed/removed while lock is in-progress -> FailLockTarget on service:target + OnTarget otherlost to target
     let pending_before_kill = rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(ship2)]).await;
-    assert_eq!(pending_before_kill.dict_get("locked"), Some(&PyRep::Bool(false)));
+    assert_eq!(pending_before_kill, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
     let _ = ctx.drain_notifications_for_char(C1);
     let _ = ctx.drain_notifications_for_char(C2);
     let _ = sys.remove_ball(ship2).await;

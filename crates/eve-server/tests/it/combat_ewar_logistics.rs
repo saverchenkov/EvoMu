@@ -444,7 +444,15 @@ async fn test_combat_ewar_and_capacitor_warfare_mechanics_impl() {
     assert!(damped_victim_scan_res < base_victim_scan_res, "Scan Resolution scripted dampener must reduce victim scanResolution (got {damped_victim_scan_res} < {base_victim_scan_res})");
 
     let add_target_rep = ctx.dispatch_rpc(&mut victim_sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(ship_id)], &kw, None).await.expect("AddTarget from damped ship");
-    let lock_time_ms = add_target_rep.dict_get("lockTimeMs").and_then(|v| v.as_f64()).unwrap();
+    assert_eq!(add_target_rep, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())]));
+    let lock_time_ms = sys
+        .get_target_locks(victim_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|l| l.target_id == ship_id)
+        .expect("pending target lock")
+        .lock_time_ms;
     let raw_sig = sys.get_combat_state(ship_id).await.unwrap().unwrap().signature_radius;
     let target_sig = ctx.effective_target_signature_radius(ship_id, raw_sig);
     let expected_lock_time = eve_destiny::combat::compute_lock_time_seconds(damped_victim_scan_res, target_sig) * 1000.0;

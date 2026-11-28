@@ -45,42 +45,6 @@ fn normalize_contract_corp_devindex_dogma_fw_homestation_inv_and_clones() {
 
 #[test]
 fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_scan_ship_skill() {
-    // dogmaIM.AddTarget, peaceTreatyMgr
-    assert_eq!(
-        normalize_macho_rpc_reply(
-            "dogmaIM",
-            "AddTarget",
-            Ok(PyRep::keyval([("locked", PyRep::Bool(true)), ("targetID", PyRep::Integer(77))])),
-        )
-        .expect("add target already locked"),
-        PyRep::Tuple(vec![PyRep::Integer(0), PyRep::List(vec![PyRep::Integer(77)])])
-    );
-    assert_eq!(
-        normalize_macho_rpc_reply(
-            "dogmaIM",
-            "AddTarget",
-            Ok(PyRep::keyval([("locked", PyRep::Bool(false)), ("targetID", PyRep::Integer(77))])),
-        )
-        .expect("add target async lock in progress"),
-        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(Vec::new())])
-    );
-    assert_eq!(
-        normalize_macho_rpc_reply(
-            "dogmaIM",
-            "AddTarget",
-            Ok(PyRep::keyval([
-                ("locked", PyRep::Bool(true)),
-                ("targetID", PyRep::Integer(77)),
-                ("targetIDs", PyRep::List(vec![PyRep::Integer(76), PyRep::Integer(77)])),
-            ])),
-        )
-        .expect("add target reconciled list"),
-        PyRep::Tuple(vec![
-            PyRep::Integer(0),
-            PyRep::List(vec![PyRep::Integer(76), PyRep::Integer(77)]),
-        ])
-    );
-
     // raffleProxy, scanMgr, ship, skillMgr2; direct builder preserves CRowset marshal layout
     let quotes = crate::services::space_entity_mining::build_v24_reprocessing_quotes_tuple(
         PyRep::Real(0.05),

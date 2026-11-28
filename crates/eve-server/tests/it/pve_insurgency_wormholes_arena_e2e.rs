@@ -657,7 +657,21 @@ async fn test_proving_grounds_matchmaking_combat_and_arena_hazards_e2e() {
 
     let d_oid1 = bind_service(&ctx, &mut sess1, "dogmaIM", PyRep::Integer(ship1)).await as u64;
     match rpc_res(&ctx, &mut sess1, "dogmaIM", "AddTarget", &[PyRep::Integer(ship2)]).await {
-        Ok(lock_rep) => assert_eq!(kv_get(&lock_rep, "targetID").and_then(PyRep::as_i64), Some(ship2)),
+        Ok(lock_rep) => match &lock_rep {
+            PyRep::Tuple(parts) if parts.len() == 2 => match (&parts[0], &parts[1]) {
+                (PyRep::Integer(1), PyRep::List(ids)) => {
+                    assert!(ids.is_empty(), "pending AddTarget must return (1, []): {lock_rep:?}");
+                }
+                (PyRep::Integer(0), PyRep::List(ids)) => {
+                    assert!(
+                        ids.contains(&PyRep::Integer(ship2)),
+                        "locked AddTarget must list {ship2}: {lock_rep:?}"
+                    );
+                }
+                _ => panic!("AddTarget must return (1, []) or (0, [targets]): {lock_rep:?}"),
+            },
+            _ => panic!("AddTarget must return 2-tuple: {lock_rep:?}"),
+        },
         Err(e) if matches!(e.code.as_str(), "TargetingFailed" | "TargetOutOfRange" | "TargetInvulnerable") => {}
         Err(e) => panic!("dogmaIM.AddTarget({ship2}) failed: {e:?}"),
     }
