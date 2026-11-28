@@ -560,10 +560,22 @@ async fn npc_ai_spawn_belt_rats_drifters_mordu_commanders_officers_and_small_sde
     // 2. Wormhole / Drifter system spawning: bs_group 1530 (31000001..=31000006) & 1310 (31000010), plus cooldown
     let ctx = test_ctx();
     let mut mgr = NpcSpawnManager::new();
+    ctx.systems
+        .wake_for_session_arrival(
+            31_000_001,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake WH 31_000_001");
     let wh1 = mgr.spawn_belt_rats_for_system(&ctx, 31_000_001).await.unwrap();
     assert_eq!(wh1.len(), 2);
     // Second call while alive & on cooldown returns empty
     assert!(mgr.spawn_belt_rats_for_system(&ctx, 31_000_001).await.unwrap().is_empty());
+    ctx.systems
+        .wake_for_session_arrival(
+            31_000_010,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake WH 31_000_010");
     let wh2 = mgr.spawn_belt_rats_for_system(&ctx, 31_000_010).await.unwrap();
     assert_eq!(wh2.len(), 2);
 
@@ -617,6 +629,12 @@ async fn npc_ai_spawn_belt_rats_drifters_mordu_commanders_officers_and_small_sde
         rt.clone_soldier_cooldown_until.insert(lowsec_sys_035, now + 600);
     });
     for sid in [lowsec_sys_035, lowsec_sys_020, lowsec_sys_010] {
+        ctx.systems
+            .wake_for_session_arrival(
+                sid,
+                crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+            )
+            .expect("wake lowsec system");
         ctx.set_mechanic_rng_seed(Some(lucky_seed));
         let spawned = mgr.spawn_belt_rats_for_system(&ctx, sid).await.unwrap();
         assert!(!spawned.is_empty());
@@ -634,6 +652,12 @@ async fn npc_ai_spawn_belt_rats_drifters_mordu_commanders_officers_and_small_sde
         nullsec_serpentis,
         nullsec_guristas,
     ] {
+        ctx.systems
+            .wake_for_session_arrival(
+                sid,
+                crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+            )
+            .expect("wake nullsec system");
         ctx.set_mechanic_rng_seed(Some(lucky_seed));
         let spawned = mgr.spawn_belt_rats_for_system(&ctx, sid).await.unwrap();
         assert!(!spawned.is_empty());
@@ -673,6 +697,13 @@ async fn npc_ai_spawn_belt_rats_drifters_mordu_commanders_officers_and_small_sde
         Arc::new(fallback_sde),
         Arc::new(eve_db::WorldRepository::with_demo_seed()),
     );
+    fb_ctx
+        .systems
+        .wake_for_session_arrival(
+            highsec_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake fallback highsec system");
     let mut fb_mgr = NpcSpawnManager::new();
     let fb_spawned = fb_mgr.spawn_belt_rats_for_system(&fb_ctx, highsec_sys).await.unwrap();
     assert!(!fb_spawned.is_empty());
@@ -1190,6 +1221,12 @@ async fn npc_ai_sde_dps_within_one_percent_across_five_ship_classes_and_factions
             legacy_bounty_dps
         );
 
+        ctx.systems
+            .wake_for_session_arrival(
+                sys_id,
+                crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+            )
+            .expect("wake Jita");
         let mut mgr = NpcSpawnManager::new();
         let spawned = mgr
             .spawn_group(&ctx, sys_id, sg_id, DVec3::ZERO)
@@ -1282,6 +1319,12 @@ async fn npc_ai_turret_normal_hit_rules_angular_velocity_sig_and_range_cutoff() 
                 npc_type_ids: vec![17_038],
             },
         );
+        ctx.systems
+            .wake_for_session_arrival(
+                sys_id,
+                crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+            )
+            .expect("wake Jita");
         let mut mgr = NpcSpawnManager::new();
         let spawned = mgr
             .spawn_group(&ctx, sys_id, sg_id, DVec3::ZERO)
@@ -1368,6 +1411,12 @@ async fn npc_ai_missile_application_sig_speed_and_flight_range_cutoff() {
                 npc_type_ids: vec![npc_type_id],
             },
         );
+        ctx.systems
+            .wake_for_session_arrival(
+                sys_id,
+                crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+            )
+            .expect("wake Jita");
         let mut mgr = NpcSpawnManager::new();
         let spawned = mgr
             .spawn_group(&ctx, sys_id, sg_id, DVec3::ZERO)
@@ -1450,6 +1499,12 @@ async fn npc_ai_on_special_fx_guids_and_movement_cruise_fraction() {
                 npc_type_ids: vec![npc_type_id],
             },
         );
+        ctx.systems
+            .wake_for_session_arrival(
+                sys_id,
+                crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+            )
+            .expect("wake Jita");
         let mut mgr = NpcSpawnManager::new();
         let spawned = mgr
             .spawn_group(&ctx, sys_id, sg_id, DVec3::ZERO)
@@ -1562,6 +1617,12 @@ async fn npc_ai_on_special_fx_guids_and_movement_cruise_fraction() {
         },
     );
     let mut mgr = NpcSpawnManager::new();
+    ctx.systems
+        .wake_for_session_arrival(
+            sys_id,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Jita");
     let spawned = mgr
         .spawn_group(&ctx, sys_id, 998_499, DVec3::ZERO)
         .await
@@ -1857,6 +1918,12 @@ async fn npc_ai_vorton_uses_missile_drf_within_optimal_without_wrecking_or_track
             },
         );
         let mut mgr = NpcSpawnManager::new();
+        ctx.systems
+            .wake_for_session_arrival(
+                sys_id,
+                crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+            )
+            .expect("wake Jita");
         let spawned = mgr.spawn_group(&ctx, sys_id, sg_id, DVec3::ZERO).await.unwrap();
         let npc_bid = spawned[0];
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -1968,6 +2035,12 @@ async fn npc_ai_stationary_armed_npc_has_zero_orbit_range_and_no_speed_churn() {
         },
     );
     let mut mgr = NpcSpawnManager::new();
+    ctx.systems
+        .wake_for_session_arrival(
+            sys_id,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Jita");
     let spawned = mgr.spawn_group(&ctx, sys_id, sg_id, DVec3::ZERO).await.unwrap();
     let sentry_bid = spawned[0];
     assert_eq!(mgr.entities[&sentry_bid].orbit_range, 0.0);
@@ -2066,6 +2139,12 @@ async fn npc_ai_killing_blow_on_special_fx_retains_wire_meta_across_next_tick_en
             },
         );
         let mut mgr = NpcSpawnManager::new();
+        ctx.systems
+            .wake_for_session_arrival(
+                sys_id,
+                crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+            )
+            .expect("wake Jita");
         let spawned = mgr.spawn_group(&ctx, sys_id, sg_id, DVec3::ZERO).await.unwrap();
         let npc_bid = spawned[0];
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -2361,6 +2440,12 @@ async fn belt_rat_sec_tiers_clone_soldier_exclusion_and_decoupled_slot_cooldowns
         ctx.sde.celestials_in_system(sys_id).into_iter().filter(|c| c.group_id == 9).nth(idx).unwrap().position
     };
     let now = ctx.now_unix();
+    ctx.systems
+        .wake_for_session_arrival(
+            hs_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake highsec belt system");
     let mut hs_mgr = NpcSpawnManager::new();
     let _ = hs_mgr.spawn_belt_rats_for_system(&ctx, hs_sys).await.unwrap();
     let hs_b0 = belt_pos_for(hs_sys, 0);
@@ -2379,6 +2464,12 @@ async fn belt_rat_sec_tiers_clone_soldier_exclusion_and_decoupled_slot_cooldowns
     assert_eq!(hs_after.len(), 2, "only Belt 1 should be on cooldown in high-sec");
     assert!(hs_after.iter().all(|(_, _, pos)| pos.distance(hs_b0) >= 25_000.0));
 
+    ctx.systems
+        .wake_for_session_arrival(
+            ls_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake lowsec belt system");
     let mut ls_mgr = NpcSpawnManager::new();
     let _ = ls_mgr.spawn_belt_rats_for_system(&ctx, ls_sys).await.unwrap();
     let ls_b0 = belt_pos_for(ls_sys, 0);
@@ -2416,6 +2507,12 @@ async fn cmb51_npc_spawn_ai_step_via_actor_mailbox_applies_damage_and_skips_non_
     );
 
     let mut mgr = NpcSpawnManager::new();
+    ctx.systems
+        .wake_for_session_arrival(
+            sys_id,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Jita");
     let spawned = mgr
         .spawn_group(&ctx, sys_id, sg_id, DVec3::ZERO)
         .await

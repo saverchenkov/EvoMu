@@ -74,6 +74,12 @@ async fn test_e2e_npc_mining_op_fleet_escort_and_hauler_convoy_travel() {
         0,
         "LivingWorldDirector initializes empty before first tick"
     );
+    ctx.systems
+        .wake_for_session_arrival(
+            PERIMETER,
+            eve_server::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Perimeter");
     let mining_cid = ctx.living_world.ensure_system_mining_op(PERIMETER, &ctx.sde);
     let _ = ctx
         .living_world

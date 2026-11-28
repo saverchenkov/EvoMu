@@ -666,3 +666,37 @@ async fn sync_campaign_system_npcs_roamer_waypoint_fallback_boundaries_0_1_2_3_c
     };
     assert_eq!(dest3, c_wp(100_000.0), "3 celestials must wrap 2 -> 0 without fallback waypoints");
 }
+
+#[tokio::test]
+async fn cold_system_ensure_campaign_pirate_fob_persists_db_without_waking_system() {
+    let ctx = test_ctx();
+    let cold_sys = 30_002_505_u32;
+    let camp_id = 77_542_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.insurgency_runtime.campaigns.insert(
+            camp_id,
+            PersistedInsurgencyCampaign {
+                campaign_id: camp_id,
+                pirate_faction_id: FACTION_GURISTAS,
+                target_faction_id: 500_001,
+                fob_solar_system_id: cold_sys,
+                systems: vec![cold_sys],
+                created_at_unix: 1_000,
+                forecasting_end_unix: 2_000,
+                active_end_unix: 9_000,
+                winddown_end_unix: 10_000,
+                corruption_points: HashMap::new(),
+                suppression_points: HashMap::new(),
+            },
+        );
+    });
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    let fob_id = ensure_campaign_pirate_fob(&ctx, camp_id)
+        .await
+        .expect("cold ensure_campaign_pirate_fob returns Some(fob_id)");
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.structures.contains_key(&fob_id));
+    });
+}

@@ -62,6 +62,14 @@ pub async fn materialize_system_lod2(
             client_error: None,
         });
     }
+    ctx.systems
+        .wake_for_gm_command_async(session_sys_id, "materialize_system_lod2")
+        .await
+        .map_err(|e| BridgeRpcError {
+            code: "SystemUnavailable".into(),
+            message: e.to_string(),
+            client_error: None,
+        })?;
     let count = ctx
         .living_world
         .materialize_system_lod2(session_sys_id, &ctx.systems, &ctx.sde)

@@ -274,6 +274,9 @@ impl NpcSpawnManager {
             .get(&spawn_group_id)
             .cloned()
             .ok_or_else(|| format!("SDE NPC spawn group {spawn_group_id} not found"))?;
+        if ctx.systems.get_handle(sys_id).is_none() {
+            return Ok(Vec::new());
+        }
         let count = spawn_group.npc_type_ids.len() as i64;
         let start_ball_id = ctx.db.with_mut_snapshot(|snap| {
             let start = snap.next_entity_id + 1;
@@ -293,7 +296,9 @@ impl NpcSpawnManager {
         spawn_pos: DVec3,
         start_ball_id: i64,
     ) -> (Vec<i64>, Vec<(i64, NpcCombatEntity)>) {
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+            return (Vec::new(), Vec::new());
+        };
         let mut spawned_ball_ids = Vec::with_capacity(spawn_group.npc_type_ids.len());
         let mut spawned_entities = Vec::with_capacity(spawn_group.npc_type_ids.len());
 
@@ -789,6 +794,9 @@ impl NpcSpawnManager {
         mut next_start_id: i64,
         out_entities: &mut Vec<(i64, crate::services::combat_crimewatch::ExtendedNpcEntity)>,
     ) -> (Vec<i64>, Vec<(i64, NpcCombatEntity)>) {
+        if ctx.systems.get_handle(sys_id).is_none() {
+            return (Vec::new(), Vec::new());
+        }
         let mut all_spawned = Vec::new();
         let mut all_entities = Vec::new();
         for (group_id, sg, spawn_pos) in planned_groups {
@@ -851,6 +859,9 @@ impl NpcSpawnManager {
         ctx: &ServerContext,
         sys_id: u32,
     ) -> Result<Vec<i64>, String> {
+        if ctx.systems.get_handle(sys_id).is_none() {
+            return Ok(Vec::new());
+        }
         let (drifter_alive, rt_until_opt, cs_alive, mordu_alive, officer_alive) =
             if (31_000_000..32_000_000).contains(&sys_id) {
                 let da = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {

@@ -188,6 +188,12 @@ async fn supply_sites_ihub_regen_battlefield_wave_and_space_entity_destroyed() {
     on_space_entity_destroyed(&ctx, sys_id, Some(880_001), cache_id, 17_621).await;
 
     // spawn_battlefield_wave_npc spawns gate + NPC with fallback HP when type has 0 structure HP
+    ctx.systems
+        .wake_for_session_arrival(
+            sys_id,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake battlefield system");
     spawn_battlefield_wave_npc(
         &ctx,
         sys_id,
@@ -581,4 +587,27 @@ async fn stat_events_leaderboards_and_remaining_rpc_methods() {
         let res = call_facwar(&ctx, &mut sess, m, &[]).await;
         assert!(matches!(res, Ok(PyRep::Bool(false)) | Err(_)), "unexpected {m}: {res:?}");
     }
+}
+
+#[tokio::test]
+async fn cold_system_spawn_battlefield_wave_npc_stays_cold() {
+    let ctx = test_ctx();
+    let cold_sys = 30_002_505_u32;
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    spawn_battlefield_wave_npc(
+        &ctx,
+        cold_sys,
+        751_001,
+        751_002,
+        587,
+        500_001,
+        DVec3::new(10_000.0, 0.0, 0.0),
+    )
+    .await;
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert!(!crate::combat::npc_ai::npc_test_helpers::has_npc_entity(
+        &ctx, 751_002
+    ));
 }

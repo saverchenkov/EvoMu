@@ -366,6 +366,12 @@ async fn test_c4_npc_spawn_groups_aggro_targeting_damage_types_loot_and_bounties
         .await
         .expect("spawn_belt_rats_for_system in beltless Jita");
     assert!(jita_belt_rats.is_empty(), "Beltless solar systems must not spawn synthetic belt rats");
+    ctx.systems
+        .wake_for_session_arrival(
+            30_000_144,
+            eve_server::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Perimeter");
     let belt_rats = spawn_mgr
         .spawn_belt_rats_for_system(&ctx, 30_000_144)
         .await

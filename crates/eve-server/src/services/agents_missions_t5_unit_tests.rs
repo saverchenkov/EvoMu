@@ -265,12 +265,18 @@ async fn pve_001_022_two_pilots_same_mission_have_distinct_sites_and_allocated_a
         assert!(pos_b.distance(base_station_pos) >= 5_000_000.0);
     });
 
+    ctx.systems
+        .wake_for_session_arrival(
+            mining_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake mining_sys");
     ensure_mission_asteroid_spawned_on_pocket_entry(&ctx, char_a, mining_sys, Some(mining_mid))
         .await;
     let sys_h = ctx
         .systems
         .get_handle(mining_sys)
-        .expect("mining sys actor spawned on pocket entry");
+        .expect("mining sys actor available on pocket entry");
     assert!(sys_h.get_ball_snapshot(ast_a).await.unwrap().is_some());
     assert!(sys_h.get_ball_snapshot(ast_b).await.unwrap().is_none());
     ensure_mission_asteroid_spawned_on_pocket_entry(&ctx, char_b, mining_sys, Some(mining_mid))
@@ -3979,3 +3985,123 @@ async fn site_origin_precedes_bookmark_across_briefing_warp_and_materialization(
     assert_eq!(bids_2.len(), 2);
     assert!(h.get_ball_snapshot(bids_2[0]).await.unwrap().unwrap().1.position.distance(site_2) <= 5_000.0);
 }
+
+#[tokio::test]
+async fn cold_system_ensure_mission_asteroid_spawned_on_pocket_entry_stays_cold() {
+    let mut sde = (*shared_sde()).clone();
+    let mining_ag = sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.level == 1
+                && a.agent_type_id == 2
+                && a.division_id == 23
+                && a.solar_system_id.is_some()
+                && a.station_id.is_some()
+        })
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .unwrap_or_else(|| {
+            let mut ag = sde
+                .agents
+                .values()
+                .find(|a| a.station_id.is_some() && a.solar_system_id.is_some())
+                .expect("stationed agent")
+                .clone();
+            ag.agent_id = 3_990_201;
+            ag.level = 1;
+            ag.agent_type_id = 2;
+            ag.division_id = 23;
+            sde.agents.insert(ag.agent_id, ag.clone());
+            ag
+        });
+    let mining_sys = mining_ag.solar_system_id.unwrap();
+    let mining_st = mining_ag.station_id.unwrap();
+    let mining_mid = sde
+        .missions
+        .values()
+        .filter(|m| {
+            eve_db::decide_mission_kind(Some(m), Some(&mining_ag)) == eve_db::MissionKind::Mining
+        })
+        .map(|m| m.mission_id)
+        .min()
+        .unwrap_or_else(|| {
+            let tmpl = eve_sde::MissionTemplate {
+                mission_id: 98_201,
+                title: "Mining Cold Test Mission".into(),
+                is_courier: false,
+                lp_alpha: 10,
+                lp_omega: 20,
+                has_standing_rewards: true,
+                content_template: Some("BasicMining".into()),
+                dungeon_id: None,
+            };
+            sde.missions.insert(tmpl.mission_id, tmpl);
+            98_201
+        });
+
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(sde),
+        Arc::new(WorldRepository::with_demo_seed()),
+    )
+    .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+
+    let char_a = 90_000_001_i64;
+    let now = ctx.now_unix();
+    move_demo_character(&ctx, char_a, mining_sys, Some(mining_st));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_a) {
+            ch.standings.insert(mining_ag.corporation_id, 2.0);
+        }
+        mission_fixture::insert_with_sde(
+            snap,
+            &ctx.sde,
+            MissionFixture::offered(char_a, mining_mid, mining_ag.agent_id, mining_sys)
+                .origin_station_id(Some(mining_st))
+                .offered_at_unix(now)
+                .offer_expiry_unix(now + 86_400)
+                .required_delivery_type_id(Some(1230))
+                .required_delivery_qty(500),
+        );
+    });
+
+    let kw = HashMap::new();
+    let mut sess_a = docked_session(char_a, mining_sys, Some(mining_st));
+    let acc_a = handle(
+        &ctx,
+        &mut sess_a,
+        "agentMgr",
+        "DoAction",
+        &[
+            PyRep::Integer(3),
+            PyRep::Integer(mining_ag.agent_id),
+            PyRep::Integer(i64::from(mining_mid)),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("char_a accept mining");
+    let ast_a = acc_a
+        .dict_get("asteroidEntityID")
+        .and_then(PyRep::as_i64)
+        .expect("ast_a");
+
+    assert!(ctx.systems.get_handle(mining_sys).is_none());
+    ensure_mission_asteroid_spawned_on_pocket_entry(&ctx, char_a, mining_sys, Some(mining_mid))
+        .await;
+    assert!(
+        ctx.systems.get_handle(mining_sys).is_none(),
+        "ensure_mission_asteroid_spawned_on_pocket_entry must not wake cold system"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.asteroids.contains_key(&ast_a));
+        assert_eq!(
+            snap.missions
+                .get_by_character_template(char_a, mining_mid)
+                .and_then(|m| m.asteroid_entity_id),
+            Some(ast_a)
+        );
+    });
+}
+

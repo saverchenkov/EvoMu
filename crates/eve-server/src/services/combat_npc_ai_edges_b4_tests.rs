@@ -571,6 +571,12 @@ async fn record_threat_relay_mining_and_destroy_hint_all_loot_bounty_variants() 
     record_npc_threat_event(&ctx, relay_id, attacker_id, 100.0, false, false);
 
     // Step mining op in Perimeter (30000144) to spawn mining op convoy & escort, then threaten escort
+    ctx.systems
+        .wake_for_session_arrival(
+            30_000_144,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Perimeter");
     let _ = ctx
         .living_world
         .step_npc_mining_op(800_000_002, &ctx.systems, &ctx.db, &ctx.sde)

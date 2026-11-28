@@ -372,6 +372,12 @@ async fn mining_op_ore_4_sig_fig_price_fallback_and_60s_cadence_sync() {
     });
 
     // Step 1 (t=0): elapsed == 0.0
+    systems
+        .wake_for_session_arrival(
+            30_000_144,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Perimeter");
     let r1 = dir.step_npc_mining_op(cid, &systems, &db, &sde).await.unwrap();
     assert_eq!(r1.mined_units, 0);
 

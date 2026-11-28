@@ -406,16 +406,17 @@ pub async fn advance_incursion_wave_on_escort_kill(
     });
 
     if let Some(spawns) = next_wave_spawns {
-        let sys_handle = systems.get_or_spawn(solar_system_id);
-        for (bid, tid, pos) in spawns {
-            systems.claim_special_site_ball(solar_system_id, bid);
-            if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
-                let _ = sys_handle
-                    .spawn_ball_with_combat(
-                        make_site_npc_ball(bid, tid, pos),
-                        build_incursion_npc_combat_state(sde, tid),
-                    )
-                    .await;
+        if let Some(sys_handle) = systems.get_handle(solar_system_id) {
+            for (bid, tid, pos) in spawns {
+                systems.claim_special_site_ball(solar_system_id, bid);
+                if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
+                    let _ = sys_handle
+                        .spawn_ball_with_combat(
+                            make_site_npc_ball(bid, tid, pos),
+                            build_incursion_npc_combat_state(sde, tid),
+                        )
+                        .await;
+                }
             }
         }
     }
@@ -822,10 +823,12 @@ pub fn advance_incursion_lifecycles(ctx: &ServerContext) {
                 }
             }
             for (sys_id, bid, tid, pos) in balls_to_spawn {
+                let Some(h) = systems.get_handle(sys_id) else {
+                    continue;
+                };
                 if !systems.claim_special_site_ball(sys_id, bid) {
                     continue;
                 }
-                let h = systems.get_or_spawn(sys_id);
                 if h.get_ball_snapshot(bid).await.ok().flatten().is_none() {
                     let cs = build_incursion_npc_combat_state(&sde, tid);
                     let _ = h.spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs).await;

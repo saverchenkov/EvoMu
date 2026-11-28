@@ -118,6 +118,12 @@ async fn spawn_group_and_spawn_belt_rats_for_system_all_security_bands() {
             },
         );
     }
+    ctx.systems
+        .wake_for_session_arrival(
+            30_000_142,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Jita");
     let spawned = mgr
         .spawn_group(&ctx, 30_000_142, 990_001, DVec3::new(10_000.0, 0.0, 0.0))
         .await
@@ -126,11 +132,23 @@ async fn spawn_group_and_spawn_belt_rats_for_system_all_security_bands() {
     assert!(mgr.entities.contains_key(&spawned[0]));
 
     // 3. Wormhole / Drifter Hive system (31_000_001 and 31_000_100) + cooldown skip
+    ctx.systems
+        .wake_for_session_arrival(
+            31_000_001,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake WH 31_000_001");
     let d1 = mgr.spawn_belt_rats_for_system(&ctx, 31_000_001).await.unwrap();
     assert_eq!(d1.len(), 2);
     let d1_again = mgr.spawn_belt_rats_for_system(&ctx, 31_000_001).await.unwrap();
     assert!(d1_again.is_empty());
 
+    ctx.systems
+        .wake_for_session_arrival(
+            31_000_100,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake WH 31_000_100");
     let d2 = mgr.spawn_belt_rats_for_system(&ctx, 31_000_100).await.unwrap();
     assert_eq!(d2.len(), 2);
 
@@ -150,6 +168,12 @@ async fn spawn_group_and_spawn_belt_rats_for_system_all_security_bands() {
         })
         .map(|s| s.solar_system_id);
     if let Some(hs) = high_belt_sys {
+        ctx.systems
+            .wake_for_session_arrival(
+                hs,
+                crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+            )
+            .expect("wake highsec belt system");
         let mut hs_mgr = NpcSpawnManager::new();
         let spawned_hs = hs_mgr.spawn_belt_rats_for_system(&ctx, hs).await.unwrap();
         assert!(!spawned_hs.is_empty());
@@ -173,6 +197,12 @@ async fn spawn_group_and_spawn_belt_rats_for_system_all_security_bands() {
         })
         .map(|s| s.solar_system_id);
     if let Some(ls) = low_belt_sys {
+        ctx.systems
+            .wake_for_session_arrival(
+                ls,
+                crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+            )
+            .expect("wake lowsec belt system");
         let mut ls_mgr = NpcSpawnManager::new();
         let spawned_ls = ls_mgr.spawn_belt_rats_for_system(&ctx, ls).await.unwrap();
         assert!(!spawned_ls.is_empty());
@@ -194,6 +224,12 @@ async fn spawn_group_and_spawn_belt_rats_for_system_all_security_bands() {
         })
         .map(|s| s.solar_system_id);
     if let Some(ns) = null_belt_sys {
+        ctx.systems
+            .wake_for_session_arrival(
+                ns,
+                crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+            )
+            .expect("wake nullsec belt system");
         let mut ns_mgr = NpcSpawnManager::new();
         let spawned_ns = ns_mgr.spawn_belt_rats_for_system(&ctx, ns).await.unwrap();
         assert!(!spawned_ns.is_empty());
@@ -1164,4 +1200,60 @@ fn cold_system_npc_ai_step_preserves_tracked_npcs_and_records_no_cooldowns() {
     }));
     assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
     assert!(!ctx.systems.is_system_loaded(cold_sys));
+}
+
+#[tokio::test]
+async fn cold_system_spawn_group_and_belt_rats_do_not_wake_system() {
+    let mut ctx = test_ctx();
+    let cold_belt_sys = 30_002_813_u32;
+    let cold_wh_sys = 31_000_005_u32;
+    let sg_id = 990_542_u32;
+    Arc::make_mut(&mut ctx.sde).npc_spawn_groups.insert(
+        sg_id,
+        NpcSpawnGroupInfo {
+            spawn_group_id: sg_id,
+            faction_id: 500_010,
+            ship_class: 1,
+            group_id: 550,
+            group_name: "Cold Guard Test".into(),
+            npc_type_ids: vec![597],
+        },
+    );
+    let next_id_before = ctx.db.with_snapshot(|snap| snap.next_entity_id);
+    assert!(ctx.systems.get_handle(cold_belt_sys).is_none());
+    assert!(ctx.systems.get_handle(cold_wh_sys).is_none());
+
+    let mut mgr = NpcSpawnManager::new();
+    let group_res = mgr
+        .spawn_group(&ctx, cold_belt_sys, sg_id, DVec3::ZERO)
+        .await
+        .expect("cold spawn_group returns Ok(empty)");
+    assert!(group_res.is_empty());
+
+    let err_res = mgr
+        .spawn_group(&ctx, cold_belt_sys, 999_888_777, DVec3::ZERO)
+        .await;
+    assert!(err_res.is_err(), "unknown spawn_group_id still returns Err");
+
+    let belt_res = mgr
+        .spawn_belt_rats_for_system(&ctx, cold_belt_sys)
+        .await
+        .expect("cold belt spawn returns Ok(empty)");
+    assert!(belt_res.is_empty());
+
+    let wh_res = mgr
+        .spawn_belt_rats_for_system(&ctx, cold_wh_sys)
+        .await
+        .expect("cold WH spawn returns Ok(empty)");
+    assert!(wh_res.is_empty());
+
+    assert!(mgr.entities.is_empty());
+    assert!(mgr.respawn_timers.is_empty());
+    assert!(mgr.clone_soldier_respawn_timers.is_empty());
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap.next_entity_id),
+        next_id_before
+    );
+    assert!(ctx.systems.get_handle(cold_belt_sys).is_none());
+    assert!(ctx.systems.get_handle(cold_wh_sys).is_none());
 }

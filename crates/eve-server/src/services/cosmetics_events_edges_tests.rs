@@ -718,3 +718,39 @@ async fn mutant_kill_cosmetics_events_dispatch_and_ship_cargo_activate() {
         sk.contains(&lic_tid) && sk.contains(&mapped_skin_id)
     }));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_materialize_system_lod2_wakes_cold_system_with_gm_reason() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let convoy_id = 800_999_542_i64;
+    let gm = gm_session(90_300_099, Some(sys_id), None);
+
+    ctx.living_world.register_convoy(LivingWorldConvoy {
+        convoy_id,
+        archetype: NpcArchetype::HaulerConvoy,
+        ship_type_id: 648,
+        origin_system_id: sys_id,
+        current_system_id: sys_id,
+        destination_system_id: 30_000_144,
+        destination_station_id: 60_003_760,
+        cargo_type_id: 34,
+        cargo_quantity: 500,
+        lod_level: 1,
+        destroyed: false,
+    });
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+
+    let rep = materialize_system_lod2(&ctx, &gm, &[])
+        .await
+        .expect("GM materialize_system_lod2 wakes cold system");
+    assert_eq!(rep, PyRep::Integer(1));
+    assert!(ctx.systems.get_handle(sys_id).is_some());
+    assert_eq!(
+        ctx.systems.last_wake_reason(sys_id),
+        Some(crate::system_actor::SystemWakeReason::GmCommand(
+            "materialize_system_lod2".to_string()
+        ))
+    );
+    assert_eq!(ctx.living_world.get_convoy(convoy_id).unwrap().lod_level, 2);
+}

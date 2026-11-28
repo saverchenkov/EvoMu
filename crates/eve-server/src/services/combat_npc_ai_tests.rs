@@ -449,6 +449,12 @@ async fn gh829_navy_classification_and_npc_corp_id_resolution_across_spawners() 
     .await;
 
     // 4. NpcSpawnManager::spawn_group, spawn_wormhole_ore_guards, spawn_sleeper_sentry_tower
+    ctx.systems
+        .wake_for_session_arrival(
+            sys_id,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake solar system");
     let mut spawn_mgr = crate::combat::npc_ai::NpcSpawnManager::new();
     let group_ids = spawn_mgr
         .spawn_group(&ctx, sys_id, 77_001, glam::DVec3::new(20_000.0, 0.0, 0.0))

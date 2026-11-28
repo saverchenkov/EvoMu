@@ -397,6 +397,9 @@ async fn npc_ai_lowsec_mordu_clone_soldier_officer_fallback_and_drifter() {
     let mut mgr = NpcSpawnManager::default();
     let counts = [12usize, 12, 12, 20, 2, 2];
     for (&sid, &iters) in rich_sys_ids.iter().zip(counts.iter()) {
+        ctx.systems
+            .wake_for_session_arrival(sid, crate::system_actor::SessionArrivalWakeReason::LoginInSpace)
+            .expect("wake rich belt rat system");
         for _ in 0..iters {
             mgr.entities.clear();
             mgr.respawn_timers.clear();
@@ -432,6 +435,13 @@ async fn npc_ai_lowsec_mordu_clone_soldier_officer_fallback_and_drifter() {
         sde.npc_spawn_groups.retain(|_, g| g.faction_id == 0);
         sde.types.retain(|_, t| !matches!(t.group_id, 1174 | 1285 | 1286 | 1287));
     }
+    fallback_ctx
+        .systems
+        .wake_for_session_arrival(
+            rich_sys_ids[0],
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake fallback belt rat system");
     let mut fb_mgr = NpcSpawnManager::default();
     for _ in 0..10 {
         fb_mgr.entities.clear();
@@ -448,6 +458,12 @@ async fn npc_ai_lowsec_mordu_clone_soldier_officer_fallback_and_drifter() {
     // Drifter wormhole BS spawn branches (group 1530 in C5/C6 vs group 1310 in Thera/other WH)
     let mut wh_mgr = NpcSpawnManager::default();
     for wh_sid in [31_000_005u32, 31_000_099u32] {
+        ctx.systems
+            .wake_for_session_arrival(
+                wh_sid,
+                crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+            )
+            .expect("wake wormhole belt rat system");
         for _ in 0..20 {
             wh_mgr.entities.clear();
             let ids = wh_mgr.spawn_belt_rats_for_system(&ctx, wh_sid).await.unwrap();

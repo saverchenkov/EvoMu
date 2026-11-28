@@ -46,6 +46,12 @@ async fn ice_heist_empire_escort_lp_awards_and_ball_respawn() {
     init_insurgency_campaign(&ctx, camp_id, FACTION_ANGEL_CARTEL, 500_002, sys_id, vec![sys_id]);
     add_system_corruption(&ctx, camp_id, sys_id, 450);
 
+    ctx.systems
+        .wake_for_session_arrival(
+            sys_id,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Ice Heist system");
     let inst_id = spawn_ice_heist_checked(&ctx, sys_id).await.unwrap();
     // Already spawned -> ensure_ice_heist_balls_spawned returns false
     assert!(!ensure_ice_heist_balls_spawned(&ctx, sys_id, inst_id).await);
@@ -288,5 +294,15 @@ async fn step_ice_heist_system_stays_cold_below_corruption_stage_3_and_when_syst
         escort_rep.dict_get("pirateTankersSaved").and_then(|v| v.as_i64()),
         Some(1)
     );
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_system_ensure_ice_heist_balls_spawned_returns_false_without_waking() {
+    let ctx = test_ctx();
+    let cold_sys = 30_045_330_u32;
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    assert!(!ensure_ice_heist_balls_spawned(&ctx, cold_sys, 800_999).await);
     assert!(ctx.systems.get_handle(cold_sys).is_none());
 }

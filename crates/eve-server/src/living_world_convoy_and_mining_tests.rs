@@ -125,6 +125,12 @@ async fn interdict_price_selection_and_hauler_convoy_stepping() {
     assert_eq!(route_state.route, vec![30_000_142, 30_000_144]);
     assert!(!director.is_convoy_docked(hc_id));
 
+    systems
+        .wake_for_session_arrival(
+            30_000_142,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Jita");
     let _ = director
         .materialize_system_lod2(30_000_142, &systems, &sde)
         .await;
@@ -206,6 +212,12 @@ async fn npc_mining_op_market_order_creation_and_in_transit_warp_branches() {
     });
 
     // Tick 1: spawns miner & companion hauler at belt.
+    systems
+        .wake_for_session_arrival(
+            30_000_144,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Perimeter");
     let r1 = director
         .step_npc_mining_op(op_id, &systems, &db, &sde)
         .await

@@ -2339,6 +2339,12 @@ async fn test_gh829_state_navy_cerberus_archetype_faction_and_npc_corp_id() {
         .find(|g| g.faction_id >= 500_001 && !g.npc_type_ids.is_empty())
         .map(|g| (g.spawn_group_id, g.faction_id))
         .expect("SDE has at least one faction npc_spawn_group");
+    ctx.systems
+        .wake_for_session_arrival(
+            sys_id,
+            eve_server::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Jita");
     let mut spawn_mgr = NpcSpawnManager::new();
     let group_npc_ids = spawn_mgr
         .spawn_group(&ctx, sys_id, group_id, DVec3::new(25_000.0, 0.0, 0.0))

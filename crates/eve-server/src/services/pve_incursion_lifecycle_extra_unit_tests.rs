@@ -261,6 +261,12 @@ async fn wave_reinforcements_exact_ids_and_staging_two_wave_progression() {
             e.destroyed = true;
         }
     });
+    ctx.systems
+        .wake_for_session_arrival(
+            inc.staging_solar_system_id,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Staging incursion system");
     advance_incursion_wave_on_escort_kill(&ctx.systems, &ctx.db, &ctx.sde, inc.staging_solar_system_id, &stg_site.site_id).await;
     with_pve_special_reg(&ctx, |reg| assert!(!reg.incursion_site_waves.contains_key(&stg_site.site_id)));
 
@@ -456,4 +462,114 @@ fn world_event_tales_all_branches_and_idempotent_stop_notice() {
     publish_incursion_tale_stopped_if_ended(&ctx.quasar_gateway, &ctx.db, &res);
     publish_incursion_tale_stopped_if_ended(&ctx.quasar_gateway, &ctx.db, &res);
     with_pve_special_reg(&ctx, |reg| assert!(reg.incursions[&cid].tale_stop_published));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_system_incursion_wave_and_lifecycle_stay_cold_without_claiming_balls() {
+    let ctx = make_ctx();
+    let eligible = eligible_incursion_constellations(&ctx);
+    let cid = eligible[0].0;
+    let (vg_sys, vg_site_id) = with_pve_special_reg(&ctx, |reg| {
+        reg.initialized = true;
+        seed_incursion_for_constellation(&ctx, reg, cid);
+        let inc = reg.incursions.get_mut(&cid).unwrap();
+        let site = inc
+            .sites
+            .iter_mut()
+            .find(|s| s.tier == "Vanguard")
+            .expect("Vanguard site");
+        site.locked_until_low_influence = false;
+        site.boss_destroyed = false;
+        for esc in &mut site.escort_spawns {
+            esc.destroyed = true;
+        }
+        let sid = site.site_id.clone();
+        let sys = site.solar_system_id;
+        reg.incursion_site_waves.insert(
+            sid.clone(),
+            IncursionSiteWaveMeta {
+                current_wave: 1,
+                total_waves: 3,
+            },
+        );
+        (sys, sid)
+    });
+    assert!(ctx.systems.get_handle(vg_sys).is_none());
+
+    advance_incursion_wave_on_escort_kill(&ctx.systems, &ctx.db, &ctx.sde, vg_sys, &vg_site_id)
+        .await;
+    assert!(ctx.systems.get_handle(vg_sys).is_none());
+    let wave2_bids: Vec<i64> = with_pve_special_reg(&ctx, |reg| {
+        assert_eq!(reg.incursion_site_waves[&vg_site_id].current_wave, 2);
+        reg.incursions[&cid]
+            .sites
+            .iter()
+            .find(|s| s.site_id == vg_site_id)
+            .unwrap()
+            .escort_spawns
+            .iter()
+            .filter(|e| !e.destroyed)
+            .map(|e| e.npc_ball_id)
+            .collect()
+    });
+    assert!(!wave2_bids.is_empty());
+    for bid in wave2_bids {
+        assert!(
+            !ctx.systems.is_special_site_ball_spawned(vg_sys, bid),
+            "cold wave step must not prematurely claim special-site ball {bid}"
+        );
+    }
+
+    let ctx2 = make_ctx();
+    with_pve_special_reg(&ctx2, |reg| {
+        reg.initialized = true;
+        seed_incursion_for_constellation(&ctx2, reg, cid);
+        let now_sec = crate::services::pve_special_sites::spec_now_sec(reg);
+        let old = now_sec.saturating_sub(INCURSION_RESPAWN_CADENCE_SEC + 10_000);
+        reg.incursions.get_mut(&cid).unwrap().state = "Ended".into();
+        reg.incursion_lifecycle.insert(
+            cid,
+            IncursionLifecycleMeta {
+                spawned_at_sec: old.saturating_sub(50_000),
+                last_site_completed_sec: old.saturating_sub(20_000),
+                last_regen_sec: old.saturating_sub(20_000),
+                withdraw_until_sec: Some(old),
+                ended_at_sec: Some(old),
+            },
+        );
+    });
+    advance_incursion_lifecycles(&ctx2);
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let spawned_escorts: Vec<(u32, i64)> = with_pve_special_reg(&ctx2, |reg| {
+        let mut out = Vec::new();
+        for (&resp_cid, inc) in &reg.incursions {
+            if resp_cid == cid || inc.state == "Ended" {
+                continue;
+            }
+            for s in &inc.sites {
+                if !s.locked_until_low_influence {
+                    for esc in &s.escort_spawns {
+                        if !esc.destroyed {
+                            out.push((s.solar_system_id, esc.npc_ball_id));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    });
+    assert!(!spawned_escorts.is_empty());
+    for (sys_id, bid) in spawned_escorts {
+        assert!(
+            ctx2.systems.get_handle(sys_id).is_none(),
+            "advance_incursion_lifecycles must not wake cold system {sys_id}"
+        );
+        assert!(
+            !ctx2.systems.is_special_site_ball_spawned(sys_id, bid),
+            "advance_incursion_lifecycles must not prematurely claim ball {bid} in cold system {sys_id}"
+        );
+    }
 }

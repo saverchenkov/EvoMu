@@ -290,6 +290,12 @@ async fn living_world_materialize_filters_mining_stacking_evasion_and_batch_filt
         lod_level: 1,
         destroyed: false,
     });
+    systems
+        .wake_for_session_arrival(
+            no_belt_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake no_belt_sys");
     assert_eq!(dir.materialize_system_lod2(no_belt_sys, &systems, &sde).await, 1);
 
     // step_all_hauler_convoys skips routes pointing to destroyed or non-HaulerConvoy convoys.

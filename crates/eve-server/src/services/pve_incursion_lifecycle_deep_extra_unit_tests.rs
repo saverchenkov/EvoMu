@@ -363,6 +363,12 @@ async fn incursion_wave_boss_threshold_offsets_effects_and_lifecycle_respawn_kil
 
     // Advance Wave 1 -> Wave 2 (2 < total_waves=3): reinforcements spawn at site_custom_pos + offset,
     // and boss MUST NOT spawn yet (kills `>= -> <` on Wave 2 and `-> ()`).
+    ctx.systems
+        .wake_for_session_arrival(
+            vg_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Vanguard incursion system");
     advance_incursion_wave_on_escort_kill(&ctx.systems, &ctx.db, &ctx.sde, vg_sys, &vg_site_id).await;
 
     let wave2_escorts = with_pve_special_reg(&ctx, |reg| {
@@ -440,6 +446,23 @@ async fn incursion_wave_boss_threshold_offsets_effects_and_lifecycle_respawn_kil
         );
     });
 
+    for &(resp_cid, _) in eligible.iter().take(4) {
+        let sys_ids: Vec<u32> = ctx2
+            .sde
+            .solar_systems
+            .values()
+            .filter(|s| s.constellation_id == resp_cid)
+            .map(|s| s.solar_system_id)
+            .collect();
+        for sys_id in sys_ids {
+            ctx2.systems
+                .wake_for_session_arrival(
+                    sys_id,
+                    crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+                )
+                .expect("wake candidate incursion system");
+        }
+    }
     advance_incursion_lifecycles(&ctx2);
     // Allow tokio::spawn task inside advance_incursion_lifecycles to spawn balls
     for _ in 0..20 {

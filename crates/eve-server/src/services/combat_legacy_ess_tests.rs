@@ -1191,6 +1191,12 @@ async fn legacy_activate_convoy_kill_applies_faction_standing_loss() {
     });
     let kwargs = HashMap::new();
 
+    ctx.systems
+        .wake_for_session_arrival(
+            sys_id,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake solar system");
     let convoy_id = ctx.living_world.ensure_system_hauler_convoy(sys_id, &ctx.sde);
     assert_eq!(
         ctx.living_world

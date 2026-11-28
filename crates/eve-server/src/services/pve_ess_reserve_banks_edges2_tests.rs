@@ -243,6 +243,12 @@ async fn ess_gate_restrictions_autopayout_reserve_links_and_bounty_split_edges()
 
     // 1. ensure_ess_intrusion_site_balls skips non-nullsec, spawns in nullsec, and is idempotent
     ensure_ess_intrusion_site_balls(&ctx, high_sys).await;
+    ctx.systems
+        .wake_for_session_arrival(
+            null_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake null_sys");
     ensure_ess_intrusion_site_balls(&ctx, null_sys).await;
     ensure_ess_intrusion_site_balls(&ctx, null_sys).await;
 
@@ -427,4 +433,22 @@ async fn ess_gate_restrictions_autopayout_reserve_links_and_bounty_split_edges()
         assert!(snap.corporations.get(&player_corp).unwrap().master_wallet_balance().0 > 0);
         assert!(snap.system_states.get(&null_sys).unwrap().ess_main_bank.0 > ess_main_before);
     });
+}
+
+#[tokio::test]
+async fn cold_system_ensure_ess_intrusion_site_balls_stays_cold() {
+    let mut ctx = test_ctx();
+    let null_sys = 30_004_001_u32;
+    {
+        let reg = Arc::make_mut(&mut ctx.sde);
+        let mut null_info = reg.solar_systems.get(&30_000_142).unwrap().clone();
+        null_info.solar_system_id = null_sys;
+        null_info.security_status = -0.5;
+        reg.solar_systems.insert(null_sys, null_info);
+    }
+    assert!(is_kspace_nullsec(&ctx.sde, null_sys));
+    assert!(ctx.systems.get_handle(null_sys).is_none());
+
+    ensure_ess_intrusion_site_balls(&ctx, null_sys).await;
+    assert!(ctx.systems.get_handle(null_sys).is_none());
 }

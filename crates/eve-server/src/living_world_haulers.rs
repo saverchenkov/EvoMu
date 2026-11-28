@@ -243,29 +243,37 @@ pub async fn step_hauler_convoy_internal(
                     let _ = old_handle.remove_ball(convoy_id).await;
                 }
 
-                let new_handle = systems.get_or_spawn(next_sys);
-                let gate_pos = sde
-                    .stargates()
-                    .values()
-                    .filter(|g| g.from_solar_system_id == next_sys && g.to_solar_system_id == prev_sys)
-                    .min_by_key(|g| g.stargate_id)
-                    .map(|g| g.position)
-                    .or_else(|| {
-                        sde.stargates()
-                            .values()
-                            .filter(|g| g.from_solar_system_id == next_sys)
-                            .min_by_key(|g| g.stargate_id)
-                            .map(|g| g.position)
-                    })
-                    .unwrap_or(DVec3::new(10_000.0, 0.0, 0.0));
+                if let Some(new_handle) = systems.get_handle(next_sys) {
+                    let gate_pos = sde
+                        .stargates()
+                        .values()
+                        .filter(|g| g.from_solar_system_id == next_sys && g.to_solar_system_id == prev_sys)
+                        .min_by_key(|g| g.stargate_id)
+                        .map(|g| g.position)
+                        .or_else(|| {
+                            sde.stargates()
+                                .values()
+                                .filter(|g| g.from_solar_system_id == next_sys)
+                                .min_by_key(|g| g.stargate_id)
+                                .map(|g| g.position)
+                        })
+                        .unwrap_or(DVec3::new(10_000.0, 0.0, 0.0));
 
-                let (ball, combat) = sde_ball_and_combat(
-                    sde,
-                    convoy_id,
-                    ship_type_id,
-                    gate_pos + DVec3::new(1_200.0, 0.0, 0.0),
-                );
-                let _ = new_handle.spawn_ball_with_combat(ball, combat).await;
+                    let (ball, combat) = sde_ball_and_combat(
+                        sde,
+                        convoy_id,
+                        ship_type_id,
+                        gate_pos + DVec3::new(1_200.0, 0.0, 0.0),
+                    );
+                    let _ = new_handle.spawn_ball_with_combat(ball, combat).await;
+                } else {
+                    let mut convoys = director.convoys.write().unwrap_or_else(|e| e.into_inner());
+                    if let Some(c) = convoys.get_mut(&convoy_id) {
+                        if c.current_system_id == next_sys && !c.destroyed {
+                            c.lod_level = 1;
+                        }
+                    }
+                }
             }
 
             Ok(ConvoyStepStatus::JumpedGate {
