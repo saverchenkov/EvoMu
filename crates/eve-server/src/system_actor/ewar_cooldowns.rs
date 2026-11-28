@@ -12,7 +12,7 @@ use super::{
 };
 use eve_db::lock_rank::{held_lock_ranks, RankedMutex, RankedRwLock, RANK_LEAF, RANK_WORLD_INNER};
 use eve_sde::SolarSystemId;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
