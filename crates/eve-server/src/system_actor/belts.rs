@@ -5,7 +5,7 @@
 use super::{
     AsteroidState, MiningExtractionResult, TickBroadcast, next_downtime_unix_secs,
 };
-use eve_destiny::wire::{encode_destiny_event, encode_destiny_updates};
+use eve_destiny::wire::{encode_destiny_event, encode_destiny_updates, ordered_batch_indices};
 use eve_destiny::{
     Ball, BallId, Ballpark, DestinyEvent, MovementMode, SlimItemMeta,
 };
@@ -941,18 +941,10 @@ pub(super) fn build_tick_broadcast_with_fx_floor(
             observer_updates_pyrep.insert(obs_id, cached.1.clone());
             continue;
         }
-        let mut encoded = Vec::with_capacity(obs_evs.len());
-        for (idx, ev) in obs_evs
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| matches!(e, DestinyEvent::SetState { .. }))
-            .chain(
-                obs_evs
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, e)| !matches!(e, DestinyEvent::SetState { .. })),
-            )
-        {
+        let batch_indices = ordered_batch_indices(obs_evs);
+        let mut encoded = Vec::with_capacity(batch_indices.len());
+        for idx in batch_indices {
+            let ev = &obs_evs[idx];
             if matches!(ev, DestinyEvent::OnSpecialFX { .. }) {
                 if let Some(a) = last_fx_stamp_opt {
                     a.fetch_max(u64::from(effective_fx_floor), std::sync::atomic::Ordering::AcqRel);

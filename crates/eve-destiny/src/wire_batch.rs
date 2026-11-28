@@ -5,22 +5,22 @@ use crate::{BallId, Ballpark, DestinyEvent};
 use eve_proto::PyRep;
 use std::collections::HashSet;
 
-/// Encodes a slice of [`DestinyEvent`]s into a `DoDestinyUpdate` `PyRep::List` of `(stamp, (action, args))` tuples.
+/// Returns the canonical wire-ordered indices into `events` for a `DoDestinyUpdate` batch (`P-7`).
 ///
 /// DERIVED: V24.01 `eve/client/script/remote/michelle.pyj` (`Park.FlushState` & `Park.RealFlushState`)
 /// requires `SetState` to appear at index `0` (`state[0][1][0] == 'SetState'`); any `SetState` at index `> 0`
 /// is ignored by `RealFlushState`, leaving `Park.validState == False` and hanging `GetBallWaitForModel`.
-pub fn encode_destiny_updates(
-    stamp: u32,
-    events: &[DestinyEvent],
-    park: Option<&Ballpark>,
-) -> PyRep {
+///
+/// Also omits:
+/// - `TargetLockFailed` (internal lock failure notification, not emitted on V24 Destiny wire);
+/// - redundant `OnSlimItemChange { ball_id }` for balls already carrying their latest `SlimItem` in
+///   same-batch `SetState` (all balls) or `AddBalls` / `AddBalls2` (`added_ball_ids`), while
+///   preserving `OnSlimItemChange` for unrelated resident balls (e.g. vacated ship on `ship.Eject`);
+/// - `SetBallInteractive` and `PackagedAction` when `SetState` is present in the same batch.
+pub fn ordered_batch_indices(events: &[DestinyEvent]) -> Vec<usize> {
     let has_set_state = events
         .iter()
         .any(|ev| matches!(ev, DestinyEvent::SetState { .. }));
-    // Omit redundant `OnSlimItemChange` for balls already carrying their latest `SlimItem`
-    // in `SetState` (all balls) or same-batch `AddBalls` / `AddBalls2` (`added_ball_ids`),
-    // while preserving `OnSlimItemChange` for unrelated resident balls (e.g. vacated ship on `ship.Eject`).
     let mut added_ball_ids: HashSet<BallId> = HashSet::new();
     if !has_set_state {
         for ev in events {
@@ -29,10 +29,11 @@ pub fn encode_destiny_updates(
             }
         }
     }
-    let encoded: Vec<PyRep> = events
+    events
         .iter()
-        .filter(|ev| matches!(ev, DestinyEvent::SetState { .. }))
-        .chain(events.iter().filter(|ev| {
+        .enumerate()
+        .filter(|(_, ev)| matches!(ev, DestinyEvent::SetState { .. }))
+        .chain(events.iter().enumerate().filter(|(_, ev)| {
             let omit_slim = matches!(
                 ev,
                 DestinyEvent::OnSlimItemChange { ball_id }
@@ -49,7 +50,19 @@ pub fn encode_destiny_updates(
                             | DestinyEvent::PackagedAction { .. }
                     ))
         }))
-        .map(|ev| encode_destiny_event(stamp, ev, park))
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// Encodes a slice of [`DestinyEvent`]s into a `DoDestinyUpdate` `PyRep::List` of `(stamp, (action, args))` tuples.
+pub fn encode_destiny_updates(
+    stamp: u32,
+    events: &[DestinyEvent],
+    park: Option<&Ballpark>,
+) -> PyRep {
+    let encoded: Vec<PyRep> = ordered_batch_indices(events)
+        .into_iter()
+        .map(|idx| encode_destiny_event(stamp, &events[idx], park))
         .collect();
     PyRep::List(encoded)
 }

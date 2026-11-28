@@ -1348,5 +1348,5 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
     PyRep::Tuple(vec![PyRep::Integer(stamp as i64), action_tuple])
 }
 
-pub use crate::wire_batch::encode_destiny_updates;
+pub use crate::wire_batch::{encode_destiny_updates, ordered_batch_indices};
 #[cfg(test)] #[path = "wire_unit_tests.rs"] mod wire_unit_tests;
