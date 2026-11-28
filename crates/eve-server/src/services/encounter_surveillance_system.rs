@@ -322,7 +322,15 @@ pub async fn handle_ess_link(
         return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "ess_link",
+            "Active ship ball is not in space",
+        ));
+    };
     let Some((current_tick, ship_ball)) = sys_handle
         .get_ball_snapshot(ship_id)
         .await
@@ -769,26 +777,27 @@ pub async fn tick_ess_main_bank_links(ctx: &ServerContext) -> usize {
         let mut ess_id_hint = 820_000_000 + sys_id as i64;
         let mut link_ok = false;
         if let Some(ship_id) = ship_id_opt {
-            let sys_h = ctx.systems.get_or_spawn(sys_id);
-            if let Some((_, ship_ball)) = sys_h.get_ball_snapshot(ship_id).await.ok().flatten() {
-                let not_pod_or_warp = ship_ball.type_id != 670
-                    && !matches!(ship_ball.mode, MovementMode::Warp { .. });
-                let cs_opt = sys_h.get_combat_state(ship_id).await.ok().flatten();
-                let alive = cs_opt.as_ref().is_none_or(|cs| cs.structure_hp > 0.0);
-                let cloaked = cs_opt.as_ref().is_some_and(|cs| cs.is_cloaked)
-                    || sys_h
-                        .view()
-                        .slim_meta(ship_id)
-                        .is_some_and(|sm| sm.is_cloaked);
-                if not_pod_or_warp && alive && !cloaked {
-                    let balls = sys_h.list_balls().await.unwrap_or_default();
-                    if let Some(ess) = balls.into_iter().find(|b| {
-                        b.type_id == 32_882
-                            || b.type_id == 56_002
-                            || b.id == 820_000_000 + sys_id as i64
-                    }) {
-                        ess_id_hint = ess.id;
-                        link_ok = ship_ball.position.distance(ess.position) <= 2_500.0;
+            if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
+                if let Some((_, ship_ball)) = sys_h.get_ball_snapshot(ship_id).await.ok().flatten() {
+                    let not_pod_or_warp = ship_ball.type_id != 670
+                        && !matches!(ship_ball.mode, MovementMode::Warp { .. });
+                    let cs_opt = sys_h.get_combat_state(ship_id).await.ok().flatten();
+                    let alive = cs_opt.as_ref().is_none_or(|cs| cs.structure_hp > 0.0);
+                    let cloaked = cs_opt.as_ref().is_some_and(|cs| cs.is_cloaked)
+                        || sys_h
+                            .view()
+                            .slim_meta(ship_id)
+                            .is_some_and(|sm| sm.is_cloaked);
+                    if not_pod_or_warp && alive && !cloaked {
+                        let balls = sys_h.list_balls().await.unwrap_or_default();
+                        if let Some(ess) = balls.into_iter().find(|b| {
+                            b.type_id == 32_882
+                                || b.type_id == 56_002
+                                || b.id == 820_000_000 + sys_id as i64
+                        }) {
+                            ess_id_hint = ess.id;
+                            link_ok = ship_ball.position.distance(ess.position) <= 2_500.0;
+                        }
                     }
                 }
             }

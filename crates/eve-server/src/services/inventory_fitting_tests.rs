@@ -2369,3 +2369,101 @@ async fn gh1195_t1_cannot_fit_stacked_module_emits_cannot_perform_on_multiple_it
         })
     );
 }
+
+#[tokio::test]
+async fn cold_system_station_unfit_via_invbroker_add_does_not_spawn_system() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_588_001_i64;
+    let user_id = 96_588_1_u64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 96_588_100_i64;
+    let mod_id = 96_588_200_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = user_id;
+        ch.name = "ColdStationUnfitPilot".into();
+        ch.corporation_id = 1_000_009;
+        ch.station_id = Some(station_id);
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 484,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut session = SessionState::new(96_588_010);
+    session.user_id = Some(user_id);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.station_id = Some(station_id);
+    session.solar_system_id = Some(sys_id);
+    session.ship_id = Some(ship_id);
+
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(sys_id),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+
+    let unfit_rep = handle(
+        &ctx,
+        &mut session,
+        None,
+        "invbroker",
+        "Add",
+        &[
+            PyRep::Integer(mod_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("station unfit via invbroker.Add must succeed");
+    assert_ne!(unfit_rep, PyRep::None);
+
+    ctx.db.with_snapshot(|snap| {
+        let item = &snap.items[&mod_id];
+        assert_eq!(item.location_id, station_id);
+        assert_eq!(item.flag, InventoryFlag::Hangar);
+    });
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(sys_id),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+}

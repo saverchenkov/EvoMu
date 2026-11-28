@@ -702,8 +702,11 @@ pub(crate) async fn handle_multi_add(
             item_id,
         );
         crate::services::tactical_modules::remove_projected_remote_assistance(ctx, old_loc, item_id);
-        if let Some(sys_id) = session.solar_system_id {
-            let _ = ctx.systems.get_or_spawn(sys_id).remove_module_cycle(old_loc, item_id).await;
+        if let Some(sys) = session
+            .solar_system_id
+            .and_then(|sys_id| ctx.systems.get_handle(sys_id))
+        {
+            let _ = sys.remove_module_cycle(old_loc, item_id).await;
         }
         source_ships.insert(old_loc);
     }
@@ -719,11 +722,12 @@ pub(crate) async fn handle_multi_add(
         if session.station_id.is_none() && session.structure_id.is_none() {
             if let Some(sys_id) = session.solar_system_id {
                 if let Some(&delay_s) = precomputed_cloak_delays.get(&old_ship) {
-                    let sys = ctx.systems.get_or_spawn(sys_id);
-                    if let Ok(Some(mut cs)) = sys.get_combat_state(old_ship).await {
-                        cs.cloak_configured_targeting_delay_s =
-                            cs.cloak_configured_targeting_delay_s.max(delay_s);
-                        let _ = sys.set_combat_state(old_ship, cs).await;
+                    if let Some(sys) = ctx.systems.get_handle(sys_id) {
+                        if let Ok(Some(mut cs)) = sys.get_combat_state(old_ship).await {
+                            cs.cloak_configured_targeting_delay_s =
+                                cs.cloak_configured_targeting_delay_s.max(delay_s);
+                            let _ = sys.set_combat_state(old_ship, cs).await;
+                        }
                     }
                 }
                 crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(
@@ -1958,30 +1962,31 @@ pub async fn despawn_empty_jetcan_if_needed(
         rt.container_lifetimes.remove(&cont_id);
     });
     if let Some(sid) = sys_opt {
-        let sys_handle = ctx.systems.get_or_spawn(sid);
-        let stamp = sys_handle
-            .get_ball_snapshot(cont_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|(t, _)| t as i64)
-            .unwrap_or(1);
-        let _ = sys_handle.remove_ball(cont_id).await;
-        ctx.emit_typed(
-            crate::router::NotificationTarget::SolarSystem(sid),
-            crate::router::notify_registry::DoDestinyUpdate {
-                state: PyRep::List(vec![PyRep::Tuple(vec![
-                    PyRep::Integer(stamp),
-                    PyRep::Tuple(vec![
-                        PyRep::String("RemoveBalls".into()),
-                        PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(cont_id)])]),
-                    ]),
-                ])]),
-                wait_for_bubble: PyRep::Bool(false),
-                dogma_messages: Some(PyRep::List(Vec::new())),
-                extra: None,
-            },
-        );
+        if let Some(sys_handle) = ctx.systems.get_handle(sid) {
+            let stamp = sys_handle
+                .get_ball_snapshot(cont_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(t, _)| t as i64)
+                .unwrap_or(1);
+            let _ = sys_handle.remove_ball(cont_id).await;
+            ctx.emit_typed(
+                crate::router::NotificationTarget::SolarSystem(sid),
+                crate::router::notify_registry::DoDestinyUpdate {
+                    state: PyRep::List(vec![PyRep::Tuple(vec![
+                        PyRep::Integer(stamp),
+                        PyRep::Tuple(vec![
+                            PyRep::String("RemoveBalls".into()),
+                            PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(cont_id)])]),
+                        ]),
+                    ])]),
+                    wait_for_bubble: PyRep::Bool(false),
+                    dogma_messages: Some(PyRep::List(Vec::new())),
+                    extra: None,
+                },
+            );
+        }
     }
     true
 }

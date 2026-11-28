@@ -2227,6 +2227,83 @@ async fn displaced_docked_s1_delayed_cleanup_after_s2_relocation_does_not_overwr
     );
 }
 
+#[tokio::test]
+async fn get_container_contents_on_cold_system_returns_err_without_spawning_system() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let other_id = 90_000_002_i64;
+    let cold_sys = 30_000_144_u32;
+    let ship_id = 896_901_i64;
+    let own_can = 896_902_i64;
+    let foreign_wreck = 896_903_i64;
+    let wreck_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 186 && t.category_id != 6)
+        .map(|t| t.type_id)
+        .unwrap_or(26561);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            own_can,
+            InventoryItemRecord {
+                item_id: own_can,
+                type_id: 23,
+                owner_id: char_id,
+                location_id: i64::from(cold_sys),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            foreign_wreck,
+            InventoryItemRecord {
+                item_id: foreign_wreck,
+                type_id: wreck_type_id,
+                owner_id: other_id,
+                location_id: i64::from(cold_sys),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = SessionState::new(896_900);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(cold_sys);
+    sess.ship_id = Some(ship_id);
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+
+    let own_err = ctx
+        .get_container_contents(&sess, None, char_id, own_can)
+        .await
+        .unwrap_err();
+    assert_eq!(own_err.code, "CantDoThatWithSomeoneElsesStuff");
+
+    let foreign_err = ctx
+        .get_container_contents(&sess, None, char_id, foreign_wreck)
+        .await
+        .unwrap_err();
+    assert_eq!(foreign_err.code, "CantDoThatWithSomeoneElsesStuff");
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+}
+
 #[cfg(test)]
 #[path = "binding_auth_unit_tests.rs"]
 mod binding_auth_unit_tests;
