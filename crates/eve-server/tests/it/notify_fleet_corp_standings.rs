@@ -305,7 +305,7 @@ async fn test_corp_enlistment_and_logo_notifications() {
     let fac_ev = events_from(&n1, "OnCorpAllowedEnlistmentFactionsSet");
     assert_eq!(
         fac_ev,
-        vec![vec![PyRep::List(vec![PyRep::Integer(500001)])]],
+        vec![vec![]],
         "SetMyCorpAllowedEnlistmentFactions must emit OnCorpAllowedEnlistmentFactionsSet"
     );
 

@@ -28,6 +28,15 @@ pub const INCOMPLETE_SAMPLE_EVENTS: &[&str] = &[
     "OnTradeOffer",
 ];
 
+/// Explicit top-level `PyRep` discriminants for allowlisted trailing arguments beyond the base
+/// sample length (indexed from `base_sample_len`), so every positional slot `0..args.len()` is
+/// strictly checked even when pre-`client_compat` trailing args extend past the V24 sample.
+pub(crate) const INCOMPLETE_TRAILING_SLOT_DISCRIMINANTS: &[(&str, &[&[&str]])] = &[
+    ("OnSharedBookmarksFolderUpdated", &[]),
+    ("OnTradeMoneyOffer", &[&["Real"]]),
+    ("OnTradeOffer", &[&["Bool"]]),
+];
+
 /// Returns `true` if `event` is on the shrink-only incomplete-sample allowlist.
 pub fn is_incomplete_sample_event(event: &str) -> bool {
     INCOMPLETE_SAMPLE_EVENTS.contains(&event)
@@ -645,14 +654,30 @@ fn check_incomplete_allowlist_top_level(
         ));
     }
 
+    let base_sample_len = samples.iter().map(Vec::len).min().unwrap_or(0);
     for (i, actual_arg) in args.iter().enumerate() {
-        let expected_discriminants: Vec<&'static str> = samples
+        let mut expected_discriminants: Vec<&'static str> = samples
             .iter()
             .filter_map(|s| s.get(i).map(discriminant_name))
             .collect();
-        if !expected_discriminants.is_empty()
-            && !expected_discriminants.contains(&discriminant_name(actual_arg))
-        {
+        if expected_discriminants.is_empty() {
+            if let Some(allowed_trailing) = INCOMPLETE_TRAILING_SLOT_DISCRIMINANTS
+                .iter()
+                .find(|(e, _)| *e == event)
+                .and_then(|(_, slots)| i.checked_sub(base_sample_len).and_then(|off| slots.get(off)))
+            {
+                expected_discriminants.extend_from_slice(allowed_trailing);
+            }
+        }
+        if expected_discriminants.is_empty() {
+            return Err(format!(
+                "Notification top-level shape mismatch for allowlisted event '{event}' at arg[{i}]: missing sample or trailing discriminant rule for arg[{i}], got {}; actual={}; expected sample(s)={}",
+                summarize_pyrep_shape(actual_arg),
+                summarize_args_shape(args),
+                summarize_samples_list(samples)
+            ));
+        }
+        if !expected_discriminants.contains(&discriminant_name(actual_arg)) {
             return Err(format!(
                 "Notification top-level shape mismatch for allowlisted event '{event}' at arg[{i}]: expected one of {:?}, got {}; actual={}; expected sample(s)={}",
                 expected_discriminants,
@@ -1072,5 +1097,56 @@ mod tests {
             ))))],
         )
         .is_err());
+    }
+
+    #[test]
+    fn incomplete_allowlist_validates_trailing_slots_strictly() {
+        let trade_offer_samples = vec![vec![PyRep::Integer(1), PyRep::Bool(true)]];
+        assert!(check_event_shape_against_samples(
+            "OnTradeOffer",
+            2,
+            3,
+            &trade_offer_samples,
+            &[PyRep::Integer(1), PyRep::Bool(false), PyRep::Bool(true)],
+        )
+        .is_ok());
+        let err_offer = check_event_shape_against_samples(
+            "OnTradeOffer",
+            2,
+            3,
+            &trade_offer_samples,
+            &[PyRep::Integer(1), PyRep::Bool(false), PyRep::Integer(999)],
+        )
+        .unwrap_err();
+        assert!(
+            err_offer.contains("OnTradeOffer") && err_offer.contains("arg[2]"),
+            "{err_offer}"
+        );
+
+        let money_offer_samples = vec![vec![PyRep::Integer(1), PyRep::Real(5_000.0)]];
+        assert!(check_event_shape_against_samples(
+            "OnTradeMoneyOffer",
+            2,
+            3,
+            &money_offer_samples,
+            &[PyRep::Integer(1), PyRep::Real(0.0), PyRep::Real(5_000.0)],
+        )
+        .is_ok());
+        let err_money = check_event_shape_against_samples(
+            "OnTradeMoneyOffer",
+            2,
+            3,
+            &money_offer_samples,
+            &[
+                PyRep::Integer(1),
+                PyRep::Real(0.0),
+                PyRep::String("bad".into()),
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            err_money.contains("OnTradeMoneyOffer") && err_money.contains("arg[2]"),
+            "{err_money}"
+        );
     }
 }

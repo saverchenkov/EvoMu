@@ -63,13 +63,29 @@ fn emit_shipcaster_target_state_changed(ctx: &ServerContext, solar_system_id: u3
 fn build_beacon_slim_keyval(ctx: &ServerContext, pad: &LandingPadRecord) -> crate::router::notify_registry::SlimItemKeyVal {
     let (group_id, category_id) = ctx.sde.types.get(&pad.type_id).map(|t| (i64::from(t.group_id), i64::from(t.category_id))).unwrap_or((4547, 2));
     let progress: Vec<(PyRep, PyRep)> = pad.contributed_materials.iter().map(|(&tid, &q)| (PyRep::Integer(i64::from(tid)), PyRep::Integer(i64::from(q)))).collect();
-    crate::router::notify_registry::SlimItemKeyVal::from_pairs([
-        ("itemID", PyRep::Integer(pad.item_id)), ("typeID", PyRep::Integer(i64::from(pad.type_id))),
-        ("groupID", PyRep::Integer(group_id)), ("categoryID", PyRep::Integer(category_id)),
-        ("ownerID", PyRep::Integer(i64::from(pad.faction_id))), ("charID", PyRep::None),
-        ("corpID", PyRep::Integer(0)), ("allianceID", PyRep::None),
-        ("component_underConstruction_progress", PyRep::Dict(progress)),
-        ("component_underConstruction_completed", PyRep::Bool(pad.is_built)),
+    crate::router::notify_registry::SlimItemKeyVal::for_space_ship(
+        crate::router::notify_registry::SpaceShipSlimFields {
+            item_id: pad.item_id,
+            type_id: i64::from(pad.type_id),
+            group_id: i64::from(group_id),
+            category_id: i64::from(category_id),
+            owner_id: i64::from(pad.faction_id),
+            char_id: None,
+            corp_id: None,
+            alliance_id: None,
+            name: String::new(),
+        },
+    )
+    .with_extra_pairs([
+        ("corpID", PyRep::Integer(0)),
+        (
+            "component_underConstruction_progress",
+            PyRep::Dict(progress),
+        ),
+        (
+            "component_underConstruction_completed",
+            PyRep::Bool(pad.is_built),
+        ),
     ])
 }
 

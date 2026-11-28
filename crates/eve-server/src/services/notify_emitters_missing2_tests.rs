@@ -66,7 +66,11 @@ fn emit_progression_recommendations_brain_conversation_and_service_mapping() {
     emit_update_localization_text_cache(
         &ctx,
         NotificationTarget::Character(char_id),
-        Some(PyRep::Integer(123)),
+        Some(PyRep::Tuple(vec![
+            PyRep::Dict(vec![(PyRep::Integer(1), PyRep::String("Hello".into()))]),
+            PyRep::Dict(Vec::new()),
+            PyRep::Dict(Vec::new()),
+        ])),
     );
     emit_update_service_mapping(
         &ctx,
@@ -129,7 +133,14 @@ fn emit_progression_recommendations_brain_conversation_and_service_mapping() {
             PyRep::Dict(Vec::new()),
         ])]
     );
-    assert_eq!(drained[6].args, vec![PyRep::Integer(123)]);
+    assert_eq!(
+        drained[6].args,
+        vec![PyRep::Tuple(vec![
+            PyRep::Dict(vec![(PyRep::Integer(1), PyRep::String("Hello".into()))]),
+            PyRep::Dict(Vec::new()),
+            PyRep::Dict(Vec::new()),
+        ])]
+    );
 
     assert_eq!(drained[7].event, "OnUpdateServiceMapping");
     assert_eq!(

@@ -1,6 +1,6 @@
 //! Fleet Operations, Options, Broadcasts, Fleet Warp & Fleet Finder (`SO-2`).
 
-use crate::router::notify_registry::{OnFleetBroadcast, OnFleetMoveFailedCharOnly};
+use crate::router::notify_registry::{OnFleetBroadcast, OnFleetMoveFailed};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{FleetMemberRecord, FleetRole};
 use eve_destiny::MovementMode;
@@ -1695,8 +1695,9 @@ pub(crate) async fn handle_fleet_warp(
     for &opt_out_cid in &skipped_opt_out_members {
         ctx.emit_typed(
             NotificationTarget::Character(char_id),
-            OnFleetMoveFailedCharOnly {
+            OnFleetMoveFailed {
                 char_id: opt_out_cid,
+                is_kicked: false,
             },
         );
     }

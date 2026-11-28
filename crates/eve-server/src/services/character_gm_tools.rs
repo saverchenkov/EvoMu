@@ -1458,8 +1458,8 @@ pub(crate) fn dispatch_fit_slash(
                     ctx,
                     rec.owner_id,
                     &rec,
-                    rec.location_id,
-                    chosen_flag as i64,
+                    0,
+                    0,
                 );
                 ctx.invalidate_and_push_fit(ship_id);
                 if is_fitting_slot {

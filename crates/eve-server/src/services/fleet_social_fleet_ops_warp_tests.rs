@@ -492,7 +492,9 @@ async fn wave2_fleet_warp_rpc_validation_command_scoping_opt_out_and_safety_filt
     assert_eq!(skipped_ids, &vec![PyRep::Integer(90_000_002)]);
     let fc_notes = ctx.drain_notifications_for_char(90_000_001);
     assert!(
-        fc_notes.iter().any(|n| n.event == "OnFleetMoveFailed" && n.args == vec![PyRep::Integer(90_000_002)]),
+        fc_notes
+            .iter()
+            .any(|n| n.event == "OnFleetMoveFailed" && n.args == vec![PyRep::Integer(90_000_002), PyRep::Bool(false)]),
         "expected OnFleetMoveFailed for opt-out 90_000_002, got {fc_notes:?}"
     );
 }

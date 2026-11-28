@@ -1480,6 +1480,10 @@ fn incomplete_sample_events_allowlist_ratchet() {
         .map(|e| e.event)
         .collect();
     let mut seen = HashSet::new();
+    let trailing: Vec<&'static str> = super::notify_shape_check::INCOMPLETE_TRAILING_SLOT_DISCRIMINANTS
+        .iter()
+        .map(|(e, _)| *e)
+        .collect();
     for &event in allowlist {
         assert!(
             seen.insert(event),
@@ -1489,5 +1493,10 @@ fn incomplete_sample_events_allowlist_ratchet() {
             registered.contains(event),
             "allowlist entry '{event}' missing from all_registered_notifications()"
         );
+        assert!(
+            trailing.contains(&event),
+            "allowlist entry '{event}' missing from INCOMPLETE_TRAILING_SLOT_DISCRIMINANTS"
+        );
     }
+    assert_eq!(trailing.len(), allowlist.len());
 }

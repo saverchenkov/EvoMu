@@ -793,11 +793,17 @@ fn on_item_change_two_args(notif: OnItemChange) -> Vec<PyRep> {
 }
 
 fn projected_item_change(target: ProjectedTarget, notif: OnItemChange) -> ProjectedNotification {
+    let args = on_item_change_two_args(notif);
+    #[cfg(any(test, feature = "testkit"))]
+    crate::router::notify_registry::assert_registered_event_shape_if_registered(
+        OnItemChange::EVENT,
+        &args,
+    );
     ProjectedNotification {
         target,
         event: OnItemChange::EVENT,
         id_type: target.default_id_type(),
-        args: on_item_change_two_args(notif),
+        args,
     }
 }
 
@@ -817,7 +823,7 @@ fn build_on_item_change(
     OnItemChange {
         item: row,
         change: change_dict,
-        location: PyRep::None,
+        location: None,
     }
 }
 
@@ -1856,6 +1862,11 @@ pub fn materialize_pending_notifications(
             // Canonical internal `OnItemChange` uses 2 positional args `(row, change_dict)`
             // matching `cache_notifications.rs` (`client_compat` pads trailing `None` on TCP wire).
             if notif.event == OnItemChange::EVENT && notif.args.len() == 2 {
+                #[cfg(any(test, feature = "testkit"))]
+                crate::router::notify_registry::assert_registered_event_shape_if_registered(
+                    OnItemChange::EVENT,
+                    &notif.args,
+                );
                 return Some(crate::router::cache_notifications::assemble_pending_notification(
                     notif.recipient_char_id,
                     notif.recipient_user_id,

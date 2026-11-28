@@ -136,6 +136,22 @@ impl SlimItemKeyVal {
         }
     }
 
+    /// Merges extra `(key, value)` pairs into this [`SlimItemKeyVal`], updating matching keys in place.
+    pub fn with_extra_pairs<K: Into<String>>(
+        mut self,
+        pairs: impl IntoIterator<Item = (K, PyRep)>,
+    ) -> Self {
+        for (k, v) in pairs {
+            let key = k.into();
+            if let Some(existing) = self.fields.iter_mut().find(|(ek, _)| *ek == key) {
+                existing.1 = v;
+            } else {
+                self.fields.push((key, v));
+            }
+        }
+        self
+    }
+
     /// Constructs a full V24-compliant slim-item `KeyVal` for a ship in space (e.g. `invbroker.SetLabel`).
     pub fn for_space_ship(f: SpaceShipSlimFields) -> Self {
         let opt_id = |v: Option<i64>| v.filter(|&id| id > 0).map_or(PyRep::None, PyRep::Integer);

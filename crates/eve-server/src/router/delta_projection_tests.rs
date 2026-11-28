@@ -914,7 +914,17 @@ fn recipient_resolution_filters_offline_sessions_and_materializes_macho_packets(
             event: "OnItemChange",
             id_type: "charid",
             args: vec![
-                PyRep::Dict(vec![(PyRep::String("itemID".into()), PyRep::Integer(42))]),
+                eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(vec![
+                    PyRep::Integer(42),
+                    PyRep::Integer(34),
+                    PyRep::Integer(p1),
+                    PyRep::Integer(60_003_760),
+                    PyRep::Integer(4),
+                    PyRep::Integer(10),
+                    PyRep::Integer(18),
+                    PyRep::Integer(4),
+                    PyRep::String(String::new()),
+                ]),
                 PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]),
             ],
         }],

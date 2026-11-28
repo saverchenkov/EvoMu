@@ -86,7 +86,12 @@ fn attribute_cluster_agent_alliance_and_cosmetic_emitters() {
     emit_invalidate_cache_for_locations(&ctx, NotificationTarget::Character(char_id), &[]);
     emit_invalidate_cache_for_locations(&ctx, NotificationTarget::Character(char_id), &[60_003_760]);
     emit_campaign_enrollment_changed(&ctx, char_id);
-    emit_challenge_expired(&ctx, char_id, 77, PyRep::Integer(88));
+    emit_challenge_expired(
+        &ctx,
+        char_id,
+        77,
+        PyRep::keyval([("challengeID", PyRep::Integer(88))]),
+    );
     emit_contextual_offer_purchased(&ctx, char_id, 0);
     emit_contextual_offer_purchased(&ctx, char_id, 321);
     emit_crate_loot_spawned(&ctx, char_id);

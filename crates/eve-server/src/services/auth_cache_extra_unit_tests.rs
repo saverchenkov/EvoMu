@@ -200,12 +200,18 @@ async fn machonet_cache_login_multilogin_and_clone_grade_edge_branches() {
         vec![
             PyRep::Integer(cid),
             PyRep::String("OnNewNotificationReceived".into()),
-            PyRep::Tuple(vec![PyRep::Integer(7)]),
+            PyRep::Tuple(vec![PyRep::keyval([
+                ("notificationID", PyRep::Integer(7)),
+                ("typeID", PyRep::Integer(1)),
+            ])]),
         ],
         vec![
             PyRep::Integer(cid),
             PyRep::String("OnNewNotificationReceived".into()),
-            PyRep::Integer(9),
+            PyRep::Dict(vec![(
+                PyRep::String("notificationID".into()),
+                PyRep::Integer(9),
+            )]),
         ],
         vec![
             PyRep::Integer(cid),

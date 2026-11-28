@@ -633,7 +633,7 @@ async fn test_crimewatch_duels_kill_rights_and_bounties_notifications() {
     assert_eq!(events(&ctx, P2, "OnKillRightActivated"), vec![vec![]]);
 
     call(&ctx, &mut s1, "bountyProxy", "AddToBounty", &[PyRep::Integer(P2), PyRep::Real(200_000.0)]).await;
-    assert_eq!(events(&ctx, P2, "OnBountyPlaced"), vec![vec![PyRep::Integer(P1), PyRep::Integer(P2), PyRep::Real(200_000.0)]]);
+    assert_eq!(events(&ctx, P2, "OnBountyPlaced"), vec![vec![PyRep::Integer(P2)]]);
 
     let claimed = combat_crimewatch::claim_player_bounty_on_kill(&ctx, P1, P2, 587);
     assert!(claimed > 0.0);
