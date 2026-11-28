@@ -2135,7 +2135,7 @@ async fn r7_f2_02_unhydrated_tether_damage_standup_spool_npc_and_notify() {
     let mut mgr = NpcSpawnManager::new();
     let npc_ids = mgr.spawn_group(&ctx, sys_npc, sg_id, DVec3::ZERO).await.unwrap();
     let npc_pos = h_npc.view().ball_position(npc_ids[0]).unwrap();
-    ctx.npc_spawns.write().unwrap().insert(sys_npc, mgr);
+    crate::combat::npc_ai::npc_test_helpers::insert_npc_spawn_manager(&ctx, sys_npc, mgr);
     let _ = h_npc.spawn_ball_with_meta(
         eve_destiny::Ball { id: sq_npc, type_id: 23_057, position: npc_pos + DVec3::new(800.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 40.0, inertia: 1.0, mass: 1_000.0, radius: 25.0, speed_fraction: 1.0, mode: eve_destiny::MovementMode::Stop },
         sponge_cs(),

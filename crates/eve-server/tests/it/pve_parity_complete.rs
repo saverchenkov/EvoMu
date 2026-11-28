@@ -6240,12 +6240,14 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
     for &ebid in &escort_bids {
         assert!(!eve_server::combat::npc_ai::npc_test_helpers::has_npc_entity(&ctx, ebid));
     }
-    eve_server::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
-        assert!(rt.bounty_credited_balls.contains(&boss_bid));
-        for &ebid in &escort_bids {
-            assert!(rt.bounty_credited_balls.contains(&ebid));
-        }
-    });
+    assert!(eve_server::combat::npc_ai::npc_test_helpers::is_bounty_credited(
+        &ctx, boss_bid
+    ));
+    for &ebid in &escort_bids {
+        assert!(eve_server::combat::npc_ai::npc_test_helpers::is_bounty_credited(
+            &ctx, ebid
+        ));
+    }
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
             snap.combat_crimewatch_state
@@ -6261,9 +6263,9 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
         &ctx, JITA,
     )
     .await;
-    eve_server::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
-        assert!(!rt.destroyed_npc_cache.contains_key(&boss_bid));
-    });
+    assert!(!eve_server::combat::npc_ai::npc_test_helpers::has_destroyed_npc_cached(
+        &ctx, boss_bid
+    ));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
             snap.combat_crimewatch_state
@@ -6373,12 +6375,10 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
         .expect("w_esc0 damage")
         .expect("w_esc0 exists");
     assert!(w0_dead);
-    eve_server::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
-        assert!(
-            rt.destroyed_npc_cache.contains_key(&w_esc0),
-            "destroyed seasonal escort must populate destroyed_npc_cache for cycle/missile wreck hooks"
-        );
-    });
+    assert!(
+        eve_server::combat::npc_ai::npc_test_helpers::has_destroyed_npc_cached(&ctx, w_esc0),
+        "destroyed seasonal escort must populate destroyed_npc_cache for cycle/missile wreck hooks"
+    );
     eve_server::services::combat_crimewatch::handle_destroyed_ball_from_missile_or_aoe(
         &ctx,
         JITA,
@@ -6399,9 +6399,9 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
         &ctx, JITA,
     )
     .await;
-    eve_server::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
-        assert!(!rt.destroyed_npc_cache.contains_key(&w_esc1));
-    });
+    assert!(!eve_server::combat::npc_ai::npc_test_helpers::has_destroyed_npc_cached(
+        &ctx, w_esc1
+    ));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
             snap.combat_crimewatch_state

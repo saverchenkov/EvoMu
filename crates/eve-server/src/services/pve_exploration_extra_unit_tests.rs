@@ -227,12 +227,8 @@ async fn npc_destruction_core_wormhole_wave_trigger_ded_gate_and_data_can_guards
     });
 
     let destruct = |bid: i64, drop_sleeper: bool| {
-        handle_pve_site_npc_destruction_core(
-            &ctx.systems,
-            &ctx.db,
-            &ctx.sde,
-            &ctx.mechanic_rng,
-            &ctx.combat_ephemeral,
+        crate::combat::npc_ai::npc_test_helpers::handle_pve_site_npc_destruction_for_ctx(
+            &ctx,
             wh_sys,
             bid,
             char_id,

@@ -419,12 +419,8 @@ async fn escalation_expiry_and_step_advance_despawn_site_npc_balls_and_ignore_cl
             .unwrap();
         site.active_npc_ball_ids.push(sentinel_ball);
     });
-    let kill_res = crate::services::pve_exploration::handle_pve_site_npc_destruction_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.mechanic_rng,
-        &*ctx.combat_ephemeral,
+    let kill_res = crate::combat::npc_ai::npc_test_helpers::handle_pve_site_npc_destruction_for_ctx(
+        &ctx,
         entry.destination_solar_system_id,
         sentinel_ball,
         char_id,
@@ -695,12 +691,8 @@ async fn expired_unpruned_escalation_cannot_resurrect_or_drop_final_loot_via_ste
     let final3_handle = ctx.systems.get_handle(final3_sys).expect("final3 handle");
 
     clock.advance_secs(86_405);
-    let kill_res = crate::services::pve_exploration::handle_pve_site_npc_destruction_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.mechanic_rng,
-        &*ctx.combat_ephemeral,
+    let kill_res = crate::combat::npc_ai::npc_test_helpers::handle_pve_site_npc_destruction_for_ctx(
+        &ctx,
         final3_sys,
         last_npc3,
         char_id,

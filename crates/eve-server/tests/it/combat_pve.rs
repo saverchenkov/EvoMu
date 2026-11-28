@@ -921,6 +921,7 @@ use eve_proto::PyRep;
 use eve_server::combat::death_pipeline::{execute_death_pipeline, execute_death_pipeline_sync};
 use eve_server::combat::npc_ai::npc_test_helpers::{
     any_npc_entity_in_system, find_npc_entity_in_system, get_npc_entity,
+    with_mut_npc_spawn_manager, with_npc_spawn_manager,
 };
 use eve_server::combat::npc_ai::{
     clone_soldier_type_for_security, clone_soldier_type_for_security_and_faction, regional_pirate_faction_id,
@@ -1497,7 +1498,7 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
     // Drive belt, gate, and Clone Soldier spawning through the real SP-7 production scheduler (`tick_background_cluster`)
     let lowsec_handle = ctx.systems.get_or_spawn(lowsec_sys_id);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    assert!(ctx.npc_spawns.read().unwrap().get(&lowsec_sys_id).is_some_and(|m| !m.entities.is_empty()), "SP-7 tick must populate ctx.npc_spawns belt/gate waves");
+    assert!(with_npc_spawn_manager(&ctx, lowsec_sys_id, |m| !m.entities.is_empty()).unwrap_or(false), "SP-7 tick must populate ctx.npc_spawns belt/gate waves");
 
     let cs_npc = find_npc_entity_in_system(&ctx, lowsec_sys_id, |n| n.archetype == "CloneSoldier")
         .expect("SP-7 tick must spawn a Clone Soldier in low-sec");
@@ -1517,7 +1518,7 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
     assert!(dropped_types.contains(&tag_tid) && ctx.db.with_snapshot(|snap| snap.items.values().any(|i| i.location_id == cs_wreck_id && i.type_id == tag_tid)));
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(!any_npc_entity_in_system(&ctx, lowsec_sys_id, |n| n.archetype == "CloneSoldier"), "Clone Soldier must not respawn during 1200s cooldown");
-    ctx.npc_spawns.write().unwrap().get_mut(&lowsec_sys_id).unwrap().clone_soldier_respawn_timers.insert(lowsec_sys_id, 0);
+    with_mut_npc_spawn_manager(&ctx, lowsec_sys_id, |m| { m.clone_soldier_respawn_timers.insert(lowsec_sys_id, 0); }).unwrap();
     with_mut_combat_runtime(&ctx, |rt| { rt.clone_soldier_cooldown_until.insert(lowsec_sys_id, 0); });
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(any_npc_entity_in_system(&ctx, lowsec_sys_id, |n| n.archetype == "CloneSoldier"), "Clone Soldier must respawn via SP-7 tick after cooldown expires");
@@ -1543,9 +1544,9 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
         let _ = sys_handle.spawn_ball_with_combat(new_ball(bid, tid, DVec3::new(5_000.0, 0.0, 0.0)), ctx.build_type_combat_state(tid)).await;
     }
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    let first_belt_rat = *ctx.npc_spawns.read().unwrap()[&sys_id].entities.keys().next().unwrap();
-    let _ = ctx.npc_spawns.write().unwrap().get_mut(&sys_id).unwrap().handle_npc_destroyed(&ctx, sys_id, first_belt_rat, char_a, ctx.now_unix()).unwrap();
-    assert!(!ctx.npc_spawns.read().unwrap()[&sys_id].respawn_timers.is_empty());
+    let first_belt_rat = with_npc_spawn_manager(&ctx, sys_id, |m| *m.entities.keys().next().unwrap()).unwrap();
+    let _ = with_mut_npc_spawn_manager(&ctx, sys_id, |m| m.handle_npc_destroyed(&ctx, sys_id, first_belt_rat, char_a, ctx.now_unix()).unwrap()).unwrap();
+    assert!(with_npc_spawn_manager(&ctx, sys_id, |m| !m.respawn_timers.is_empty()).unwrap());
 
     let transporter_id = spawn_specialized_npc_entity(&ctx, sys_id, 33163, "CloneSoldier", 500_010, DVec3::new(900_000.0, 0.0, 0.0)).await;
     let npc_id = spawn_specialized_npc_entity(&ctx, sys_id, 33175, "CloneSoldier", 500_010, DVec3::ZERO).await;

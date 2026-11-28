@@ -921,11 +921,10 @@ async fn gm_fit_enforces_hull_slots_and_hardpoints_and_spawn_asteroid_uses_syste
             .expect("NPC SlimItemMeta in ballpark");
         assert_eq!(npc_meta.category_id, 11);
         assert!(
-            ctx.npc_spawns
-                .read()
-                .unwrap()
-                .get(&sys_id)
-                .is_some_and(|m| m.entities.contains_key(&npc_id)),
+            crate::combat::npc_ai::npc_test_helpers::with_npc_spawn_manager(&ctx, sys_id, |m| {
+                m.entities.contains_key(&npc_id)
+            })
+            .unwrap_or(false),
             "/spawn NPC must register in NpcSpawnManager"
         );
         assert!(
@@ -1651,11 +1650,10 @@ async fn spawn_multi_npc_rollback_cleans_db_ballpark_and_npc_runtime_state() {
         assert!(!has_second);
     }
     assert!(
-        ctx.npc_spawns
-            .read()
-            .unwrap()
-            .get(&sys_id)
-            .is_none_or(|m| !m.entities.contains_key(&first_npc_id) && !m.entities.contains_key(&second_npc_id)),
+        crate::combat::npc_ai::npc_test_helpers::with_npc_spawn_manager(&ctx, sys_id, |m| {
+            !m.entities.contains_key(&first_npc_id) && !m.entities.contains_key(&second_npc_id)
+        })
+        .unwrap_or(true),
         "rollback must clean ctx.npc_spawns for prior and failed NPCs"
     );
     assert!(

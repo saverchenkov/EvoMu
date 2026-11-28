@@ -2,7 +2,9 @@
 
 use super::*;
 use super::combat_npc_ai_tests::make_test_npc_entity;
-use crate::combat::npc_ai::npc_test_helpers::{get_npc_entity, has_npc_entity, seed_npc_entity};
+use crate::combat::npc_ai::npc_test_helpers::{
+    enable_behavior_debugging, get_npc_entity, has_npc_entity, seed_npc_entity,
+};
 use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::test_ctx_and_clock;
 use eve_db::types::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode, WarpPhase};
@@ -282,9 +284,7 @@ async fn step_ai_sync_early_returns_debugging_dead_cleanup_relay_warp_and_sleepe
             .await;
     }
 
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        rt.behavior_debugging_active.insert(debug_npc);
-    });
+    enable_behavior_debugging(&ctx, debug_npc);
     let mut dbg_ent = make_test_npc_entity(debug_npc, 606, sys_id, "Pirate");
     dbg_ent.target_id = Some(debug_target);
     dbg_ent.damage_vector = DamageVector::new(100.0, 0.0, 0.0, 0.0);

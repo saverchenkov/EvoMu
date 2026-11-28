@@ -493,9 +493,9 @@ async fn tick_insurgency_campaigns_auto_seeding_roamers_and_cleanup() {
         s
     });
     sync_campaign_system_npcs(&ctx, seeded_id, camp_sys).await;
-    assert!(crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
-        rt.ci_sentry_deployed_systems.contains(&camp_sys)
-    }));
+    assert!(crate::combat::npc_ai::npc_test_helpers::is_ci_sentry_deployed(
+        &ctx, camp_sys
+    ));
 
     // Expire winddown_end_unix and tick -> resolves Tie and cleans up ended campaign roamers
     ctx.db.with_mut_snapshot(|snap| {

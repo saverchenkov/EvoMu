@@ -6,10 +6,11 @@
 use super::*;
 use crate::combat::crimewatch_tail_test_helpers::set_disapproval_flag;
 use crate::combat::npc_ai::npc_test_helpers::{
-    any_npc_entity_in_system, find_npc_entity_in_system, has_npc_entity, npc_entity_ids,
+    any_npc_entity_in_system, find_npc_entity_in_system, has_npc_entity, mark_ci_sentry_deployed,
+    npc_entity_ids,
 };
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_ephemeral};
+use crate::services::combat_crimewatch::with_combat_runtime;
 use eve_db::clock::{ServerClock, VirtualServerClock};
 use eve_db::durable_domain_types::{
     PersistedCrimeWatchState, PersistedIceHeistRecord, PersistedInsurgencyCampaign,
@@ -436,9 +437,7 @@ async fn roamer_selection_waypoints_npc_sync_patrol_and_ended_campaign_cleanup()
             },
         ];
     });
-    with_mut_combat_ephemeral(&ctx, |rt| {
-        rt.ci_sentry_deployed_systems.insert(sys_id);
-    });
+    mark_ci_sentry_deployed(&ctx, sys_id);
     cleanup_ended_campaign_sites_and_roamers(&ctx, FACTION_ANGEL_CARTEL, &[sys_id, angel_hq]).await;
     ctx.db.with_snapshot(|snap| {
         let kept_ids: Vec<i64> = snap.insurgency_runtime.insurgency_instances.iter().map(|s| s.instance_id).collect();

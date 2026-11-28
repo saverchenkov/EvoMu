@@ -3,6 +3,9 @@
 //! `collapse_stranded_abyssal_if_needed_sync`, `on_advance_secs`, and `tick_background_cluster`).
 
 use super::*;
+use crate::combat::npc_ai::npc_test_helpers::{
+    with_mut_npc_spawn_manager, with_npc_spawn_manager, with_or_insert_npc_spawn_manager,
+};
 use crate::probe_test_helpers;
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_fighters::fighter_test_helpers;
@@ -1507,11 +1510,7 @@ async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
     });
 
     // 2. Seed an NPC entity in `ctx.npc_spawns` for `sys_id`.
-    {
-        let mut spawns = ctx.npc_spawns.write().unwrap();
-        let mgr = spawns
-            .entry(sys_id)
-            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
+    with_or_insert_npc_spawn_manager(&ctx, sys_id, |mgr| {
         mgr.entities.insert(
             npc_ball_id,
             crate::combat::npc_ai::NpcCombatEntity {
@@ -1532,7 +1531,7 @@ async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
                 has_armor_rep: false,
             },
         );
-    }
+    });
 
     // 3. Apply a StepOutput that destroys `npc_ball_id` and runs `npc_death_hook` + `system_step_hook`.
     let handle = ctx.systems.get_or_spawn(sys_id);
@@ -1555,9 +1554,7 @@ async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
 
     // 4. Verify `ctx.npc_spawns` recorded the respawn timer on the real `ServerContext` (#839)
     // and `active_scanner_probes` in `ctx.db` was NOT wiped by a throwaway shadow ServerContext (#839).
-    {
-        let spawns = ctx.npc_spawns.read().unwrap();
-        let mgr = spawns.get(&sys_id).expect("npc_spawns entry exists");
+    with_npc_spawn_manager(&ctx, sys_id, |mgr| {
         assert!(
             !mgr.entities.contains_key(&npc_ball_id),
             "#839: destroyed NPC ball must be removed from live ctx.npc_spawns"
@@ -1566,7 +1563,8 @@ async fn system_step_hook_and_npc_death_hook_use_live_server_context_839() {
             mgr.respawn_timers.contains_key(&(sys_id, spawn_group_id)),
             "#839: live ctx.npc_spawns must record respawn timer when NPC dies in step hook"
         );
-    }
+    })
+    .expect("npc_spawns entry exists");
     ctx.persist_server_runtime_to_db();
     let probe_still_persisted =
         super::super::with_sp6_state(&ctx.db, |st| st.active_scanner_probes.contains_key(&probe_id));
@@ -1670,35 +1668,26 @@ async fn system_hibernation_zero_idle_tick_work_and_eviction_919_866_869() {
         has_shield_rep: false,
         has_armor_rep: false,
     };
-    {
-        let mut spawns = ctx.npc_spawns.write().unwrap();
-        let mgr_active = spawns
-            .entry(active_sys)
-            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
+    with_or_insert_npc_spawn_manager(&ctx, active_sys, |mgr_active| {
         mgr_active
             .respawn_timers
             .insert((active_sys, 42_424), 9_999_999_999);
-
-        let mgr_wh = spawns
-            .entry(concurrent_sys)
-            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
+    });
+    with_or_insert_npc_spawn_manager(&ctx, concurrent_sys, |mgr_wh| {
         mgr_wh
             .respawn_timers
             .insert((concurrent_sys, 42_424), 9_999_999_999);
         mgr_wh
             .entities
             .insert(concurrent_npc_ball_id, concurrent_bounty_npc);
-    }
+    });
 
     // Deterministically suspend execute_belt_rat_plan_detached_with_start_id across its actor await
     // and inject a concurrent handle_npc_destroyed mutation on ctx.npc_spawns before merge.
-    let (mut planned_groups, special_specs) = {
-        let mut spawns = ctx.npc_spawns.write().unwrap();
-        spawns
-            .get_mut(&concurrent_sys)
-            .expect("concurrent_sys must remain present in npc_spawns")
-            .plan_belt_rats_for_system(&ctx, concurrent_sys, false, None, false, false, false)
-    };
+    let (mut planned_groups, special_specs) = with_mut_npc_spawn_manager(&ctx, concurrent_sys, |mgr| {
+        mgr.plan_belt_rats_for_system(&ctx, concurrent_sys, false, None, false, false, false)
+    })
+    .expect("concurrent_sys must remain present in npc_spawns");
     if planned_groups.is_empty() {
         let Some((&sg_id, sg)) = ctx.sde.npc_spawn_groups.iter().next() else {
             panic!("SDE must contain at least one npc_spawn_group");
@@ -1723,18 +1712,17 @@ async fn system_hibernation_zero_idle_tick_work_and_eviction_919_866_869() {
             res = &mut exec_fut => break res,
             _ = std::future::ready(()), if !concurrent_kill_injected => {
                 concurrent_kill_injected = true;
-                let mut spawns = ctx.npc_spawns.write().unwrap();
-                let mgr = spawns
-                    .get_mut(&concurrent_sys)
-                    .expect("GH-869: concurrent_sys entry must still exist in npc_spawns mid-await");
-                mgr.handle_npc_destroyed(
-                    &ctx,
-                    concurrent_sys,
-                    concurrent_npc_ball_id,
-                    90_000_001,
-                    now_unix,
-                )
-                .expect("concurrent handle_npc_destroyed succeeds");
+                with_mut_npc_spawn_manager(&ctx, concurrent_sys, |mgr| {
+                    mgr.handle_npc_destroyed(
+                        &ctx,
+                        concurrent_sys,
+                        concurrent_npc_ball_id,
+                        90_000_001,
+                        now_unix,
+                    )
+                    .expect("concurrent handle_npc_destroyed succeeds");
+                })
+                .expect("GH-869: concurrent_sys entry must still exist in npc_spawns mid-await");
             }
         }
     };
@@ -1746,72 +1734,65 @@ async fn system_hibernation_zero_idle_tick_work_and_eviction_919_866_869() {
         !spawned_entities.is_empty(),
         "detached belt rat execution must yield spawned entities to merge"
     );
-    {
-        let mut spawns = ctx.npc_spawns.write().unwrap();
-        let mgr = spawns
-            .entry(concurrent_sys)
-            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
+    with_or_insert_npc_spawn_manager(&ctx, concurrent_sys, |mgr| {
         for (ball_id, entity) in &spawned_entities {
             mgr.entities.insert(*ball_id, entity.clone());
         }
-    }
+    });
 
     // Also drive tick_background_cluster concurrently with a spawned writer task on npc_spawns.
     ctx.clock().advance_secs(1);
     let ctx_bg = ctx.clone();
     let mut concurrent_writer = tokio::spawn(async move {
         tokio::task::yield_now().await;
-        let mut spawns = ctx_bg.npc_spawns.write().unwrap();
-        let mgr = spawns
-            .entry(active_sys)
-            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new);
-        mgr.respawn_timers.insert((active_sys, 55_555), 8_888_888_888);
+        with_or_insert_npc_spawn_manager(&ctx_bg, active_sys, |mgr| {
+            mgr.respawn_timers.insert((active_sys, 55_555), 8_888_888_888);
+        });
     });
     tokio::join!(tick_background_cluster(&ctx), async {
         let _ = (&mut concurrent_writer).await;
     });
 
-    let spawns_guard = ctx.npc_spawns.read().unwrap();
-    let active_mgr = spawns_guard
-        .get(&active_sys)
-        .expect("active_sys present in npc_spawns");
-    assert_eq!(
-        active_mgr.respawn_timers.get(&(active_sys, 42_424)).copied(),
-        Some(9_999_999_999),
-        "GH-869: pre-existing respawn timer must not be dropped across cluster tick awaits"
-    );
-    assert_eq!(
-        active_mgr.respawn_timers.get(&(active_sys, 55_555)).copied(),
-        Some(8_888_888_888),
-        "GH-869: concurrent mutation injected during cluster tick must survive"
-    );
-
-    let wh_mgr = spawns_guard
-        .get(&concurrent_sys)
-        .expect("concurrent_sys present in npc_spawns");
-    assert_eq!(
-        wh_mgr.respawn_timers.get(&(concurrent_sys, 42_424)).copied(),
-        Some(9_999_999_999),
-        "GH-869: existing respawn timer must survive mid-await mutation + merge"
-    );
-    assert_eq!(
-        wh_mgr
-            .respawn_timers
-            .get(&(concurrent_sys, concurrent_spawn_group_id))
-            .copied(),
-        Some(now_unix + 1_200),
-        "GH-869: concurrent handle_npc_destroyed cooldown must survive post-await merge"
-    );
-    assert!(
-        !wh_mgr.entities.contains_key(&concurrent_npc_ball_id),
-        "GH-869: concurrently destroyed NPC must remain removed after post-await merge"
-    );
-    for (ball_id, _) in &spawned_entities {
-        assert!(
-            wh_mgr.entities.contains_key(ball_id),
-            "GH-869: newly spawned belt rat {ball_id} must be merged after concurrent kill"
+    with_npc_spawn_manager(&ctx, active_sys, |active_mgr| {
+        assert_eq!(
+            active_mgr.respawn_timers.get(&(active_sys, 42_424)).copied(),
+            Some(9_999_999_999),
+            "GH-869: pre-existing respawn timer must not be dropped across cluster tick awaits"
         );
-    }
+        assert_eq!(
+            active_mgr.respawn_timers.get(&(active_sys, 55_555)).copied(),
+            Some(8_888_888_888),
+            "GH-869: concurrent mutation injected during cluster tick must survive"
+        );
+    })
+    .expect("active_sys present in npc_spawns");
+
+    with_npc_spawn_manager(&ctx, concurrent_sys, |wh_mgr| {
+        assert_eq!(
+            wh_mgr.respawn_timers.get(&(concurrent_sys, 42_424)).copied(),
+            Some(9_999_999_999),
+            "GH-869: existing respawn timer must survive mid-await mutation + merge"
+        );
+        assert_eq!(
+            wh_mgr
+                .respawn_timers
+                .get(&(concurrent_sys, concurrent_spawn_group_id))
+                .copied(),
+            Some(now_unix + 1_200),
+            "GH-869: concurrent handle_npc_destroyed cooldown must survive post-await merge"
+        );
+        assert!(
+            !wh_mgr.entities.contains_key(&concurrent_npc_ball_id),
+            "GH-869: concurrently destroyed NPC must remain removed after post-await merge"
+        );
+        for (ball_id, _) in &spawned_entities {
+            assert!(
+                wh_mgr.entities.contains_key(ball_id),
+                "GH-869: newly spawned belt rat {ball_id} must be merged after concurrent kill"
+            );
+        }
+    })
+    .expect("concurrent_sys present in npc_spawns");
 }
 
 #[tokio::test]
@@ -2301,11 +2282,12 @@ async fn cluster_tick_npc_ai_ship_death_flushes_projected_ewar_without_lock_rank
 
     let npc_ent_a1 = spawn_npc(&handle_a, npc_a1, glam::DVec3::new(1_000.0, 0.0, 0.0));
     let npc_ent_b1 = spawn_npc(&handle_b, npc_b1, glam::DVec3::new(1_000.0, 0.0, 0.0));
-    {
-        let mut spawns = ctx.npc_spawns.write().unwrap();
-        spawns.entry(sys_a).or_default().entities.insert(npc_a1, npc_ent_a1);
-        spawns.entry(sys_b).or_default().entities.insert(npc_b1, npc_ent_b1);
-    }
+    with_or_insert_npc_spawn_manager(&ctx, sys_a, |mgr| {
+        mgr.entities.insert(npc_a1, npc_ent_a1);
+    });
+    with_or_insert_npc_spawn_manager(&ctx, sys_b, |mgr| {
+        mgr.entities.insert(npc_b1, npc_ent_b1);
+    });
 
     let mut eff_a = eve_dogma::DogmaItemState::from_sde(mod_a1, 447, &ctx.sde);
     eff_a.base_attributes.insert(103, 2.0);
@@ -2387,11 +2369,8 @@ async fn cluster_tick_npc_ai_ship_death_flushes_projected_ewar_without_lock_rank
         "flushed projected EWAR must push FitProjection to sys_b actor"
     );
     assert!(
-        ctx.npc_spawns
-            .read()
-            .unwrap()
-            .get(&sys_a)
-            .is_some_and(|mgr| mgr.entities.contains_key(&npc_a1)),
+        with_npc_spawn_manager(&ctx, sys_a, |mgr| mgr.entities.contains_key(&npc_a1))
+            .unwrap_or(false),
         "sibling system npc_spawns entity must survive concurrent physics tick"
     );
 }

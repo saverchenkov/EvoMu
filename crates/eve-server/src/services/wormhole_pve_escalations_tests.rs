@@ -1,5 +1,8 @@
 use super::*;
-use crate::combat::npc_ai::npc_test_helpers::{get_npc_entity, has_npc_entity};
+use crate::combat::npc_ai::npc_test_helpers::{
+    get_npc_entity, has_npc_entity, spawn_decloaked_transmission_relay_for_ctx,
+    spawn_upgraded_avengers_for_ctx,
+};
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_ctx_and_session;
 use crate::services::pve_exploration::{with_pve_exploration_reg, PveSiteInstance};
 
@@ -13,30 +16,10 @@ async fn test_wormhole_pve_escalations_avengers_relays_and_downtime() {
     let wh_sys: SolarSystemId = 31_000_005;
 
     // 1. Spawn Upgraded Avengers (3 in C5, 4 in C6)
-    let c5_ids = spawn_upgraded_avengers_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
-        wh_sys,
-        5,
-        DVec3::ZERO,
-        0,
-    )
-    .await;
+    let c5_ids = spawn_upgraded_avengers_for_ctx(&ctx, wh_sys, 5, DVec3::ZERO, 0).await;
     assert_eq!(c5_ids.len(), 3);
 
-    let c6_ids = spawn_upgraded_avengers_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
-        wh_sys,
-        6,
-        DVec3::ZERO,
-        1,
-    )
-    .await;
+    let c6_ids = spawn_upgraded_avengers_for_ctx(&ctx, wh_sys, 6, DVec3::ZERO, 1).await;
     assert_eq!(c6_ids.len(), 4);
 
     // 2. Seed a C6 combat site and a shattered resource site in PvE exploration registry
@@ -76,11 +59,8 @@ async fn test_wormhole_pve_escalations_avengers_relays_and_downtime() {
     });
 
     // 3. Spawn Decloaked Transmission Relay and trigger Drifter response escalation
-    let relay_bid = spawn_decloaked_transmission_relay_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
+    let relay_bid = spawn_decloaked_transmission_relay_for_ctx(
+        &ctx,
         wh_sys,
         "C6-CORE-1",
         [1_000.0, 0.0, 0.0],
@@ -121,17 +101,7 @@ async fn r11_k12_escalation_slim_meta_sleeper_sde_stats_and_downtime_relay_clean
     let (ctx, _session, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
     let wh_sys: SolarSystemId = 31_000_005;
 
-    let avenger_ids = spawn_upgraded_avengers_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
-        wh_sys,
-        5,
-        DVec3::ZERO,
-        0,
-    )
-    .await;
+    let avenger_ids = spawn_upgraded_avengers_for_ctx(&ctx, wh_sys, 5, DVec3::ZERO, 0).await;
     assert_eq!(avenger_ids.len(), 3);
 
     with_pve_exploration_reg(&ctx, |reg| {
@@ -167,11 +137,8 @@ async fn r11_k12_escalation_slim_meta_sleeper_sde_stats_and_downtime_relay_clean
         );
     });
 
-    let relay_bid = spawn_decloaked_transmission_relay_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        &ctx.combat_ephemeral,
+    let relay_bid = spawn_decloaked_transmission_relay_for_ctx(
+        &ctx,
         wh_sys,
         "C6-RELAY-CLEAN",
         [2_000.0, 0.0, 0.0],
