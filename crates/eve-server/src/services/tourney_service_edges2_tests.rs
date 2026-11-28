@@ -884,7 +884,116 @@ async fn tourney_create_match_and_teleport_wake_cold_match_sys_with_gm_command_w
     assert!(!non_ref_err.code.is_empty());
     assert!(ctx.systems.get_handle(arena_sys).is_none());
 
-    // 4. Valid GM TeleportPlayers wakes cold arena_sys with GmCommand("tourneyMgr.TeleportPlayers").
+    // 4. Invalid system ID is rejected before DB mutation or wake.
+    let mut bad_sys_kw = cm_kw.clone();
+    bad_sys_kw.insert("systemID".into(), PyRep::Integer(99_999_999));
+    let bad_sys_err = tm(
+        &ctx,
+        &mut gm,
+        "CreateMatch",
+        &[PyRep::Integer(88), PyRep::Integer(8402), PyRep::Integer(50)],
+        &bad_sys_kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(bad_sys_err.code, "InvalidSolarSystemID");
+    assert!(ctx.db.with_snapshot(|s| !load_store(s).matches.contains_key(&8402)));
+
+    // 5. Wake failure on CreateMatch and TeleportPlayers fails closed with SystemTransitionFailed,
+    //    preserving DB state, origin ship balls, caller session, notifications, and Cold arena_sys.
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct FailTourneyWakeProvider {
+        target_sys: u32,
+        should_fail: Arc<AtomicBool>,
+    }
+    impl crate::system_actor::SystemContentProvider for FailTourneyWakeProvider {
+        fn name(&self) -> &'static str {
+            "test_tourney_fail_wake"
+        }
+
+        fn seed(
+            &self,
+            seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+        ) -> Result<(), String> {
+            if seed_ctx.solar_system_id == self.target_sys && self.should_fail.load(Ordering::Acquire) {
+                return Err(format!("injected tourney wake failure for {}", self.target_sys));
+            }
+            Ok(())
+        }
+    }
+
+    assert!(ctx.systems.get_handle(arena_sys).is_none());
+    let fail_arena = Arc::new(AtomicBool::new(true));
+    ctx.systems
+        .register_content_provider(Arc::new(FailTourneyWakeProvider {
+            target_sys: arena_sys,
+            should_fail: Arc::clone(&fail_arena),
+        }))
+        .expect("register tourney wake failure provider");
+
+    let next_eid_before = ctx.db.with_snapshot(|s| s.next_entity_id);
+    let cm_fail_err = tm(
+        &ctx,
+        &mut gm,
+        "CreateMatch",
+        &[PyRep::Integer(88), PyRep::Integer(8403), PyRep::Integer(50)],
+        &cm_kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(cm_fail_err.code, "SystemTransitionFailed");
+    assert!(ctx.systems.get_handle(arena_sys).is_none());
+    ctx.db.with_snapshot(|s| {
+        let store = load_store(s);
+        assert!(!store.matches.contains_key(&8403));
+        assert_eq!(store.active_match_id, Some(8401));
+        assert_eq!(s.next_entity_id, next_eid_before);
+    });
+
+    // Spawn GM ship ball in start_sys, verify TeleportPlayers rollback when arena_sys wake fails.
+    let start_h = ctx.systems.get_or_spawn(start_sys);
+    let _ = start_h
+        .spawn_ball(eve_destiny::Ball {
+            id: gm_ship,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    let _ = ctx.drain_notifications_for_char(gm_cid);
+    let tp_fail_err = tm(
+        &ctx,
+        &mut gm,
+        "TeleportPlayers",
+        &[PyRep::Integer(8401), PyRep::Integer(0), PyRep::Integer(0)],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(tp_fail_err.code, "SystemTransitionFailed");
+    assert!(ctx.systems.get_handle(arena_sys).is_none());
+    assert!(start_h.get_ball_snapshot(gm_ship).await.unwrap().is_some());
+    assert_eq!(gm.solar_system_id, Some(start_sys));
+    ctx.db.with_snapshot(|s| {
+        let store = load_store(s);
+        assert!(store.matches[&8401].teleported_teams.is_empty());
+        assert_eq!(s.characters[&gm_cid].solar_system_id, start_sys);
+        assert_eq!(s.items[&gm_ship].location_id, i64::from(start_sys));
+    });
+    assert!(
+        ctx.drain_notifications_for_char(gm_cid)
+            .iter()
+            .all(|n| n.event != "OnSessionChanged" && n.event != "OnEnterTournamentSystem")
+    );
+
+    // 6. Clearing wake failure allows GM TeleportPlayers to wake cold arena_sys with GmCommand("tourneyMgr.TeleportPlayers").
+    fail_arena.store(false, Ordering::Release);
     let tp_ok = tm(
         &ctx,
         &mut gm,
@@ -895,6 +1004,7 @@ async fn tourney_create_match_and_teleport_wake_cold_match_sys_with_gm_command_w
     .await
     .expect("TeleportPlayers succeeds");
     assert_eq!(tp_ok, PyRep::Bool(true));
+    assert_eq!(gm.solar_system_id, Some(arena_sys));
     assert_eq!(
         ctx.systems.last_wake_reason(arena_sys),
         Some(crate::system_actor::SystemWakeReason::GmCommand(

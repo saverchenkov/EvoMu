@@ -78,6 +78,98 @@ pub const RPCS: &[RpcEntry] = &[
     rpc_entry("tourneyMgr", "UpdateFleetDetails", RpcDispatchHandler::Async(dispatch_rpc)),
 ];
 
+fn duplicate_match_id_err(match_id: i64) -> BridgeRpcError {
+    BridgeRpcError {
+        code: "DuplicateMatchID".into(),
+        message: format!("Match ID {match_id} already exists"),
+        client_error: None,
+    }
+}
+
+fn validate_match_solar_system_id(
+    ctx: &ServerContext,
+    sys_id: i64,
+) -> Result<u32, BridgeRpcError> {
+    u32::try_from(sys_id)
+        .ok()
+        .filter(|sid| ctx.sde.solar_systems.contains_key(sid))
+        .ok_or_else(|| {
+            let msg = format!("Invalid tournament match solar system ID {sys_id}");
+            BridgeRpcError::with_client_error(
+                "InvalidSolarSystemID",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            )
+        })
+}
+
+async fn wake_tourney_match_system(
+    ctx: &ServerContext,
+    match_sys_id: i64,
+    match_id: Option<i64>,
+    method: &str,
+) -> Result<crate::system_actor::SystemHandle, BridgeRpcError> {
+    let sys_u32 = validate_match_solar_system_id(ctx, match_sys_id)?;
+    ctx.systems
+        .wake_for_gm_command_async(sys_u32, method)
+        .await
+        .map_err(|err| {
+            tracing::warn!(
+                solar_system_id = match_sys_id,
+                ?match_id,
+                %err,
+                "{method} failed to wake match solar system"
+            );
+            let msg = format!("Failed to activate match solar system {match_sys_id}: {err}");
+            BridgeRpcError::with_client_error(
+                "SystemTransitionFailed",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            )
+        })
+}
+
+fn validate_teleport_team_and_system(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    m: &TourneyMatch,
+    session: &SessionState,
+    caller_cid: i64,
+    which_team: i64,
+) -> Result<(Vec<TourneyPilot>, u32), BridgeRpcError> {
+    check_referee_auth(session, caller_cid, m)?;
+    let refreshed: Vec<TourneyPilot> = (if which_team == 0 {
+        &m.red_players
+    } else {
+        &m.blue_players
+    })
+    .iter()
+    .map(|p| {
+        let rp = resolve_pilot(ctx, snap, p.character_id);
+        if rp.ship_id > 0 { rp } else { p.clone() }
+    })
+    .collect();
+    for p in &refreshed {
+        if is_ship_type_banned(m, p.ship_type_id) {
+            return Err(BridgeRpcError {
+                code: "TourneyShipTypeBanned".into(),
+                message: format!("Ship type {} is banned in this tournament match", p.ship_type_id),
+                client_error: None,
+            });
+        }
+    }
+    let team_pts: i64 = refreshed.iter().map(|p| p.points).sum();
+    if m.max_points > 0 && team_pts > m.max_points {
+        return Err(BridgeRpcError {
+            code: "TourneyMaxPointsExceeded".into(),
+            message: format!("Team point total {team_pts} exceeds match max_points {}", m.max_points),
+            client_error: None,
+        });
+    }
+    let match_sys_u32 = validate_match_solar_system_id(ctx, m.solar_system_id)?;
+    Ok((refreshed, match_sys_u32))
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -416,11 +508,28 @@ pub async fn handle(
                 (tup_red_capt.or_else(|| kwargs.get("captainOne").or_else(|| kwargs.get("redCaptainID")).and_then(|v| v.as_i64())), tup_blue_capt.or_else(|| kwargs.get("captainTwo").or_else(|| kwargs.get("blueCaptainID")).and_then(|v| v.as_i64())))
             };
             let match_sys_id = kwargs.get("solarSystemID").or_else(|| kwargs.get("systemID")).and_then(|v| v.as_i64()).or_else(|| args.get(8).and_then(|v| v.as_i64())).unwrap_or(solarsystem_id);
+            if let Err(e) = validate_match_solar_system_id(ctx, match_sys_id) {
+                return Some(Err(e));
+            }
+            if ctx.db.with_snapshot(|snap| load_store(snap).matches.contains_key(&match_id)) {
+                return Some(Err(duplicate_match_id_err(match_id)));
+            }
+            let sys_handle = match wake_tourney_match_system(
+                ctx,
+                match_sys_id,
+                Some(match_id),
+                "tourneyMgr.CreateMatch",
+            )
+            .await
+            {
+                Ok(h) => h,
+                Err(e) => return Some(Err(e)),
+            };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 if store.matches.contains_key(&match_id) {
-                    return Err(BridgeRpcError { code: "DuplicateMatchID".into(), message: format!("Match ID {match_id} already exists"), client_error: None });
+                    return Err(duplicate_match_id_err(match_id));
                 }
                 let mut m = TourneyMatch::new(match_id, tourney_id, match_sys_id, max_points, match_time, overtime, external_ruleset_id);
                 (m.red_team_id, m.red_team_name) = resolve_team_name(snap, red_team, red_capt);
@@ -444,30 +553,14 @@ pub async fn handle(
                 Ok((PyRep::Tuple(vec![PyRep::Integer(match_id), PyRep::List(beacon_reps), PyRep::List(captain_reps)]), b1, b2))
             });
             if let Ok((rep, b1, b2)) = res {
-                match ctx
-                    .systems
-                    .wake_for_gm_command_async(match_sys_id as u32, "tourneyMgr.CreateMatch")
-                    .await
-                {
-                    Ok(sys_handle) => {
-                        for (bid, x) in [(b1, -50_000.0), (b2, 50_000.0)] {
-                            let _ = sys_handle
-                                .spawn_ball_with_meta(
-                                    eve_destiny::Ball { id: bid, type_id: 2977, position: glam::DVec3::new(x, 0.0, 0.0), velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 100.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Rigid },
-                                    eve_destiny::CombatState::default(),
-                                    eve_destiny::SlimItemMeta { group_id: 310, category_id: 2, owner_id: 1, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false , ..Default::default()},
-                                )
-                                .await;
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            solar_system_id = match_sys_id,
-                            match_id,
-                            %err,
-                            "tourneyMgr.CreateMatch failed to wake match solar system"
-                        );
-                    }
+                for (bid, x) in [(b1, -50_000.0), (b2, 50_000.0)] {
+                    let _ = sys_handle
+                        .spawn_ball_with_meta(
+                            eve_destiny::Ball { id: bid, type_id: 2977, position: glam::DVec3::new(x, 0.0, 0.0), velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 100.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Rigid },
+                            eve_destiny::CombatState::default(),
+                            eve_destiny::SlimItemMeta { group_id: 310, category_id: 2, owner_id: 1, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false , ..Default::default()},
+                        )
+                        .await;
                 }
                 Ok(rep)
             } else {
@@ -1040,37 +1133,49 @@ pub async fn handle(
                 (None, extract_id(args, 0).unwrap_or(0), extract_id(args, 1).unwrap_or(0))
             };
 
+            let precheck = ctx.db.with_snapshot(|snap| {
+                let mut store = load_store(snap);
+                let m = store.resolve_match_mut(target_mid)?;
+                let (_, match_sys_u32) = validate_teleport_team_and_system(
+                    ctx,
+                    snap,
+                    m,
+                    session,
+                    caller_cid,
+                    which_team,
+                )?;
+                Ok::<_, BridgeRpcError>((m.match_id, m.solar_system_id, match_sys_u32))
+            });
+            let (resolved_mid, pre_match_sys, _) = match precheck {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let sys_handle = match wake_tourney_match_system(
+                ctx,
+                pre_match_sys,
+                Some(resolved_mid),
+                "tourneyMgr.TeleportPlayers",
+            )
+            .await
+            {
+                Ok(h) => h,
+                Err(e) => return Some(Err(e)),
+            };
+
             let mut moved_pilots = Vec::new();
             let mut match_sys = solarsystem_id;
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
-                check_referee_auth(session, caller_cid, m)?;
-                let refreshed: Vec<TourneyPilot> = (if which_team == 0 { &m.red_players } else { &m.blue_players })
-                    .iter()
-                    .map(|p| {
-                        let rp = resolve_pilot(ctx, snap, p.character_id);
-                        if rp.ship_id > 0 { rp } else { p.clone() }
-                    })
-                    .collect();
-                for p in &refreshed {
-                    if is_ship_type_banned(m, p.ship_type_id) {
-                        return Err(BridgeRpcError {
-                            code: "TourneyShipTypeBanned".into(),
-                            message: format!("Ship type {} is banned in this tournament match", p.ship_type_id),
-                            client_error: None,
-                        });
-                    }
-                }
-                let team_pts: i64 = refreshed.iter().map(|p| p.points).sum();
-                if m.max_points > 0 && team_pts > m.max_points {
-                    return Err(BridgeRpcError {
-                        code: "TourneyMaxPointsExceeded".into(),
-                        message: format!("Team point total {team_pts} exceeds match max_points {}", m.max_points),
-                        client_error: None,
-                    });
-                }
+                let (refreshed, match_sys_u32) = validate_teleport_team_and_system(
+                    ctx,
+                    snap,
+                    m,
+                    session,
+                    caller_cid,
+                    which_team,
+                )?;
                 if which_team == 0 { m.red_players.clone_from(&refreshed); } else { m.blue_players.clone_from(&refreshed); }
                 if !m.teleported_teams.contains(&which_team) {
                     m.teleported_teams.push(which_team);
@@ -1086,7 +1191,7 @@ pub async fn handle(
                             snap,
                             &ctx.sde,
                             p.character_id,
-                            crate::router::TransitionLocation::Space { solar_system_id: match_sys as u32 },
+                            crate::router::TransitionLocation::Space { solar_system_id: match_sys_u32 },
                             None,
                             false,
                             false,
@@ -1109,21 +1214,6 @@ pub async fn handle(
 
             if res.is_ok() {
                 let base_pos = if beacon_idx == 0 { DVec3::new(-50_000.0, 0.0, 0.0) } else { DVec3::new(50_000.0, 0.0, 0.0) };
-                let sys_handle_opt = match ctx
-                    .systems
-                    .wake_for_gm_command_async(match_sys as u32, "tourneyMgr.TeleportPlayers")
-                    .await
-                {
-                    Ok(h) => Some(h),
-                    Err(err) => {
-                        tracing::warn!(
-                            solar_system_id = match_sys,
-                            %err,
-                            "tourneyMgr.TeleportPlayers failed to wake match solar system"
-                        );
-                        None
-                    }
-                };
                 for (idx, (cid, user_id, ship_id, stid, old_sys, old_st)) in moved_pilots.into_iter().enumerate() {
                     let offset = DVec3::new((idx as f64) * 250.0, 0.0, (idx as f64) * 250.0);
                     let pos = base_pos + offset;
@@ -1134,19 +1224,17 @@ pub async fn handle(
                                 let _ = old_handle.remove_ball(ship_id).await;
                             }
                         }
-                        if let Some(ref sys_handle) = sys_handle_opt {
-                            if sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().is_some() {
-                                let _ = sys_handle.set_ball_position(ship_id, pos).await;
-                            } else if is_online {
-                                let (mass, radius, max_vel, inertia) = ctx.sde.types.get(&stid).map(|t| {
-                                    (if t.mass > 0.0 { t.mass } else { 1_200_000.0 }, if t.radius > 0.0 { t.radius } else { 80.0 }, t.default_attributes.get(&37).copied().unwrap_or(300.0), t.default_attributes.get(&70).copied().unwrap_or(2.5))
-                                }).unwrap_or((1_200_000.0, 80.0, 300.0, 2.5));
-                                let cs = ctx.build_ship_combat_state(cid, ship_id, stid);
-                                let _ = sys_handle.spawn_ball_with_combat(
-                                    eve_destiny::Ball { id: ship_id, type_id: stid, position: pos, velocity: DVec3::ZERO, max_velocity: max_vel, inertia, mass, radius, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop },
-                                    cs,
-                                ).await;
-                            }
+                        if sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().is_some() {
+                            let _ = sys_handle.set_ball_position(ship_id, pos).await;
+                        } else if is_online {
+                            let (mass, radius, max_vel, inertia) = ctx.sde.types.get(&stid).map(|t| {
+                                (if t.mass > 0.0 { t.mass } else { 1_200_000.0 }, if t.radius > 0.0 { t.radius } else { 80.0 }, t.default_attributes.get(&37).copied().unwrap_or(300.0), t.default_attributes.get(&70).copied().unwrap_or(2.5))
+                            }).unwrap_or((1_200_000.0, 80.0, 300.0, 2.5));
+                            let cs = ctx.build_ship_combat_state(cid, ship_id, stid);
+                            let _ = sys_handle.spawn_ball_with_combat(
+                                eve_destiny::Ball { id: ship_id, type_id: stid, position: pos, velocity: DVec3::ZERO, max_velocity: max_vel, inertia, mass, radius, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop },
+                                cs,
+                            ).await;
                         }
                     }
                     if session.character_id == Some(cid) {

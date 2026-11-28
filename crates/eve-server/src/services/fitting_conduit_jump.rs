@@ -676,9 +676,11 @@ pub(crate) async fn group_jump_to_resolved_beacon(
     if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, ctx.now_unix(), None).is_some() {
         return Err(err("SessionChangeTimerActive", "Session change timer is active"));
     }
-    consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
-        format!("Conduit jump requires {fuel_qty} x type {fuel_type}, ship holds {have}")
-    })?;
+    let _ = super::wake_jump_destination_system(ctx, beacon.solar_system_id).await?;
+    let (reserved_fuel, _reserved_diffs, fuel_guard) =
+        super::consume_or_err_with_guard(ctx, ship_id, fuel_type, fuel_qty, |have| {
+            format!("Conduit jump requires {fuel_qty} x type {fuel_type}, ship holds {have}")
+        })?;
     let max_passengers: usize = if is_blops || is_rorqual {
         30
     } else if matches!(ship_type.group_id, 547 | 659 | 5120) {
@@ -864,20 +866,12 @@ pub(crate) async fn group_jump_to_resolved_beacon(
             );
         }
     }
-    ctx.emit_typed(
-        crate::router::NotificationTarget::Character(char_id),
-        OnGroupJumpAnchorActivated {
-            to_solar_system_id: beacon.solar_system_id as i64,
-            num_passengers: jumped_passengers.len() as i64,
-        },
-    );
-
     let caller_dest = if landed_at_star {
         star_arrival_position(ctx, beacon.solar_system_id)
     } else {
         random_arrival_position(ctx, beacon.position)
     };
-    let (cooldown_min, fatigue_min, bound) = relocate_caller(
+    let (cooldown_min, fatigue_min, bound) = match relocate_caller(
         ctx,
         session,
         char_id,
@@ -888,7 +882,27 @@ pub(crate) async fn group_jump_to_resolved_beacon(
         dist,
         vals[1],
     )
-    .await?;
+    .await
+    {
+        Ok(res) => {
+            drop(fuel_guard);
+            res
+        }
+        Err(e) => {
+            if jumped_passengers.is_empty() {
+                super::refund_ship_fuel_items(ctx, char_id, &reserved_fuel, Some(&fuel_guard));
+            }
+            drop(fuel_guard);
+            return Err(e);
+        }
+    };
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Character(char_id),
+        OnGroupJumpAnchorActivated {
+            to_solar_system_id: beacon.solar_system_id as i64,
+            num_passengers: jumped_passengers.len() as i64,
+        },
+    );
     if let Some(rem_cap) = post_jump_cap {
         if let Some(dest_sys) = ctx.systems.get_handle(beacon.solar_system_id) {
             if let Ok(Some(mut dcs)) = dest_sys.get_combat_state(ship_id).await {
@@ -1096,9 +1110,14 @@ pub(super) async fn jump_through_fleet(
     if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, ctx.now_unix(), None).is_some() {
         return Err(err("SessionChangeTimerActive", "Session change timer is active"));
     }
-    consume_or_err(ctx, bridge.bridger_ship_id, fuel_type, fuel_qty, |have| {
-        format!("Bridge requires {fuel_qty} x type {fuel_type}, bridging ship holds {have}")
-    })?;
+    let _ = super::wake_jump_destination_system(ctx, beacon.solar_system_id).await?;
+    let (reserved_fuel, _reserved_diffs, fuel_guard) = super::consume_or_err_with_guard(
+        ctx,
+        bridge.bridger_ship_id,
+        fuel_type,
+        fuel_qty,
+        |have| format!("Bridge requires {fuel_qty} x type {fuel_type}, bridging ship holds {have}"),
+    )?;
     let pos = if landed_at_star {
         star_arrival_position(ctx, beacon.solar_system_id)
     } else {
@@ -1113,7 +1132,7 @@ pub(super) async fn jump_through_fleet(
     if pvals[1] > 0.0 && pvals[1] <= 1.0 {
         bridge_fatigue_mult = bridge_fatigue_mult.min(pvals[1]);
     }
-    let (cooldown_min, fatigue_min, bound) = relocate_caller(
+    let (cooldown_min, fatigue_min, bound) = match relocate_caller(
         ctx,
         session,
         char_id,
@@ -1124,7 +1143,23 @@ pub(super) async fn jump_through_fleet(
         bridge.distance_ly,
         bridge_fatigue_mult,
     )
-    .await?;
+    .await
+    {
+        Ok(res) => {
+            drop(fuel_guard);
+            res
+        }
+        Err(e) => {
+            super::refund_ship_fuel_items(
+                ctx,
+                bridge.bridger_char_id,
+                &reserved_fuel,
+                Some(&fuel_guard),
+            );
+            drop(fuel_guard);
+            return Err(e);
+        }
+    };
     Ok(JumpOutcome {
         dist_ly: bridge.distance_ly,
         fuel_type,

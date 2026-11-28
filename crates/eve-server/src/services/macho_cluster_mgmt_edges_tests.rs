@@ -555,6 +555,45 @@ async fn start_load_wakes_cold_system_with_gm_command_while_rejected_calls_stay_
     assert_eq!(spec_err.message, "InvalidLoadSpec");
     assert!(ctx.systems.get_handle(target_sys).is_none());
 
+    // Wake failure in active Tokio runtime fails closed with SystemTransitionFailed without mutating load_service_state.
+    {
+        use std::sync::Arc;
+        struct FailStartLoadWakeProvider {
+            target_sys: u32,
+        }
+        impl crate::system_actor::SystemContentProvider for FailStartLoadWakeProvider {
+            fn name(&self) -> &'static str {
+                "test_start_load_fail_wake"
+            }
+
+            fn seed(
+                &self,
+                seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+            ) -> Result<(), String> {
+                if seed_ctx.solar_system_id == self.target_sys {
+                    return Err(format!("injected start_load wake failure for {}", self.target_sys));
+                }
+                Ok(())
+            }
+        }
+        let ctx_fail = test_ctx();
+        ctx_fail
+            .systems
+            .register_content_provider(Arc::new(FailStartLoadWakeProvider { target_sys }))
+            .expect("register start_load fail provider");
+        let wake_err = handle(&ctx_fail, &mut gm, "loadService", "StartLoad", &[PyRep::Integer(3)], &kw)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(wake_err.code, "SystemTransitionFailed");
+        assert!(ctx_fail.systems.get_handle(target_sys).is_none());
+        ctx_fail.db.with_snapshot(|s| {
+            let st = &s.cluster_and_runtime.load_service_state;
+            assert!(!st.active);
+            assert_eq!(st.runs_started, 0);
+            assert_eq!(st.ticks_executed, 0);
+        });
+    }
+
     // Valid GM StartLoad wakes target_sys with GmCommand("loadService.StartLoad").
     let ok = handle(&ctx, &mut gm, "loadService", "StartLoad", &[PyRep::Integer(3)], &kw)
         .unwrap()

@@ -337,6 +337,12 @@ pub fn handle(
                             %err,
                             "loadService.StartLoad failed to wake target system"
                         );
+                        let msg = format!("Failed to activate solar system {target_sys}: {err}");
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "SystemTransitionFailed",
+                            msg.clone(),
+                            eve_proto::ClientError::CustomInfo(msg),
+                        )));
                     }
                 }
             }
