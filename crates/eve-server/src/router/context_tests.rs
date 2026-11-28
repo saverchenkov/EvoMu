@@ -1765,11 +1765,14 @@ async fn same_batch_cycle_deactivation_and_recon_cooldown_override_plus_actor_is
     assert!(!Arc::ptr_eq(&h_jita.post_unlock_actions, &h_amarr.post_unlock_actions));
     let (jita_drained, amarr_marker) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
     let (jc, ac) = (Arc::clone(&jita_drained), Arc::clone(&amarr_marker));
+    h_amarr.post_unlock_actions.lock().unwrap().push(Box::new(move || ac.store(true, Ordering::SeqCst)));
     h_jita.enqueue_post_unlock_action(Box::new(move || jc.store(true, Ordering::SeqCst)));
-    h_amarr.enqueue_post_unlock_action(Box::new(move || ac.store(true, Ordering::SeqCst)));
     let _ = h_amarr.has_active_modules_or_cloak_sync(ship_id);
     h_jita.step_manual(0.1).await.unwrap();
     assert!(jita_drained.load(Ordering::SeqCst) && !amarr_marker.load(Ordering::SeqCst));
+    h_amarr.enqueue_post_unlock_action(Box::new(|| {}));
+    assert!(h_amarr.wait_for_post_unlock_barrier().await);
+    assert!(amarr_marker.load(Ordering::SeqCst));
 
     spawn_ship_ball(&h_jita, ship_id, char_id).await;
     h_jita.record_active_ewar_start(ship_id, cloak_id, target_id, "electronic").await.unwrap();

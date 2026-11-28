@@ -591,12 +591,13 @@ async fn structure_undock_spawn_failure_rolls_back_structure_id_and_control() {
     assert_eq!(session.ship_id, Some(struct_id));
 
     let sys_handle = ctx.systems.get_or_spawn(jita_sys);
-    // Drain startup stargate commands, then arm countdown=2 to skip `invalidate_ship_fitting`'s
-    // `ApplyFitProjection` (#1) and fail `spawn_ball_with_meta` (#2).
+    // Drain startup stargate commands, then arm countdown=3 to skip `CancelShipNaniteRepairsSync`
+    // (#1, forwarded via `CtActorDriver` in 4D-4) and `invalidate_ship_fitting`'s
+    // `ApplyFitProjection` (#2), failing `spawn_ball_with_meta` (#3).
     let _ = sys_handle.get_ball_snapshot(0).await;
     sys_handle
         .panic_on_command_countdown_for_test
-        .store(2, std::sync::atomic::Ordering::SeqCst);
+        .store(3, std::sync::atomic::Ordering::SeqCst);
 
     let kw = HashMap::new();
     let err = handle(&ctx, &mut session, "structureDocking", "Undock", &[], &kw)

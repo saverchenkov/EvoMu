@@ -730,12 +730,6 @@ pub(in crate::system_actor) async fn flush_from_handle_async(handle: &SystemHand
     }
 }
 
-pub(in crate::system_actor) fn try_flush_from_handle(handle: &SystemHandle) {
-    if let Some(shared) = handle.ballpark.drone_hydration_shared() {
-        flush_sync_from_handle(handle, shared, false);
-    }
-}
-
 pub(in crate::system_actor) fn flush_from_handle(handle: &SystemHandle) {
     if let Some(shared) = handle.ballpark.drone_hydration_shared() {
         flush_sync_from_handle(handle, shared, true);
@@ -1934,7 +1928,7 @@ impl SystemHandle {
         }
         let (reply, _) = tokio::sync::oneshot::channel();
         if let Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) =
-            self.cmd_tx.try_send(SystemCommand::FinalizeDroneLaunches {
+            self.try_send_actor_cmd(SystemCommand::FinalizeDroneLaunches {
                 mappings: Vec::new(),
                 rollback_res_ids,
                 reply,
@@ -1956,7 +1950,7 @@ impl SystemHandle {
         }
         let (reply, _) = tokio::sync::oneshot::channel();
         if let Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) =
-            self.cmd_tx.try_send(SystemCommand::ScoopDroneClaimOp {
+            self.try_send_actor_cmd(SystemCommand::ScoopDroneClaimOp {
                 ball_id,
                 action: DroneScoopClaimAction::ReleaseClaim,
                 reply,

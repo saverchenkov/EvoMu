@@ -591,8 +591,7 @@ pub(in crate::system_actor) async fn call_actor_reply<T>(
 ) -> Result<T, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     handle
-        .cmd_sender()
-        .send(make_cmd(tx))
+        .send_actor_cmd(make_cmd(tx))
         .await
         .map_err(|_| format!("system {} actor closed", handle.solar_system_id))?;
     rx.await
@@ -1183,13 +1182,12 @@ impl SystemHandle {
     /// Returns whether the mailbox accepted the command, NOT whether `ball_id` exists in space.
     pub fn enqueue_destiny_event(&self, ball_id: BallId, event: DestinyEvent) -> bool {
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        self.cmd_tx
-            .try_send(SystemCommand::EmitDestinyEvent {
-                ball_id,
-                event,
-                reply: tx,
-            })
-            .is_ok()
+        self.try_send_actor_cmd(SystemCommand::EmitDestinyEvent {
+            ball_id,
+            event,
+            reply: tx,
+        })
+        .is_ok()
     }
 
     /// Synchronously applies `event` for `ball_id` and returns whether `ball_id` was present.
@@ -1199,19 +1197,6 @@ impl SystemHandle {
     pub fn try_emit_destiny_event(&self, ball_id: BallId, event: DestinyEvent) -> bool {
         if !eve_db::lock_rank::held_lock_ranks().is_empty() {
             return false;
-        }
-        if self.is_on_actor_flush_thread() {
-            if self.cmd_tx.is_closed() {
-                return false;
-            }
-            return super::ball_ops::run_direct_ball_op_on_current_thread(self, false, |ctx| {
-                let known =
-                    super::cycles_tackle::apply_destiny_event_in_actor(ctx.ballpark, ball_id, event);
-                if known {
-                    sync_ball_protection_in_actor(ctx.ballpark, ctx.actor_st, ball_id);
-                }
-                known
-            });
         }
         match super::handle_cmds::dispatch_actor_sync_try_queued_with_timeout(
             self,

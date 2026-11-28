@@ -1419,9 +1419,8 @@ impl SystemHandle {
     /// system's ordered `post_unlock_worker` (`W1`, `W2`, `W3`, `W6`, `#1170`, `#919`).
     ///
     /// Requires no ranked locks held by the caller (panics under held locks). When invoked from
-    /// the post-unlock worker (`wait_for_post_unlock == false`), SQLite persistence runs
-    /// asynchronously on the worker and this returns `0` without blocking (invocations on
-    /// `actor_flush_thread`, where the worker is closed, refuse enqueueing and return `0`).
+    /// the post-unlock worker or off-actor fallback (`wait_for_post_unlock == false`), SQLite
+    /// persistence runs asynchronously without blocking.
     pub fn flush_dirty_condition_checkpoint_sync(&self) -> usize {
         let wait_for_post_unlock = post_unlock::caller_can_wait_for_handle(self);
         let written_direct = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1451,7 +1450,27 @@ impl SystemHandle {
         actor_written.max(written_direct.load(std::sync::atomic::Ordering::Acquire))
     }
 
+    async fn drain_closed_worker_fallback_if_pending(&self) {
+        let fallback = Arc::clone(&self.post_unlock_fallback);
+        let actions = Arc::clone(&self.post_unlock_actions);
+        let actions_in_flight = Arc::clone(&self.post_unlock_actions_in_flight);
+        let command_panics = Arc::clone(&self.command_panics);
+        let solar_system_id = self.solar_system_id;
+        let _ = tokio::task::spawn_blocking(move || {
+            fallback.drain_closed_worker_blocking(
+                solar_system_id,
+                &actions,
+                &actions_in_flight,
+                &command_panics,
+            );
+        })
+        .await;
+    }
+
     pub(crate) async fn wait_for_post_unlock_barrier(&self) -> bool {
+        if self.is_on_post_unlock_callback_thread() {
+            return !self.post_unlock_tx.is_closed();
+        }
         let (tx, rx) = tokio::sync::oneshot::channel();
         let item = post_unlock::PostUnlockWorkItem {
             db_opt: None,
@@ -1462,9 +1481,15 @@ impl SystemHandle {
             work_seq: 0,
         };
         if self.post_unlock_tx.send(post_unlock::PostUnlockMsg::Work(item)).is_err() {
+            self.drain_closed_worker_fallback_if_pending().await;
             return false;
         }
-        rx.await.is_ok()
+        if rx.await.is_ok() {
+            true
+        } else {
+            self.drain_closed_worker_fallback_if_pending().await;
+            false
+        }
     }
 }
 

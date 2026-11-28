@@ -6,7 +6,7 @@
 //! falling back to external `ballpark` locks. Synchronous callers run the same mailbox commands
 //! via `tokio::task::block_in_place` on multi-thread runtimes, via the system's `CtActorDriver`
 //! runtime on `current_thread` runtimes, or via transient `current_thread` runtimes outside
-//! Tokio, keeping direct lock execution scoped strictly to reentrant `actor_flush_thread` callbacks.
+//! Tokio, with all direct `ballpark` / `actor_state` lock helpers retired (`#1342` Track 4D-5).
 
 #![forbid(unsafe_code)]
 
@@ -88,7 +88,80 @@ pub(crate) async fn call_actor_reply_with_deadline<T>(
 ) -> Result<T, String> {
     let (tx, rx) = oneshot::channel();
     let cmd = make_cmd(tx);
-    await_actor_cmd_with_deadline(handle.cmd_sender(), handle.solar_system_id, label, timeout_dur, cmd, rx).await
+    let from_callback = handle.is_on_post_unlock_callback_thread();
+    let worker_cb_tx = from_callback.then_some(&handle.worker_cb_tx);
+    await_actor_cmd_on_channels(
+        handle.cmd_sender(),
+        worker_cb_tx,
+        Some(&handle.actor_shutting_down),
+        handle.solar_system_id,
+        label,
+        timeout_dur,
+        cmd,
+        rx,
+    )
+    .await
+}
+
+async fn await_actor_cmd_on_channels<T>(
+    cmd_sender: &tokio::sync::mpsc::Sender<SystemCommand>,
+    worker_cb_tx: Option<
+        &tokio::sync::mpsc::UnboundedSender<super::post_unlock::PostUnlockActorCallback>,
+    >,
+    shutting_down: Option<&std::sync::atomic::AtomicBool>,
+    solar_system_id: SolarSystemId,
+    label: &str,
+    timeout_dur: Duration,
+    cmd: SystemCommand,
+    rx: oneshot::Receiver<T>,
+) -> Result<T, String> {
+    let send_fut_opt = if let Some(cb_tx) =
+        worker_cb_tx.filter(|_| !matches!(cmd, SystemCommand::ShutdownActor { .. }))
+    {
+        if cb_tx.is_closed()
+            || cb_tx
+                .send(super::post_unlock::PostUnlockActorCallback::ActorCmd(Box::new(cmd)))
+                .is_err()
+        {
+            return Err(format!("system {solar_system_id} actor closed"));
+        }
+        None
+    } else {
+        if cmd_sender.is_closed()
+            || shutting_down.is_some_and(|s| s.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            return Err(format!("system {solar_system_id} actor closed"));
+        }
+        match cmd_sender.try_send(cmd) {
+            Ok(()) => None,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                return Err(format!("system {solar_system_id} actor closed"));
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(c)) => {
+                Some(Box::pin(cmd_sender.send(c)))
+            }
+        }
+    };
+    if let Some(send_fut) = send_fut_opt {
+        match tokio::time::timeout(timeout_dur, send_fut).await {
+            Err(_) => {
+                return Err(format!(
+                    "system {solar_system_id} actor timed out queuing {label} after {}ms",
+                    timeout_dur.as_millis()
+                ));
+            }
+            Ok(Err(_)) => return Err(format!("system {solar_system_id} actor closed")),
+            Ok(Ok(())) => {}
+        }
+    }
+    match tokio::time::timeout(timeout_dur, rx).await {
+        Err(_) => Err(format!(
+            "system {solar_system_id} actor timed out awaiting {label} after {}ms",
+            timeout_dur.as_millis()
+        )),
+        Ok(Err(_)) => Err(format!("system {solar_system_id} actor dropped {label} reply")),
+        Ok(Ok(reply)) => Ok(reply),
+    }
 }
 
 pub(in crate::system_actor) async fn await_actor_cmd_with_deadline<T>(
@@ -99,24 +172,17 @@ pub(in crate::system_actor) async fn await_actor_cmd_with_deadline<T>(
     cmd: SystemCommand,
     rx: oneshot::Receiver<T>,
 ) -> Result<T, String> {
-    match tokio::time::timeout(timeout_dur, cmd_sender.send(cmd)).await {
-        Err(_) => {
-            return Err(format!(
-                "system {solar_system_id} actor timed out queuing {label} after {}ms",
-                timeout_dur.as_millis()
-            ));
-        }
-        Ok(Err(_)) => return Err(format!("system {solar_system_id} actor closed")),
-        Ok(Ok(())) => {}
-    }
-    match tokio::time::timeout(timeout_dur, rx).await {
-        Err(_) => Err(format!(
-            "system {solar_system_id} actor timed out awaiting {label} after {}ms",
-            timeout_dur.as_millis()
-        )),
-        Ok(Err(_)) => Err(format!("system {solar_system_id} actor dropped {label} reply")),
-        Ok(Ok(reply)) => Ok(reply),
-    }
+    await_actor_cmd_on_channels(
+        cmd_sender,
+        None,
+        None,
+        solar_system_id,
+        label,
+        timeout_dur,
+        cmd,
+        rx,
+    )
+    .await
 }
 
 /// Sends a [`SystemCommand`] with bounded enqueue and reply deadlines (`timeout_dur`), returning an
@@ -130,129 +196,6 @@ pub(crate) async fn call_actor_result_with_deadline<T>(
     call_actor_reply_with_deadline(handle, label, timeout_dur, make_cmd).await?
 }
 
-pub(in crate::system_actor) fn run_direct_ball_op_on_current_thread<R>(
-    handle: &SystemHandle,
-    run_post_flush: bool,
-    op: impl FnOnce(&mut BallOpsCtx<'_>) -> R,
-) -> R {
-    run_direct_ball_op_on_current_thread_inner(handle, run_post_flush, false, op)
-}
-
-fn run_direct_ball_op_on_current_thread_inner<R>(
-    handle: &SystemHandle,
-    run_post_flush: bool,
-    already_finalized_and_published: bool,
-    op: impl FnOnce(&mut BallOpsCtx<'_>) -> R,
-) -> R {
-    let caller_can_wait = super::post_unlock::caller_can_wait_for_handle(handle);
-    let tidi = handle.tidi_factor();
-    let (raw_hook, post_hook) = super::ewar_cooldowns::read_deactivation_hooks(
-        &handle.module_deactivation_hook,
-        &handle.module_deactivation_post_unlock_hook,
-    );
-    let (out, ticket) = {
-        let mut ballpark = handle
-            .ballpark
-            .write_untracked()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut actor_st = handle
-            .actor_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        super::post_unlock::prune_actor_shadows_for_cmd(
-            handle.solar_system_id,
-            &mut actor_st,
-            &handle.completed_post_unlock_seq,
-        );
-        let mut ops = super::post_unlock::PostUnlockOps::default();
-        let mut ctx = BallOpsCtx {
-            solar_system_id: handle.solar_system_id,
-            ballpark: &mut ballpark,
-            actor_st: &mut actor_st,
-            ball_positions: &handle.ball_positions,
-            scrambled_balls: &handle.scrambled_balls,
-            module_deactivation_hook: &handle.module_deactivation_hook,
-            deactivation_sink_hook: super::ewar_cooldowns::active_sink_hook(
-                raw_hook.as_ref(),
-                post_hook.as_ref(),
-            ),
-            explicit_update_state_guards: None,
-            ball_spawn_tokens: None,
-            removed_checkpoint_ball: None,
-            post_unlock_ops: &mut ops,
-            cooldown_persist_gate: Some(&handle.cooldown_persist_gate),
-            last_active_totals: None,
-            tidi_factor: tidi,
-        };
-        if tidi < 0.999_999 || handle.cooldown_persist_gate.has_tidi_history() {
-            ctx.actor_st.has_tidi_history = true;
-        }
-        let out = op(&mut ctx);
-        if !already_finalized_and_published {
-            let cmd_tx_weak = handle.cmd_tx.downgrade();
-            let _ = super::ewar_cooldowns::finalize_post_unlock_ops_deactivations_in_actor(
-                handle.solar_system_id,
-                &mut actor_st,
-                &mut ops,
-                raw_hook,
-                post_hook,
-                &handle.cooldown_persist_gate,
-                Some(&cmd_tx_weak),
-                tidi,
-            );
-            protection::sync_active_module_ships_cache(
-                &actor_st.active_module_cycles,
-                &actor_st.external_active_modules,
-                &handle.active_module_ships,
-            );
-            celestials::update_system_hibernation_flag(
-                &actor_st,
-                &ballpark,
-                handle.event_tx.receiver_count(),
-            );
-            handle.publish_view_from(&ballpark, &actor_st);
-        }
-        let ticket = super::post_unlock::enqueue_tick_post_unlock_or_barrier_under_locks(
-            handle,
-            &mut actor_st,
-            ops,
-            caller_can_wait,
-        );
-        drop(actor_st);
-        drop(ballpark);
-        (out, ticket)
-    };
-    let (deact_guard, lock_guard) = if !matches!(
-        ticket,
-        super::post_unlock::PostUnlockWaitTicket::RunDirectAfterUnlock(_)
-    ) {
-        (None, None)
-    } else {
-        (
-            handle
-                .module_deactivation_hook
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-            handle
-                .target_lock_completed_hook
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-        )
-    };
-    super::post_unlock::finish_post_unlock_after_unlock(
-        handle,
-        deact_guard.as_ref(),
-        lock_guard.as_ref(),
-        ticket,
-    );
-    if run_post_flush {
-        super::drones::try_flush_from_handle(handle);
-    }
-    out
-}
-
 fn await_actor_cmd_via_runtime<T: Send + 'static>(
     handle: &SystemHandle,
     target_rt: &tokio::runtime::Handle,
@@ -263,12 +206,17 @@ fn await_actor_cmd_via_runtime<T: Send + 'static>(
     use_block_in_place: bool,
 ) -> Result<T, String> {
     let cmd_sender = handle.cmd_sender().clone();
+    let from_callback = handle.is_on_post_unlock_callback_thread();
+    let worker_cb_tx = from_callback.then(|| handle.worker_cb_tx.clone());
+    let shutting_down = Arc::clone(&handle.actor_shutting_down);
     let sys_id = handle.solar_system_id;
     let label_owned = label.to_owned();
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Result<T, String>>(1);
     target_rt.spawn(async move {
-        let res = await_actor_cmd_with_deadline(
+        let res = await_actor_cmd_on_channels(
             &cmd_sender,
+            worker_cb_tx.as_ref(),
+            Some(&shutting_down),
             sys_id,
             &label_owned,
             timeout_dur,
@@ -293,7 +241,12 @@ fn await_actor_cmd_via_runtime<T: Send + 'static>(
             wait_dur.as_millis()
         )),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            if handle.cmd_sender().is_closed() {
+            let closed = if from_callback {
+                handle.worker_cb_tx.is_closed()
+            } else {
+                handle.is_actor_closed()
+            };
+            if closed {
                 Err(format!("system {sys_id} actor closed"))
             } else {
                 Err(format!(
@@ -314,12 +267,11 @@ fn dispatch_actor_sync_reply_with_deadline_inner<P, T: Send + 'static>(
     make_cmd: impl FnOnce(P, oneshot::Sender<T>) -> SystemCommand,
     _direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
 ) -> Result<T, String> {
-    if handle.is_on_actor_flush_thread() {
-        return Err(format!("refusing sync actor call {label} on sys {} flush thread", handle.solar_system_id));
-    }
-    if handle.cmd_sender().is_closed() {
+    eve_db::lock_rank::assert_no_locks_held();
+    if handle.is_actor_closed_for_current_thread() {
         return Err(format!("system {} actor closed", handle.solar_system_id));
     }
+    let from_callback = handle.is_on_post_unlock_callback_thread();
     match tokio::runtime::Handle::try_current() {
         Ok(rt_handle) => match rt_handle.runtime_flavor() {
             tokio::runtime::RuntimeFlavor::CurrentThread => {
@@ -367,7 +319,17 @@ fn dispatch_actor_sync_reply_with_deadline_inner<P, T: Send + 'static>(
                 .map_err(|e| format!("failed to build transient runtime for {label}: {e}"))?;
             let (reply_tx, reply_rx) = oneshot::channel::<T>();
             let cmd = make_cmd(payload, reply_tx);
-            rt.block_on(await_actor_cmd_with_deadline(handle.cmd_sender(), handle.solar_system_id, label, timeout_dur, cmd, reply_rx))
+            let worker_cb_tx = from_callback.then_some(&handle.worker_cb_tx);
+            rt.block_on(await_actor_cmd_on_channels(
+                handle.cmd_sender(),
+                worker_cb_tx,
+                Some(&handle.actor_shutting_down),
+                handle.solar_system_id,
+                label,
+                timeout_dur,
+                cmd,
+                reply_rx,
+            ))
         }
     }
 }
@@ -2287,7 +2249,11 @@ mod tests {
             target_lock_completed_hook: Arc::new(RankedRwLock::new(None)),
             system_step_hook: Arc::new(RankedRwLock::new(None)),
             post_unlock_actions: Arc::new(RankedMutex::new(Vec::new())),
-            actor_flush_thread: Arc::new(std::sync::Mutex::new(None)),
+            post_unlock_actions_in_flight: Arc::new(AtomicUsize::new(0)),
+            post_unlock_fallback: Arc::new(
+                crate::system_actor::post_unlock::FallbackCoordinator::new(),
+            ),
+            actor_shutting_down: Arc::new(AtomicBool::new(false)),
             published_live: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cooldown_persist_gate: Arc::new(crate::system_actor::CooldownPersistGate::default()),
         };

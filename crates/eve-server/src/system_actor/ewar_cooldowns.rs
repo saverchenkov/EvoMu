@@ -913,11 +913,19 @@ impl SystemHandle {
             .is_some_and(|&tid| tid == std::thread::current().id())
     }
 
+    pub(in crate::system_actor) fn is_on_post_unlock_fallback_thread(&self) -> bool {
+        self.post_unlock_fallback.is_current_thread_owner()
+    }
+
+    pub(in crate::system_actor) fn is_on_post_unlock_callback_thread(&self) -> bool {
+        self.is_on_post_unlock_worker_thread() || self.is_on_post_unlock_fallback_thread()
+    }
+
     fn dispatch_worker_ewar_sync(
         &self,
         op: super::post_unlock::WorkerEwarSyncOp,
     ) -> Result<ModuleEwarFlushSnapshot, String> {
-        if self.cmd_tx.is_closed() {
+        if self.worker_cb_tx.is_closed() {
             return Err(format!("system {} actor closed", self.solar_system_id));
         }
         let mut ops = super::post_unlock::PostUnlockOps::default();
@@ -950,24 +958,7 @@ impl SystemHandle {
                 self.solar_system_id
             ));
         }
-        if self.is_on_actor_flush_thread() {
-            if self.cmd_tx.is_closed() {
-                return Err(format!("system {} actor closed", self.solar_system_id));
-            }
-            return Ok(super::ball_ops::run_direct_ball_op_on_current_thread(
-                self,
-                false,
-                |ctx| {
-                    flush_module_ewar_in_state(
-                        &mut ctx.actor_st.ewar_state,
-                        source_ship_id,
-                        source_module_id,
-                        allow_db_source_fallback,
-                    )
-                },
-            ));
-        }
-        if self.is_on_post_unlock_worker_thread() {
+        if self.is_on_post_unlock_callback_thread() {
             return self.dispatch_worker_ewar_sync(
                 super::post_unlock::WorkerEwarSyncOp::FlushModuleEwar {
                     source_ship_id,
@@ -1039,23 +1030,7 @@ impl SystemHandle {
                 self.solar_system_id
             ));
         }
-        if self.is_on_actor_flush_thread() {
-            if self.cmd_tx.is_closed() {
-                return Err(format!("system {} actor closed", self.solar_system_id));
-            }
-            return Ok(super::ball_ops::run_direct_ball_op_on_current_thread(
-                self,
-                false,
-                |ctx| {
-                    remove_remote_assistance_by_module_in_state(
-                        &mut ctx.actor_st.ewar_state,
-                        source_ship_id,
-                        source_module_id,
-                    )
-                },
-            ));
-        }
-        if self.is_on_post_unlock_worker_thread() {
+        if self.is_on_post_unlock_callback_thread() {
             return self
                 .dispatch_worker_ewar_sync(
                     super::post_unlock::WorkerEwarSyncOp::RemoveRemoteAssistanceByModule {
@@ -1150,7 +1125,9 @@ impl SystemHandle {
             token,
             reply: None,
         };
-        if let Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) = self.cmd_tx.try_send(cmd) {
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) =
+            self.try_send_actor_cmd(cmd)
+        {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let tx = self.cmd_tx.clone();
                 handle.spawn(async move {
@@ -1165,6 +1142,18 @@ impl SystemHandle {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(action);
+        if self
+            .post_unlock_tx
+            .send(super::post_unlock::PostUnlockMsg::FlushActions)
+            .is_err()
+        {
+            self.post_unlock_fallback.ensure_actions_runner(
+                self.solar_system_id,
+                Arc::clone(&self.post_unlock_actions),
+                Arc::clone(&self.post_unlock_actions_in_flight),
+                Arc::clone(&self.command_panics),
+            );
+        }
     }
 
     pub(in crate::system_actor) fn apply_loading_cooldown_transitions_sync(
@@ -1539,23 +1528,10 @@ impl SystemRegistry {
     }
 }
 
-pub(crate) fn flush_post_unlock_actions(
-    actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
-) -> usize {
-    flush_post_unlock_actions_inner(actions, None)
-}
-
 pub(in crate::system_actor) fn flush_post_unlock_actions_catching(
     actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
     solar_system_id: SolarSystemId,
     command_panics: &std::sync::atomic::AtomicU64,
-) -> usize {
-    flush_post_unlock_actions_inner(actions, Some((solar_system_id, command_panics)))
-}
-
-fn flush_post_unlock_actions_inner(
-    actions: &Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
-    panic_ctx: Option<(SolarSystemId, &std::sync::atomic::AtomicU64)>,
 ) -> usize {
     if !held_lock_ranks().is_empty() {
         return 0;
@@ -1570,23 +1546,19 @@ fn flush_post_unlock_actions_inner(
             std::mem::take(&mut *guard)
         };
         for action in batch {
-            if let Some((solar_system_id, command_panics)) = panic_ctx {
-                if let Err(panic_payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
-                    let panic_count = command_panics.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    let msg = panic_payload
-                        .downcast_ref::<&str>()
-                        .copied()
-                        .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
-                        .unwrap_or("non-string panic payload");
-                    tracing::error!(
-                        solar_system_id,
-                        panic_count,
-                        panic = %msg,
-                        "SystemActor post_unlock_action panicked; continuing actor loop"
-                    );
-                }
-            } else {
-                action();
+            if let Err(panic_payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
+                let panic_count = command_panics.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let msg = panic_payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("non-string panic payload");
+                tracing::error!(
+                    solar_system_id,
+                    panic_count,
+                    panic = %msg,
+                    "SystemActor post_unlock_action panicked; continuing actor loop"
+                );
             }
             executed += 1;
         }
