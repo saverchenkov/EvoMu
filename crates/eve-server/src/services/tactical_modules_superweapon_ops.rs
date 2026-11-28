@@ -261,19 +261,27 @@ fn deduct_superweapon_fuel_with_diffs(
         })
 }
 
-struct InFlightSuperweaponGuard<'a> {
-    ctx: &'a ServerContext,
-    key: (usize, i64),
+struct InFlightSuperweaponGuard {
+    sys: crate::system_actor::SystemHandle,
+    ship_id: i64,
+    token: u64,
+    released: bool,
 }
 
-impl Drop for InFlightSuperweaponGuard<'_> {
+impl InFlightSuperweaponGuard {
+    async fn release(mut self) {
+        if self.sys.release_in_flight_superweapon(self.ship_id, self.token).await.is_ok() {
+            self.released = true;
+        }
+    }
+}
+
+impl Drop for InFlightSuperweaponGuard {
     fn drop(&mut self) {
-        self.ctx
-            .tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .in_flight_superweapons
-            .remove(&self.key);
+        if !self.released {
+            self.sys
+                .release_in_flight_superweapon_best_effort(self.ship_id, self.token);
+        }
     }
 }
 
@@ -929,44 +937,46 @@ async fn activate_superweapon_with_args_inner(
         ]));
     }
 
-    let in_flight_key = (db_key_of(ctx), ship_id);
-    if !ctx
-        .tactical_state
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .in_flight_superweapons
-        .insert(in_flight_key)
-    {
+    let Some(token) = sys
+        .try_acquire_in_flight_superweapon(ship_id)
+        .await
+        .map_err(|err| {
+            BridgeRpcError::from_client_error(eve_proto::ClientError::Internal(err))
+        })?
+    else {
         return Err(module_in_reactivation_delay_error(format!(
             "Superweapon module {module_id} on ship {ship_id} is already in reactivation delay"
         )));
-    }
+    };
     let in_flight_guard = InFlightSuperweaponGuard {
-        ctx,
-        key: in_flight_key,
-    };
-
-    let all_balls = sys.list_balls().await.unwrap_or_default();
-    let Some(ship_ball) = all_balls.iter().find(|b| b.id == ship_id).cloned() else {
-        return Err(BridgeRpcError::ship_not_in_space(
-            ship_id,
-            Some(char_id),
-            Some(sys_id),
-            "ActivateSuperweapon",
-            "Superweapon can only be activated while ship is in space",
-        ));
-    };
-    crate::services::inventory_fitting::fitting_module_cycles::check_space_action_cloak_and_warp_readonly(
-        ctx,
-        &sys,
+        sys: sys.clone(),
         ship_id,
-        "activate Superweapon",
-    )
-    .await?;
-    check_superweapon_tether_guard(ctx, sys_id, ship_id).await?;
-
-    let ship_pos = ship_ball.position;
+        token,
+        released: false,
+    };
     let is_slash = action_method == "ActivateSlashModule";
+
+    let activation_res: Result<(i32, Vec<i64>, f64, i32, u64, f64), BridgeRpcError> = async {
+        let all_balls = sys.list_balls().await.unwrap_or_default();
+        let Some(ship_ball) = all_balls.iter().find(|b| b.id == ship_id).cloned() else {
+            return Err(BridgeRpcError::ship_not_in_space(
+                ship_id,
+                Some(char_id),
+                Some(sys_id),
+                "ActivateSuperweapon",
+                "Superweapon can only be activated while ship is in space",
+            ));
+        };
+        crate::services::inventory_fitting::fitting_module_cycles::check_space_action_cloak_and_warp_readonly(
+            ctx,
+            &sys,
+            ship_id,
+            "activate Superweapon",
+        )
+        .await?;
+        check_superweapon_tether_guard(ctx, sys_id, ship_id).await?;
+
+        let ship_pos = ship_ball.position;
 
     let mut single_target_victim_char: Option<i64> = None;
     let mut single_target_is_player_struct = false;
@@ -1276,14 +1286,26 @@ async fn activate_superweapon_with_args_inner(
         hit_targets.push(tb.id);
     }
 
-    let now_unix = ctx.now_unix_secs();
-    ctx.crimewatch
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_or_create(char_id)
-        .weapon_timer_until_unix = now_unix + 60;
-    ctx.record_module_reactivation_delay(ship_id, module_id, lock_secs as f64);
-    drop(in_flight_guard);
+        let now_unix = ctx.now_unix_secs();
+        ctx.crimewatch
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_create(char_id)
+            .weapon_timer_until_unix = now_unix + 60;
+        ctx.record_module_reactivation_delay(ship_id, module_id, lock_secs as f64);
+        Ok((
+            consumed_fuel,
+            hit_targets,
+            warmup_s,
+            num_ticks,
+            lock_secs,
+            total_raw_damage,
+        ))
+    }
+    .await;
+    in_flight_guard.release().await;
+    let (consumed_fuel, hit_targets, warmup_s, num_ticks, lock_secs, total_raw_damage) =
+        activation_res?;
 
     let godma_effect_id = crate::router::binding::effect_id_for_module_sde(
         &ctx.sde,

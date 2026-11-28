@@ -224,6 +224,7 @@ async fn tactical_projected_assistance_tsb_auto_target_and_wormhole_guards() {
     let rsb_state = DogmaItemState::from_sde(1_200_010, 997_001, &ctx.sde);
     let rtc_state = DogmaItemState::from_sde(1_200_011, 997_002, &ctx.sde);
 
+    let sys = ctx.systems.get_or_spawn(sys_id);
     assert_eq!(apply_projected_remote_assistance(&ctx, c1, s1, 1_200_010, &rsb_type, &rsb_state, None, 10_000.0).unwrap_err().code, "TargetRequired");
     assert_eq!(apply_projected_remote_assistance(&ctx, c1, s1, 1_200_010, &rsb_type, &rsb_state, Some(s2), 90_000.0).unwrap_err().code, "OutOfRange");
     ctx.crimewatch.write().unwrap().get_or_create(c2).suspect_flag_until_unix = 1_800_000_600;
@@ -260,7 +261,6 @@ async fn tactical_projected_assistance_tsb_auto_target_and_wormhole_guards() {
     assert!(bast_tur[&54] < 10_500.0);
     remove_projected_remote_assistance(&ctx, s1, 1_200_010);
 
-    let sys = ctx.systems.get_or_spawn(sys_id);
     spawn_ball(&ctx, sys_id, s1, 997_021, 25, 6, c1, DVec3::new(0.0, 0.0, 0.0)).await;
     spawn_ball(&ctx, sys_id, s2, 997_021, 25, 6, c2, DVec3::new(1_000.0, 0.0, 0.0)).await;
     let _ = sys.add_target_lock(s1, TargetLock { target_id: s2, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(100_000.0) }).await;

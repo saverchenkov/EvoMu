@@ -206,6 +206,14 @@ async fn issue_367_remote_assistance_enforces_safety_and_inherits_criminal_flag(
     let logi_ship = 1_100_005_001;
     let crim_ship = 1_100_005_002;
     let highsec_sys = 30_000_142;
+    let _ = ctx
+        .systems
+        .wake_for_session_arrival_async(
+            highsec_sys,
+            crate::system_actor::SessionArrivalWakeReason::Undock,
+        )
+        .await
+        .expect("wake highsec_sys");
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.insert(logi_char, make_char(logi_char, 98_001, logi_ship, highsec_sys));

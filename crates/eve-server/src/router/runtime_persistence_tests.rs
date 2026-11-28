@@ -1089,9 +1089,11 @@ async fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync(
             );
             *ctx.tactical_state.write().unwrap() = Default::default();
         };
-        assert_tac_crash_lost("remote_assistance", &|ts, k| {
-            ts.remote_assistance.insert(
-                (k, 10),
+        {
+            let _ = ctx.systems.get_or_spawn(30_000_142);
+            crate::services::tactical_modules::tactical_test_helpers::set_projected_remote_assistance(
+                &ctx,
+                10,
                 vec![ProjectedRemoteAssistance {
                     source_ship_id: 1,
                     module_id: 2,
@@ -1104,7 +1106,16 @@ async fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync(
                     tracking_speed_bonus_pct: 5.0,
                 }],
             );
-        });
+            ctx.persist_server_runtime_to_db();
+            assert!(
+                !db.with_sqlite_conn(|conn| eve_db::sqlite_store::system_checkpoint::has_any_system_checkpoints(conn))
+                    .expect("check checkpoints"),
+                "crash-lost actor field `remote_assistance` must NOT persist into system_checkpoint"
+            );
+            assert_eq!(ctx.systems.ship_remote_assistance(10).len(), 1);
+            ctx.systems.clear_all_ewar_state_sync();
+            assert!(ctx.systems.ship_remote_assistance(10).is_empty());
+        }
         {
             use crate::services::tactical_modules::tactical_test_helpers::{
                 has_active_entosis_link, has_any_entosis_target_cycles, insert_active_entosis_link,

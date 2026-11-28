@@ -633,6 +633,16 @@ pub(crate) fn finish_flushed_module_ewar(
             ctx.push_fit_projection_for_ship(sid);
         }
     }
+    if !snap.remote_assistance_affected_ships.is_empty() {
+        let can_push = eve_db::lock_rank::held_lock_ranks().is_empty();
+        for &sid in &snap.remote_assistance_affected_ships {
+            if can_push {
+                ctx.invalidate_and_push_fit(sid);
+            } else {
+                ctx.invalidate_ship_fitting_cache_only(sid);
+            }
+        }
+    }
     for (target_sid, jamming_type) in ewar_targets {
         let mut notified = false;
         if char_id > 0 {
@@ -713,7 +723,11 @@ pub fn flush_module_ewar_end(
                     .ewar
                     .projected_ewar
                     .values()
-                    .any(|list| list.iter().any(|e| e.source_module_id == module_id)));
+                    .any(|list| list.iter().any(|e| e.source_module_id == module_id)))
+            || view.ewar.remote_assistance.values().any(|list| {
+                list.iter()
+                    .any(|e| e.source_ship_id == ship_id && e.module_id == module_id)
+            });
         if !may_hold_state {
             continue;
         }
@@ -723,6 +737,11 @@ pub fn flush_module_ewar_end(
             for aff_sid in snap.affected_ships {
                 if !merged.affected_ships.contains(&aff_sid) {
                     merged.affected_ships.push(aff_sid);
+                }
+            }
+            for aff_sid in snap.remote_assistance_affected_ships {
+                if !merged.remote_assistance_affected_ships.contains(&aff_sid) {
+                    merged.remote_assistance_affected_ships.push(aff_sid);
                 }
             }
         }
@@ -789,6 +808,16 @@ pub fn flush_ship_all_ewar_sync(
                     }
                 } else if !unresolved.contains(&mod_id) {
                     unresolved.push(mod_id);
+                }
+            }
+        }
+        for (&tgt_sid, list) in &view.ewar.remote_assistance {
+            for entry in list {
+                if (entry.source_ship_id == ship_id || tgt_sid == ship_id)
+                    && entry.source_ship_id > 0
+                    && !pairs.contains(&(entry.source_ship_id, entry.module_id))
+                {
+                    pairs.push((entry.source_ship_id, entry.module_id));
                 }
             }
         }

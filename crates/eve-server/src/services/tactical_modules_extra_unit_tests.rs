@@ -191,8 +191,8 @@ fn test_navigation_lock_entosis_unlock_and_remote_repair_boundaries() {
     assert!(check_ship_navigation_lock(&ctx, ship_id, "dock").is_ok());
 }
 
-#[test]
-fn test_projected_remote_assistance_falloff_crimewatch_and_removal() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_projected_remote_assistance_falloff_crimewatch_and_removal() {
     let ctx = test_ctx_with_custom_types(|sde| {
         sde.types.insert(
             990_209,
@@ -211,6 +211,7 @@ fn test_projected_remote_assistance_falloff_crimewatch_and_removal() {
     ensure_char(&ctx, tgt_char, 1000125, 30000142, tgt_ship, 1);
     insert_item(&ctx, logi_ship, 587, logi_char, 30000142, InventoryFlag::Hangar, 1, true);
     insert_item(&ctx, tgt_ship, 587, tgt_char, 30000142, InventoryFlag::Hangar, 1, true);
+    let _ = ctx.systems.get_or_spawn(30000142);
 
     let now = ctx.now_unix_secs();
     {
@@ -968,8 +969,8 @@ async fn test_entosis_subcap_contested_persist_and_command_burst_variants_crimew
     assert!(affected_in.contains(&le_ship));
 }
 
-#[test]
-fn test_bastion_siege_triage_and_sensor_remote_assistance_attrs() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_bastion_siege_triage_and_sensor_remote_assistance_attrs() {
     let ctx = test_ctx_with_custom_types(|sde| {
         sde.types.insert(33_400, custom_inv_type(sde, 33_400, 515, 7, "Bastion Module I", &[]));
         sde.types.insert(20_280, custom_inv_type(sde, 20_280, 515, 7, "Siege Module I", &[]));

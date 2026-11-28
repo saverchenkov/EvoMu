@@ -1403,16 +1403,27 @@ fn capture_target_b_runtime(fix: &MatrixFixture) -> TargetBRuntimeSlice {
                 .count(),
         )
     });
-    let tactical_entries = {
-        let ts = fix.ctx.tactical_state.read().expect("tactical_state");
-        (
-            ts.remote_assistance.iter().filter(|(&(_, sid), _)| b_ships.contains(&sid)).count(),
-            lance_caster_locks_count,
-            lance_victim_debuffs_count,
-            entosis_links_count,
-            entosis_cycles_count,
-        )
-    };
+    let remote_assistance_count = fix
+        .ctx
+        .systems
+        .active_system_handles()
+        .into_iter()
+        .map(|(_, h)| {
+            h.view()
+                .ewar
+                .remote_assistance
+                .keys()
+                .filter(|sid| b_ships.contains(sid))
+                .count()
+        })
+        .sum();
+    let tactical_entries = (
+        remote_assistance_count,
+        lance_caster_locks_count,
+        lance_victim_debuffs_count,
+        entosis_links_count,
+        entosis_cycles_count,
+    );
     let pending_notifications_b_sigs = {
         fix.ctx
             .pending_notifications
