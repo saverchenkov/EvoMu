@@ -212,6 +212,10 @@ fn populate_all_27_batch4_blobs_and_mining_ledger() -> WorldStateSnapshot {
             collapsed: false,
         }],
     );
+    snap.scanned_signatures
+        .insert((90_000_001, 30_000_142, 700_001));
+    snap.character_scan_progress
+        .insert((90_000_001, 30_000_142, "ABC-123".into()), 0.75);
     snap.cosmic_anomalies.insert(
         30_000_142,
         vec![CosmicAnomalyRecord {
@@ -346,6 +350,8 @@ fn assert_all_34_industry_market_pve_fields_eq(lhs: &WorldStateSnapshot, rhs: &W
     assert_eq!(lhs.market_order_meta, rhs.market_order_meta);
     assert_eq!(lhs.market_history, rhs.market_history);
     assert_eq!(lhs.cosmic_signatures, rhs.cosmic_signatures);
+    assert_eq!(lhs.scanned_signatures, rhs.scanned_signatures);
+    assert_eq!(lhs.character_scan_progress, rhs.character_scan_progress);
     assert_eq!(lhs.cosmic_anomalies, rhs.cosmic_anomalies);
     assert_eq!(lhs.incursions, rhs.incursions);
     assert_eq!(lhs.last_mission_decline_times, rhs.last_mission_decline_times);
@@ -685,4 +691,189 @@ fn industry_market_pve_strict_load_fails_closed_and_quarantine_preserves_valid_r
     );
     assert_eq!(legacy_strict.wallet_journal_timestamps.get(&1001), Some(&1_700_000_100));
     assert_eq!(q_legacy.quarantined.len(), 3);
+}
+
+#[test]
+fn scan_signatures_and_progress_domain_rows_diff_non_finite_and_checkpoint_migration() {
+    use super::domain_rows::KeyCodec;
+    use super::system_checkpoint::{
+        ensure_system_checkpoint_schema, load_all_checkpoints_for_kind, upsert_system_checkpoint,
+        KIND_MOON_PROBES, KIND_SCAN_PROGRESS, KIND_SCAN_SIGNATURES,
+    };
+    use crate::persistence::WorldRepository;
+    use crate::tx_engine::{ChangeSet, TxError, TxSqlExecutor};
+
+    // 1. Incremental `ChangeSet::diff` + SQLite single-row updates for `scanned_signatures` and
+    //    `character_scan_progress`, plus `TxError::NonFinite` rejection.
+    let mut base = WorldStateSnapshot::default();
+    base.scanned_signatures
+        .insert((90_000_001, 30_000_142, 700_001));
+    base.character_scan_progress
+        .insert((90_000_001, 30_000_142, "SIG-A".into()), 0.25);
+
+    let mut conn = Connection::open_in_memory().expect("open mem");
+    apply_migrations(&conn).expect("migrate mem");
+    replace_sqlite_from_snapshot(&mut conn, &base).expect("seed mem");
+
+    let mut next = base.clone();
+    next.scanned_signatures.remove(&(90_000_001, 30_000_142, 700_001));
+    next.scanned_signatures.insert((90_000_001, 30_000_142, 700_002));
+    next.character_scan_progress
+        .insert((90_000_001, 30_000_142, "SIG-A".into()), 0.85);
+    let changes = ChangeSet::diff(2, &base, &next);
+    assert_eq!(changes.domain_rows.len(), 3);
+    assert!(changes.domain_rows.iter().all(|op| match op {
+        DomainRowChange::Upsert { domain, .. } | DomainRowChange::Delete { domain, .. } => {
+            *domain == DOMAIN_PVE_AND_SPACE_EVENTS
+        }
+    }));
+
+    let before_sql = conn.total_changes();
+    {
+        let sql_tx = conn.transaction().expect("begin tx");
+        let mut exec = TxSqlExecutor::new(&sql_tx, crate::tx_engine::TxFaultPlan::None);
+        apply_domain_row_changes(&mut exec, &changes.domain_rows).expect("apply scan diffs");
+        sql_tx.commit().expect("commit scan diffs");
+    }
+    assert_eq!(conn.total_changes() - before_sql, 3);
+
+    let reloaded = load_snapshot_from_sqlite(&conn).expect("reload after incremental diff");
+    assert_eq!(reloaded.scanned_signatures, next.scanned_signatures);
+    assert_eq!(reloaded.character_scan_progress, next.character_scan_progress);
+
+    for bad_val in [f64::NAN, f64::INFINITY] {
+        let mut bad_next = next.clone();
+        bad_next
+            .character_scan_progress
+            .insert((90_000_001, 30_000_142, "SIG-BAD".into()), bad_val);
+        let bad_changes = ChangeSet::diff(3, &next, &bad_next);
+        let err = validate_domain_row_changes(&bad_changes.domain_rows, 1024 * 1024)
+            .expect_err("non-finite scan progress must fail validation");
+        assert!(matches!(err, TxError::NonFinite { .. }), "{err}");
+    }
+
+    // 2. One-way legacy `system_checkpoint(kind IN ('scan_signatures', 'scan_progress'))` ->
+    //    `domain_rows` migration: newer `domain_rows` wins on collision, migrated rows are deleted
+    //    from `system_checkpoint` while unrelated kinds stay intact, and clean reload is zero-legacy.
+    let tmp_path = std::env::temp_dir().join(format!(
+        "evomu_scan_cp_mig_{}_{:?}.sqlite",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&tmp_path);
+    {
+        let repo = WorldRepository::open_sqlite(&tmp_path).expect("open sqlite");
+        repo.with_sqlite_conn(|c| -> Result<(), String> {
+            ensure_system_checkpoint_schema(c)?;
+            upsert_system_checkpoint(
+                c,
+                30_000_142,
+                KIND_SCAN_SIGNATURES,
+                "90000001|700010",
+                &(90_000_001_i64, 30_000_142_u32, 700_010_i64),
+                1_800_000_000,
+            )?;
+            upsert_system_checkpoint(
+                c,
+                30_000_142,
+                KIND_SCAN_PROGRESS,
+                "90000001|SIG-OLD",
+                &((90_000_001_i64, 30_000_142_u32, "SIG-OLD".to_string()), 0.35_f64),
+                1_800_000_000,
+            )?;
+            upsert_system_checkpoint(
+                c,
+                30_000_142,
+                KIND_SCAN_PROGRESS,
+                "90000001|SIG-COLLIDE",
+                &((90_000_001_i64, 30_000_142_u32, "SIG-COLLIDE".to_string()), 0.15_f64),
+                1_800_000_000,
+            )?;
+            upsert_system_checkpoint(
+                c,
+                30_000_142,
+                KIND_MOON_PROBES,
+                "900",
+                &serde_json::json!({ "probe_id": 900 }),
+                1_800_000_000,
+            )?;
+            let dom_key = format!(
+                "character_scan_progress/{}",
+                (90_000_001_i64, 30_000_142_u32, "SIG-COLLIDE".to_string()).encode_key()
+            );
+            c.execute(
+                "INSERT INTO domain_rows (domain, key, value) VALUES (?1, ?2, ?3)",
+                params![DOMAIN_PVE_AND_SPACE_EVENTS, dom_key, "0.95"],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed legacy scan checkpoints");
+    }
+
+    let reopened = WorldRepository::open_sqlite(&tmp_path).expect("reopen + migrate");
+    reopened.with_snapshot(|snap| {
+        assert!(snap.scanned_signatures.contains(&(90_000_001, 30_000_142, 700_010)));
+        assert_eq!(
+            snap.character_scan_progress
+                .get(&(90_000_001, 30_000_142, "SIG-OLD".into())),
+            Some(&0.35)
+        );
+        assert_eq!(
+            snap.character_scan_progress
+                .get(&(90_000_001, 30_000_142, "SIG-COLLIDE".into())),
+            Some(&0.95),
+            "newer domain_rows entry must win over legacy scan_progress row on collision"
+        );
+    });
+    reopened
+        .with_sqlite_conn(|c| -> Result<(), String> {
+            assert!(load_all_checkpoints_for_kind::<(i64, u32, i64)>(c, KIND_SCAN_SIGNATURES)?.is_empty());
+            assert!(load_all_checkpoints_for_kind::<((i64, u32, String), f64)>(c, KIND_SCAN_PROGRESS)?.is_empty());
+            assert_eq!(
+                load_all_checkpoints_for_kind::<serde_json::Value>(c, KIND_MOON_PROBES)?.len(),
+                1,
+                "unrelated system_checkpoint kinds must remain untouched"
+            );
+            let mut probe_snap = WorldStateSnapshot::default();
+            assert!(!load_industry_market_pve_domain_rows(
+                c,
+                &mut probe_snap,
+                &mut LoadContext::new(false),
+            )?);
+            Ok(())
+        })
+        .expect("verify migrated checkpoints deleted and clean reload zero-legacy");
+
+    // 3. Corrupt `scan_signatures` / `scan_progress` legacy checkpoint rows fail closed in strict
+    //    mode without mutating `snap` and quarantine cleanly when quarantine mode is active.
+    let bad_conn = Connection::open_in_memory().expect("open bad mem");
+    apply_migrations(&bad_conn).expect("migrate bad mem");
+    ensure_system_checkpoint_schema(&bad_conn).expect("ensure cp");
+    bad_conn
+        .execute(
+            "INSERT INTO system_checkpoint (system_id, kind, key, value, updated_unix)
+             VALUES (30000142, 'scan_signatures', 'bad_sig', '{corrupt', 1),
+                    (30000142, 'scan_progress', 'bad_prog', '[[[1,2,\"S\"], \"not_f64\"]]', 1)",
+            [],
+        )
+        .expect("seed corrupt legacy checkpoints");
+    let mut strict_dst = WorldStateSnapshot::default();
+    strict_dst
+        .scanned_signatures
+        .insert((1, 30_000_142, 999));
+    assert!(
+        load_industry_market_pve_domain_rows(&bad_conn, &mut strict_dst, &mut LoadContext::new(false))
+            .is_err()
+    );
+    assert_eq!(strict_dst.scanned_signatures.len(), 1);
+
+    let mut q_ctx = LoadContext::quarantine_in_memory();
+    assert!(
+        load_industry_market_pve_domain_rows(&bad_conn, &mut strict_dst, &mut q_ctx).unwrap()
+    );
+    assert_eq!(q_ctx.quarantined.len(), 2);
+
+    drop(reopened);
+    let _ = std::fs::remove_file(&tmp_path);
 }

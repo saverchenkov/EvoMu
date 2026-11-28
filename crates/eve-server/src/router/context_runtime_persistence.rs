@@ -29,11 +29,11 @@ use eve_db::sqlite_store::domain_rows::{from_checked_domain_json, to_checked_dom
 use eve_db::sqlite_store::system_checkpoint::{
     current_unix_secs, ensure_system_checkpoint_schema, has_any_system_checkpoints,
     load_all_checkpoints_for_kind, purge_crash_lost_checkpoints, replace_checkpoint_kinds_batch,
-    retire_legacy_server_runtime_blobs, CLUSTER_SYSTEM_ID, KIND_FLEET_EXTRAS, KIND_MAP_LANDMARKS,
-    KIND_MOON_PROBES, KIND_PHASED_ASTEROID_FIELDS, KIND_SCAN_PROGRESS,
-    KIND_SCAN_SIGNATURES, KIND_SOCIAL_EXTRAS, KIND_SYSTEM_SIM_TIME, KIND_TACTICAL_DURABLE,
+    retire_legacy_server_runtime_blobs, CLUSTER_SYSTEM_ID, KIND_FLEET_EXTRAS, KIND_MOON_PROBES,
+    KIND_PHASED_ASTEROID_FIELDS, KIND_SCAN_PROGRESS, KIND_SCAN_SIGNATURES, KIND_SOCIAL_EXTRAS,
+    KIND_SYSTEM_SIM_TIME, KIND_TACTICAL_DURABLE,
 };
-use eve_db::{FleetRole, SessionChangeTimerRecord, WorldStateSnapshot};
+use eve_db::{FleetRole, SessionChangeTimerRecord};
 
 pub(crate) const SERVER_RUNTIME_STATE_BLOB_KEY: &str = "server_runtime_state";
 
@@ -261,6 +261,40 @@ fn merge_legacy_tactical_durable_into_db(
     });
 }
 
+/// One-way legacy migration (`#1541` Track E2b): merges legacy `scanned_signatures` and
+/// `character_scan_progress` rows into `WorldStateSnapshot` (`DOMAIN_PVE_AND_SPACE_EVENTS`)
+/// so newer DB entries win on collision while performing zero DB writes when empty or dominated.
+fn merge_legacy_scan_state_into_db(
+    db: &eve_db::WorldRepository,
+    sigs: Vec<(i64, u32, i64)>,
+    prog: Vec<((i64, u32, String), f64)>,
+    can_write_db: bool,
+) {
+    if !can_write_db || (sigs.is_empty() && prog.is_empty()) {
+        return;
+    }
+    let needs_write = db.with_snapshot(|snap| {
+        sigs.iter()
+            .any(|entry| !snap.scanned_signatures.contains(entry))
+            || prog
+                .iter()
+                .any(|(k, v)| v.is_finite() && !snap.character_scan_progress.contains_key(k))
+    });
+    if !needs_write {
+        return;
+    }
+    db.with_mut_snapshot(|snap| {
+        for entry in sigs {
+            snap.scanned_signatures.insert(entry);
+        }
+        for (k, v) in prog {
+            if v.is_finite() {
+                snap.character_scan_progress.entry(k).or_insert(v);
+            }
+        }
+    });
+}
+
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct PersistedFleetExtrasPayload {
@@ -386,23 +420,6 @@ enum DurableTacticalEntry {
     TsbSelfPenaltyUntil(u8, i64, u64),
 }
 
-fn resolve_entity_solar_system_id(snap: &WorldStateSnapshot, entity_id: i64) -> u32 {
-    if let Some(st) = snap.structures.get(&entity_id) {
-        return st.solar_system_id;
-    }
-    if let Some(item) = snap.items.get(&entity_id) {
-        if let Ok(loc_u32) = u32::try_from(item.location_id) {
-            if (30_000_000..40_000_000).contains(&loc_u32) {
-                return loc_u32;
-            }
-        }
-        if let Some(st) = snap.structures.get(&item.location_id) {
-            return st.solar_system_id;
-        }
-    }
-    CLUSTER_SYSTEM_ID
-}
-
 fn push_checked_row<T: serde::Serialize>(
     out: &mut Vec<(u32, String, String)>,
     system_id: u32,
@@ -429,7 +446,6 @@ struct PersistedServerRuntimeState {
     module_reactivation_cooldowns: Vec<((i64, i64, u32), ModuleCooldownEntry)>,
     phased_asteroid_fields: HashMap<u32, PhasedAsteroidFieldState>,
     session_change_timers: HashMap<i64, SessionChangeTimerRecord>,
-    map_landmarks: Vec<(i64, String, f64, f64, f64)>,
     tactical_state: PersistedTacticalModulesPayload,
     fleet_extras_runtime: PersistedFleetExtrasPayload,
     social_extras_runtime: PersistedSocialExtrasRuntimePayload,
@@ -447,23 +463,6 @@ impl PersistedServerRuntimeState {
         let fleet_extras_runtime = PersistedFleetExtrasPayload::from_ctx(ctx);
         let social_extras_runtime = PersistedSocialExtrasRuntimePayload::from_ctx(ctx);
 
-        let mut scanned_signatures: Vec<_> = ctx
-            .scanned_signatures
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .copied()
-            .collect();
-        scanned_signatures.sort_unstable();
-        let mut character_scan_progress: Vec<_> = ctx
-            .character_scan_progress
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(k, &v)| (k.clone(), v))
-            .collect();
-        character_scan_progress.sort_by(|(a, _), (b, _)| a.cmp(b));
-
         let active_moon_probes = ctx
             .active_moon_probes
             .read()
@@ -474,16 +473,11 @@ impl PersistedServerRuntimeState {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let map_landmarks = ctx
-            .map_landmarks
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
 
         Self {
             active_moon_probes,
-            scanned_signatures,
-            character_scan_progress,
+            scanned_signatures: Vec::new(),
+            character_scan_progress: Vec::new(),
             active_fighters: HashMap::new(),
             fighter_cooldown_state: Vec::new(),
             fighter_charge_state: Vec::new(),
@@ -491,7 +485,6 @@ impl PersistedServerRuntimeState {
             module_reactivation_cooldowns: Vec::new(),
             phased_asteroid_fields,
             session_change_timers: HashMap::new(),
-            map_landmarks,
             tactical_state,
             fleet_extras_runtime,
             social_extras_runtime,
@@ -501,14 +494,11 @@ impl PersistedServerRuntimeState {
     #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.active_moon_probes.is_empty()
-            && self.scanned_signatures.is_empty()
-            && self.character_scan_progress.is_empty()
             && self.active_fighters.is_empty()
             && self.fighter_cooldown_state.is_empty()
             && self.fighter_charge_state.is_empty()
             && self.fighter_tube_loads.is_empty()
             && self.phased_asteroid_fields.is_empty()
-            && self.map_landmarks.is_empty()
             && self.tactical_state.is_empty()
             && self.fleet_extras_runtime.is_empty()
             && self.social_extras_runtime.is_empty()
@@ -520,12 +510,12 @@ impl PersistedServerRuntimeState {
         *ctx.active_moon_probes
             .write()
             .unwrap_or_else(|e| e.into_inner()) = self.active_moon_probes;
-        *ctx.scanned_signatures
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = self.scanned_signatures.into_iter().collect();
-        *ctx.character_scan_progress
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = self.character_scan_progress.into_iter().collect();
+        merge_legacy_scan_state_into_db(
+            &ctx.db,
+            self.scanned_signatures,
+            self.character_scan_progress,
+            can_write_db,
+        );
         if !self.active_fighters.is_empty()
             || !self.fighter_cooldown_state.is_empty()
             || !self.fighter_charge_state.is_empty()
@@ -561,9 +551,6 @@ impl PersistedServerRuntimeState {
                 }
             });
         }
-        *ctx.map_landmarks
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = self.map_landmarks;
 
         let cur_db_key = db_ptr_key(&ctx.db);
         let cur_inst_key = ctx.instance_id as usize;
@@ -616,29 +603,8 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let mut scanned_signatures_raw: Vec<_> = ctx
-        .scanned_signatures
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .copied()
-        .collect();
-    scanned_signatures_raw.sort_unstable();
-    let mut scan_progress_raw: Vec<_> = ctx
-        .character_scan_progress
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .map(|(k, &v)| (k.clone(), v))
-        .collect();
-    scan_progress_raw.sort_by(|(a, _), (b, _)| a.cmp(b));
     let phased_fields_raw = ctx
         .phased_asteroid_fields
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let landmarks_raw = ctx
-        .map_landmarks
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
@@ -653,13 +619,6 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
     let fleet_extras = PersistedFleetExtrasPayload::from_ctx(ctx);
     let social_extras = PersistedSocialExtrasRuntimePayload::from_ctx(ctx);
 
-    let landmark_systems: Vec<u32> = ctx.db.with_snapshot(|snap| {
-        landmarks_raw
-            .iter()
-            .map(|(item_id, _, _, _, _)| resolve_entity_solar_system_id(snap, *item_id))
-            .collect()
-    });
-
     let mut moon_rows = Vec::with_capacity(moon_probes_raw.len());
     for probe in &moon_probes_raw {
         push_checked_row(
@@ -670,39 +629,9 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
         );
     }
 
-    let mut sig_rows = Vec::with_capacity(scanned_signatures_raw.len());
-    for entry in &scanned_signatures_raw {
-        push_checked_row(
-            &mut sig_rows,
-            entry.1,
-            format!("{}|{}", entry.0, entry.2),
-            entry,
-        );
-    }
-
-    let mut prog_rows = Vec::with_capacity(scan_progress_raw.len());
-    for ((char_id, sys_id, sig_key), val) in &scan_progress_raw {
-        push_checked_row(
-            &mut prog_rows,
-            *sys_id,
-            format!("{char_id}|{sig_key}"),
-            &((*char_id, *sys_id, sig_key.clone()), *val),
-        );
-    }
-
     let mut phased_rows = Vec::with_capacity(phased_fields_raw.len());
     for (&sys_id, st) in &phased_fields_raw {
         push_checked_row(&mut phased_rows, sys_id, "field".to_string(), st);
-    }
-
-    let mut landmark_rows = Vec::with_capacity(landmarks_raw.len());
-    for (idx, (entry, &sys_id)) in landmarks_raw.iter().zip(landmark_systems.iter()).enumerate() {
-        push_checked_row(
-            &mut landmark_rows,
-            sys_id,
-            format!("{}|{idx}", entry.0),
-            entry,
-        );
     }
 
     let mut sim_rows = Vec::with_capacity(sim_times_raw.len());
@@ -734,10 +663,7 @@ fn collect_checkpoint_batch_from_ctx(ctx: &ServerContext) -> Vec<(&'static str, 
 
     vec![
         (KIND_MOON_PROBES, moon_rows),
-        (KIND_SCAN_SIGNATURES, sig_rows),
-        (KIND_SCAN_PROGRESS, prog_rows),
         (KIND_PHASED_ASTEROID_FIELDS, phased_rows),
-        (KIND_MAP_LANDMARKS, landmark_rows),
         (KIND_SYSTEM_SIM_TIME, sim_rows),
         (KIND_TACTICAL_DURABLE, durable_tac_rows),
         (KIND_FLEET_EXTRAS, fleet_rows),
@@ -768,8 +694,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext, can_write_db: bool) -> Checkpo
             conn,
             KIND_PHASED_ASTEROID_FIELDS,
         )?;
-        let landmarks =
-            load_all_checkpoints_for_kind::<(i64, String, f64, f64, f64)>(conn, KIND_MAP_LANDMARKS)?;
         let sim_times =
             load_all_checkpoints_for_kind::<((u8, u32), f64)>(conn, KIND_SYSTEM_SIM_TIME)?;
         let durable_tac_raw =
@@ -795,7 +719,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext, can_write_db: bool) -> Checkpo
             sigs,
             prog,
             phased,
-            landmarks,
             sim_times,
             durable_tac,
             fleet_extras,
@@ -808,7 +731,6 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext, can_write_db: bool) -> Checkpo
         sigs,
         prog,
         phased,
-        landmarks,
         sim_times,
         durable_tac,
         fleet_extras,
@@ -822,18 +744,26 @@ fn load_checkpoints_into_ctx(ctx: &ServerContext, can_write_db: bool) -> Checkpo
     *ctx.active_moon_probes
         .write()
         .unwrap_or_else(|e| e.into_inner()) = moon_probes.into_iter().map(|(_, _, v)| v).collect();
-    *ctx.scanned_signatures
-        .write()
-        .unwrap_or_else(|e| e.into_inner()) = sigs.into_iter().map(|(_, _, v)| v).collect();
-    *ctx.character_scan_progress
-        .write()
-        .unwrap_or_else(|e| e.into_inner()) = prog.into_iter().map(|(_, _, (k, v))| (k, v)).collect();
+    if !sigs.is_empty() || !prog.is_empty() {
+        merge_legacy_scan_state_into_db(
+            &ctx.db,
+            sigs.into_iter().map(|(_, _, v)| v).collect(),
+            prog.into_iter().map(|(_, _, entry)| entry).collect(),
+            can_write_db,
+        );
+        if can_write_db {
+            let _ = ctx.db.with_sqlite_conn(|conn| {
+                conn.execute(
+                    "DELETE FROM system_checkpoint WHERE kind IN (?1, ?2)",
+                    rusqlite::params![KIND_SCAN_SIGNATURES, KIND_SCAN_PROGRESS],
+                )
+                .map_err(|e| e.to_string())
+            });
+        }
+    }
     *ctx.phased_asteroid_fields
         .write()
         .unwrap_or_else(|e| e.into_inner()) = phased.into_iter().map(|(sys, _, v)| (sys, v)).collect();
-    *ctx.map_landmarks
-        .write()
-        .unwrap_or_else(|e| e.into_inner()) = landmarks.into_iter().map(|(_, _, v)| v).collect();
 
     let cur_db_key = db_ptr_key(&ctx.db);
     let cur_inst_key = ctx.instance_id as usize;
@@ -1240,10 +1170,17 @@ mod tests {
 
         // 1. Re-entrancy guard: calling `persist_server_runtime_to_db` while holding `with_mut_snapshot`
         //    must return immediately without deadlocking or writing `system_checkpoint`.
-        ctx.map_landmarks
+        ctx.active_moon_probes
             .write()
             .unwrap()
-            .push((1, "Landmark".into(), 1.0, 2.0, 3.0));
+            .push(ActiveMoonSurveyProbe {
+                probe_id: 1,
+                probe_type_id: 22_778,
+                owner_char_id: 90_000_001,
+                solar_system_id: 30_000_142,
+                hit_moon_id: None,
+                arrival_unix_secs: 1_000,
+            });
         assert!(!PersistedServerRuntimeState::from_ctx(&ctx).is_empty());
 
         ctx.db.with_mut_snapshot(|snap| {
@@ -1273,7 +1210,7 @@ mod tests {
         assert!(has_rows);
 
         // 3. Clearing all checkpointed runtime fields removes their `system_checkpoint` rows.
-        ctx.map_landmarks.write().unwrap().clear();
+        ctx.active_moon_probes.write().unwrap().clear();
         assert!(PersistedServerRuntimeState::from_ctx(&ctx).is_empty());
         ctx.persist_server_runtime_to_db();
         let has_rows_after_clear = ctx
@@ -1516,32 +1453,40 @@ mod tests {
     async fn system_checkpoint_persists_checkpointed_kinds_by_system_and_drops_crash_lost_kinds() {
         let ctx = test_ctx();
         let h_jita = ctx.systems.get_or_spawn(30_000_142);
-        ctx.scanned_signatures
+        ctx.active_moon_probes
             .write()
             .unwrap()
-            .insert((90_000_001, 30_000_142, 777));
+            .push(ActiveMoonSurveyProbe {
+                probe_id: 777,
+                probe_type_id: 22_778,
+                owner_char_id: 90_000_001,
+                solar_system_id: 30_000_142,
+                hit_moon_id: None,
+                arrival_unix_secs: 1_000,
+            });
         ctx.seed_ewar_source_for_test(Some(30_000_142), 500_001, 600_001);
 
         ctx.persist_server_runtime_to_db();
 
-        // Checkpointed signature is persisted under Jita (30000142).
-        let sig_rows = ctx
+        // Checkpointed moon survey probe is persisted under Jita (30000142).
+        let moon_rows = ctx
             .db
             .with_sqlite_conn(|conn| {
-                load_all_checkpoints_for_kind::<(i64, u32, i64)>(conn, KIND_SCAN_SIGNATURES)
+                load_all_checkpoints_for_kind::<ActiveMoonSurveyProbe>(conn, KIND_MOON_PROBES)
             })
-            .expect("load signature checkpoints");
-        assert_eq!(sig_rows.len(), 1);
-        assert_eq!(sig_rows[0].0, 30_000_142);
+            .expect("load moon probe checkpoints");
+        assert_eq!(moon_rows.len(), 1);
+        assert_eq!(moon_rows[0].0, 30_000_142);
 
         // Rehydrating restores checkpointed kinds and leaves crash-lost maps cleared.
-        ctx.scanned_signatures.write().unwrap().clear();
+        ctx.active_moon_probes.write().unwrap().clear();
         ctx.hydrate_server_runtime_from_db();
         assert!(ctx
-            .scanned_signatures
+            .active_moon_probes
             .read()
             .unwrap()
-            .contains(&(90_000_001, 30_000_142, 777)));
+            .iter()
+            .any(|p| p.probe_id == 777 && p.solar_system_id == 30_000_142));
         assert!(h_jita.ewar_state_snapshot().projected_ewar_sources.is_empty());
         assert!(crate::system_actor::SystemView::default().active_warps.is_empty());
     }
@@ -1728,11 +1673,14 @@ mod tests {
         ));
 
         // 2. Legacy PersistedServerRuntimeState / PersistedTacticalModulesPayload JSON carrying
-        //    the removed field deserializes cleanly and hydrates/migrates remaining fields.
+        //    removed fields (`map_landmarks`, `clone_vat_bay_activated_ships`) deserializes cleanly
+        //    and migrates legacy `scanned_signatures` + `character_scan_progress` into `WorldStateSnapshot`.
         let ctx_legacy = test_ctx();
         let legacy_field = ["clone_vat_bay", "activated_ships"].join("_");
         let legacy_payload = serde_json::json!({
             "map_landmarks": [[1, "LegacyMark", 1.0, 2.0, 3.0]],
+            "scanned_signatures": [[90_000_001, 30_000_142, 777]],
+            "character_scan_progress": [[[90_000_001, 30_000_142, "SIG-777"], 0.65]],
             "tactical_state": {
                 legacy_field: [[0, 120], [1, 121]],
                 "entosis_active_links": [[[0, 700_001], {
@@ -1764,8 +1712,18 @@ mod tests {
             );
             assert!(snap.sov_runtime.entosis_active_links.is_empty());
             assert!(snap.sov_runtime.entosis_target_cycles.is_empty());
+            assert!(snap.scanned_signatures.contains(&(90_000_001, 30_000_142, 777)));
+            assert_eq!(
+                snap.character_scan_progress
+                    .get(&(90_000_001, 30_000_142, "SIG-777".into())),
+                Some(&0.65)
+            );
         });
-        assert_eq!(ctx_legacy.map_landmarks.read().unwrap().len(), 1);
+        assert!(ctx_legacy.has_scanned_signature(90_000_001, 30_000_142, 777));
+        assert_eq!(
+            ctx_legacy.get_character_scan_progress(90_000_001, 30_000_142, "SIG-777"),
+            Some(0.65)
+        );
     }
 
     #[test]
@@ -2002,6 +1960,113 @@ mod tests {
                 .combat_crimewatch_state
                 .lance_victim_debuff_until
                 .contains_key(&335));
+        });
+    }
+
+    #[test]
+    fn legacy_scan_checkpoints_migrate_one_way_preserving_db_and_clean_hydrate_is_zero_write() {
+        let ctx = test_ctx();
+        ctx.record_character_scan_progress(90_000_001, 30_000_142, "SIG-COLLIDE", 0.90);
+        ctx.db
+            .with_sqlite_conn(|conn| -> Result<(), String> {
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    30_000_142,
+                    KIND_SCAN_SIGNATURES,
+                    "90000001|700011",
+                    &(90_000_001_i64, 30_000_142_u32, 700_011_i64),
+                    1_800_000_000,
+                )?;
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    30_000_142,
+                    KIND_SCAN_PROGRESS,
+                    "90000001|SIG-OLD",
+                    &((90_000_001_i64, 30_000_142_u32, "SIG-OLD".to_string()), 0.40_f64),
+                    1_800_000_000,
+                )?;
+                eve_db::sqlite_store::system_checkpoint::upsert_system_checkpoint(
+                    conn,
+                    30_000_142,
+                    KIND_SCAN_PROGRESS,
+                    "90000001|SIG-COLLIDE",
+                    &((90_000_001_i64, 30_000_142_u32, "SIG-COLLIDE".to_string()), 0.10_f64),
+                    1_800_000_000,
+                )
+            })
+            .expect("seed legacy scan checkpoints");
+
+        ctx.hydrate_server_runtime_from_db();
+        assert!(ctx.has_scanned_signature(90_000_001, 30_000_142, 700_011));
+        assert_eq!(
+            ctx.get_character_scan_progress(90_000_001, 30_000_142, "SIG-OLD"),
+            Some(0.40)
+        );
+        assert_eq!(
+            ctx.get_character_scan_progress(90_000_001, 30_000_142, "SIG-COLLIDE"),
+            Some(0.90),
+            "existing DB scan progress must win over legacy scan_progress checkpoint"
+        );
+
+        ctx.db
+            .with_sqlite_conn(|conn| -> Result<(), String> {
+                assert!(load_all_checkpoints_for_kind::<(i64, u32, i64)>(
+                    conn,
+                    KIND_SCAN_SIGNATURES
+                )?
+                .is_empty());
+                assert!(load_all_checkpoints_for_kind::<((i64, u32, String), f64)>(
+                    conn,
+                    KIND_SCAN_PROGRESS
+                )?
+                .is_empty());
+                Ok(())
+            })
+            .expect("legacy scan checkpoints must be deleted after migration");
+
+        // Second hydrate performs ZERO DB writes.
+        let tx_before = ctx.db.tx_commit_count();
+        let epoch_before = ctx.db.state_epoch();
+        ctx.hydrate_server_runtime_from_db();
+        assert_eq!(ctx.db.tx_commit_count(), tx_before);
+        assert_eq!(ctx.db.state_epoch(), epoch_before);
+
+        // Persist never writes KIND_SCAN_SIGNATURES / KIND_SCAN_PROGRESS back to system_checkpoint.
+        ctx.mark_signature_scanned(90_000_001, 30_000_142, 700_012);
+        ctx.record_character_scan_progress(90_000_001, 30_000_142, "SIG-NEW", 0.75);
+        ctx.persist_server_runtime_to_db();
+        ctx.db
+            .with_sqlite_conn(|conn| -> Result<(), String> {
+                assert!(load_all_checkpoints_for_kind::<(i64, u32, i64)>(
+                    conn,
+                    KIND_SCAN_SIGNATURES
+                )?
+                .is_empty());
+                assert!(load_all_checkpoints_for_kind::<((i64, u32, String), f64)>(
+                    conn,
+                    KIND_SCAN_PROGRESS
+                )?
+                .is_empty());
+                Ok(())
+            })
+            .expect("persist must not emit legacy scan checkpoints");
+
+        // Write-lock guard: calling merge_legacy_scan_state_into_db while holding `with_mut_snapshot`
+        // skips DB writes without deadlocking.
+        let ctx_locked = test_ctx();
+        ctx_locked.db.with_mut_snapshot(|snap| {
+            let can_write = !ctx_locked.db.is_write_locked_by_current_thread();
+            assert!(!can_write);
+            merge_legacy_scan_state_into_db(
+                &ctx_locked.db,
+                vec![(90_000_001, 30_000_142, 700_099)],
+                vec![((90_000_001, 30_000_142, "SIG-LOCK".into()), 0.5)],
+                can_write,
+            );
+            assert!(!snap.scanned_signatures.contains(&(90_000_001, 30_000_142, 700_099)));
+            assert!(!snap
+                .character_scan_progress
+                .contains_key(&(90_000_001, 30_000_142, "SIG-LOCK".into())));
         });
     }
 }

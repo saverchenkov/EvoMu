@@ -79,10 +79,13 @@ macro_rules! for_each_industry_market_pve_domain {
                 maps: [
                     cosmic_signatures: SolarSystemId => Vec<CosmicSignatureRecord>,
                     cosmic_anomalies: SolarSystemId => Vec<CosmicAnomalyRecord>,
+                    character_scan_progress: (i64, SolarSystemId, String) => f64,
                     incursions: u32 => IncursionRecord,
                     last_mission_decline_times: i64 => u64,
                 ],
-                sets: [],
+                sets: [
+                    scanned_signatures: (i64, SolarSystemId, i64),
+                ],
                 scalars: [
                     system_jump_events: Vec<SystemJumpEvent>,
                     system_kill_events: Vec<SystemKillEvent>,
@@ -442,22 +445,93 @@ fn load_domain_rows_into_staged(
     Ok(())
 }
 
+fn decode_legacy_scan_checkpoint_kind<T, F>(
+    conn: &Connection,
+    kind: &'static str,
+    ctx: &mut LoadContext,
+    mut on_entry: F,
+) -> Result<bool, String>
+where
+    T: DeserializeOwned,
+    F: FnMut(T) -> Result<(), String>,
+{
+    let mut stmt = conn
+        .prepare(
+            "SELECT key, value FROM system_checkpoint
+             WHERE kind = ?1
+             ORDER BY system_id, key",
+        )
+        .map_err(|e| format!("legacy system_checkpoint {kind} prepare: {e}"))?;
+    let mut rows = stmt
+        .query(params![kind])
+        .map_err(|e| format!("legacy system_checkpoint {kind} query: {e}"))?;
+    let mut had_rows = false;
+    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+        had_rows = true;
+        let key = crate::sqlite_store::quarantine::row_col_string(r, 0);
+        let raw_payload = crate::sqlite_store::quarantine::row_col_string(r, 1);
+        let parse_res = r
+            .get::<_, String>(1)
+            .map_err(|e| e.to_string())
+            .and_then(|s| from_checked_domain_json::<T>(&s))
+            .and_then(&mut on_entry);
+        if let Err(err) = parse_res {
+            ctx.record_bad_row("system_checkpoint", kind, key, raw_payload, err, None)?;
+        }
+    }
+    Ok(had_rows)
+}
+
+fn decode_legacy_scan_checkpoints(
+    conn: &Connection,
+    staged: &mut StagedIndustryMarketPve,
+    ctx: &mut LoadContext,
+) -> Result<bool, String> {
+    if !table_exists(conn, "system_checkpoint")? {
+        return Ok(false);
+    }
+    let had_sigs = decode_legacy_scan_checkpoint_kind::<(i64, SolarSystemId, i64), _>(
+        conn,
+        "scan_signatures",
+        ctx,
+        |entry| {
+            staged.scanned_signatures.insert(entry);
+            Ok(())
+        },
+    )?;
+    let had_prog = decode_legacy_scan_checkpoint_kind::<((i64, SolarSystemId, String), f64), _>(
+        conn,
+        "scan_progress",
+        ctx,
+        |(k, v)| {
+            if !v.is_finite() {
+                return Err("non-finite floating-point value in legacy scan_progress".to_string());
+            }
+            staged.character_scan_progress.insert(k, v);
+            Ok(())
+        },
+    )?;
+    Ok(had_sigs || had_prog)
+}
+
 fn load_staged_industry_market_pve(
     conn: &Connection,
     ctx: &mut LoadContext,
 ) -> Result<(StagedIndustryMarketPve, bool), String> {
     let mut staged = StagedIndustryMarketPve::default();
-    let had_legacy = decode_legacy_world_kv_blobs(conn, &mut staged, ctx)?;
+    let had_legacy_kv = decode_legacy_world_kv_blobs(conn, &mut staged, ctx)?;
+    let had_legacy_scan_checkpoints = decode_legacy_scan_checkpoints(conn, &mut staged, ctx)?;
     load_domain_rows_into_staged(conn, &mut staged, ctx)?;
-    Ok((staged, had_legacy))
+    Ok((staged, had_legacy_kv || had_legacy_scan_checkpoints))
 }
 
-/// Loads all 34 Family 5 (`industry_market_pve`) collections from `domain_rows` (overlaying any
-/// unmigrated legacy `world_kv_blobs` entries so newer `domain_rows` wins) into `snap`.
+/// Loads all Family 5 (`industry_market_pve`) collections from `domain_rows` (overlaying any
+/// unmigrated legacy `world_kv_blobs` or `system_checkpoint(kind IN ('scan_signatures', 'scan_progress'))`
+/// entries so newer `domain_rows` wins) into `snap`.
 ///
-/// Returns `Ok(true)` if the retired `world_kv_blobs` table existed and should be dropped once
-/// migrated rows commit. Fails closed without mutating `snap` when `ctx.quarantine_unreadable` is
-/// `false`.
+/// Returns `Ok(true)` if the retired `world_kv_blobs` table or legacy scan checkpoint rows existed
+/// and should be cleaned up once migrated rows commit. Fails closed without mutating `snap` when
+/// `ctx.quarantine_unreadable` is `false`.
 pub fn load_industry_market_pve_domain_rows(
     conn: &Connection,
     snap: &mut WorldStateSnapshot,
@@ -474,10 +548,18 @@ pub fn load_industry_market_pve(conn: &Connection, snap: &mut WorldStateSnapshot
         load_industry_market_pve_domain_rows(conn, snap, &mut LoadContext::quarantine_in_memory());
 }
 
-/// Drops the retired legacy `world_kv_blobs` table after migration to `domain_rows`.
+/// Drops the retired legacy `world_kv_blobs` table and deletes migrated legacy scan checkpoint
+/// rows from `system_checkpoint` after migration to `domain_rows`.
 pub(crate) fn drop_legacy_industry_market_pve_tables(tx: &Transaction<'_>) -> Result<(), String> {
     tx.execute("DROP TABLE IF EXISTS world_kv_blobs", [])
         .map_err(|e| format!("drop legacy world_kv_blobs table: {e}"))?;
+    if table_exists(tx, "system_checkpoint")? {
+        tx.execute(
+            "DELETE FROM system_checkpoint WHERE kind IN ('scan_signatures', 'scan_progress')",
+            [],
+        )
+        .map_err(|e| format!("delete legacy system_checkpoint scan rows: {e}"))?;
+    }
     Ok(())
 }
 

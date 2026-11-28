@@ -4317,6 +4317,8 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         applied_ship_skins: _,
         chat_channels: ref sb_chat_channels,
         cosmic_signatures: _,
+        scanned_signatures: ref sb_scanned_signatures,
+        character_scan_progress: ref sb_character_scan_progress,
         read_mails: _,
         deleted_mails: _,
         mail_labels: _,
@@ -4490,6 +4492,8 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         applied_ship_skins: _,
         chat_channels: ref sc_chat_channels,
         cosmic_signatures: _,
+        scanned_signatures: ref sc_scanned_signatures,
+        character_scan_progress: ref sc_character_scan_progress,
         read_mails: _,
         deleted_mails: _,
         mail_labels: _,
@@ -5184,7 +5188,25 @@ fn esi_target_b_mutated(fix: &MatrixFixture, base: &EsiRuntimeSig, cur: &EsiRunt
         || sb_character_login_stats.get(&CHAR_B_ID) != sc_character_login_stats.get(&CHAR_B_ID)
         || sb_fw_corp_enlisted_on.get(&CORP_B_ID) != sc_fw_corp_enlisted_on.get(&CORP_B_ID)
         || sb_zarzakh_gate_locks.get(&CHAR_B_ID) != sc_zarzakh_gate_locks.get(&CHAR_B_ID)
+        || filtered_entries_changed(
+            sb_character_scan_progress.iter(),
+            sc_character_scan_progress.iter(),
+            |k, _| k.0 == CHAR_B_ID,
+        )
     {
+        return true;
+    }
+    let b_scanned_sigs_before: BTreeSet<(i64, SolarSystemId, i64)> = sb_scanned_signatures
+        .iter()
+        .copied()
+        .filter(|(cid, _, _)| *cid == CHAR_B_ID)
+        .collect();
+    let b_scanned_sigs_after: BTreeSet<(i64, SolarSystemId, i64)> = sc_scanned_signatures
+        .iter()
+        .copied()
+        .filter(|(cid, _, _)| *cid == CHAR_B_ID)
+        .collect();
+    if b_scanned_sigs_before != b_scanned_sigs_after {
         return true;
     }
     if filtered_entries_changed(sb_fleets.iter(), sc_fleets.iter(), |&fid, f| {

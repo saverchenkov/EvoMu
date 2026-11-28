@@ -807,10 +807,23 @@ async fn runtime_persistence_ewar_intern_blobs_notifications_probes_and_tactical
         Some(25.0)
     );
 
-    // 4. Dirty in-memory mutations are discarded cleanly on `rehydrate_runtime_from_db()`
-    ctx2.scanned_signatures.write().unwrap().insert((90_000_001, 30_000_142, 42));
+    // 4. Dirty in-memory mutations are discarded cleanly on `rehydrate_runtime_from_db()`,
+    //    while DB-owned `mark_signature_scanned` persists directly through `WorldRepository`.
+    ctx2.active_moon_probes
+        .write()
+        .unwrap()
+        .push(super::ActiveMoonSurveyProbe {
+            probe_id: 42,
+            probe_type_id: 22_778,
+            owner_char_id: 90_000_001,
+            solar_system_id: 30_000_142,
+            hit_moon_id: None,
+            arrival_unix_secs: 1_000,
+        });
+    assert!(ctx2.mark_signature_scanned(90_000_001, 30_000_142, 42));
     ctx2.rehydrate_runtime_from_db();
-    assert!(ctx2.scanned_signatures.read().unwrap().is_empty());
+    assert!(ctx2.active_moon_probes.read().unwrap().is_empty());
+    assert!(ctx2.has_scanned_signature(90_000_001, 30_000_142, 42));
 
     // 5. Corrupt JSON in legacy `server_runtime_json` clears runtime state gracefully when no checkpoints exist
     ctx2.db
