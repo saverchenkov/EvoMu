@@ -951,9 +951,17 @@ fn notification_bound_ids_isolated_per_repository_and_context_with_drop_cleanup(
     let (left_notif_bid, _) = left
         .bind_sub_object_for_notification(char_id, Some(&left_sess), "trademgr", 70_001)
         .expect("left notification sub-object bind");
+    // Advance `right`'s per-context bound ID allocator once so `right_notif_bid != left_notif_bid`
+    // even with per-context `next_bound_id` starting at 10_000.
+    let right_pre_bid = right
+        .bind_verified_sub_object(&right_sess, "invbroker", st_id)
+        .expect("right pre-bind invbroker");
+    assert_eq!(left_notif_bid, 10_000);
+    assert_eq!(right_pre_bid, 10_000);
     let (right_notif_bid, _) = right
         .bind_sub_object_for_notification(char_id, Some(&right_sess), "trademgr", 70_002)
         .expect("right notification sub-object bind");
+    assert_eq!(right_notif_bid, 10_001);
 
     let left_snap = left.notification_bound_ids_snapshot();
     let right_snap = right.notification_bound_ids_snapshot();
@@ -982,9 +990,18 @@ fn notification_bound_ids_isolated_per_repository_and_context_with_drop_cleanup(
         ServerContext::with_sde_and_repository(Arc::clone(&left.sde), Arc::clone(&left.db));
     let other_char = 90_000_002i64;
     let shared_sess = setup_session(&shared_ctx, 50_003, other_char);
+    for expected in [10_000_u64, 10_001_u64] {
+        assert_eq!(
+            shared_ctx
+                .bind_verified_sub_object(&shared_sess, "invbroker", st_id)
+                .expect("shared pre-bind invbroker"),
+            expected
+        );
+    }
     let (shared_notif_bid, _) = shared_ctx
         .bind_sub_object_for_notification(other_char, Some(&shared_sess), "trademgr", 70_003)
         .expect("shared_ctx notification sub-object bind");
+    assert_eq!(shared_notif_bid, 10_002);
     assert!(shared_ctx
         .notification_bound_ids_snapshot()
         .contains(&shared_notif_bid));
