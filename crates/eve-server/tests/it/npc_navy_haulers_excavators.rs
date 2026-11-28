@@ -173,6 +173,12 @@ async fn test_hauler_convoy_trade_routes_warp_gates_and_loot() {
     );
 
     // 2. Multi-system transit along trade routes with warp and gate transitions:
+    ctx.systems
+        .wake_for_session_arrival(
+            JITA_SYS,
+            eve_server::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Jita");
     let _ = ctx
         .living_world
         .materialize_system_lod2(JITA_SYS, &ctx.systems, &ctx.sde)
@@ -204,6 +210,12 @@ async fn test_hauler_convoy_trade_routes_warp_gates_and_loot() {
     ctx.advance_secs(transit_secs);
 
     // Next tick: gate transition into next system!
+    ctx.systems
+        .wake_for_session_arrival(
+            next_sys,
+            eve_server::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake next_sys");
     let step_jump = ctx
         .living_world
         .step_hauler_convoy(convoy_id, &ctx.systems, &ctx.db, &ctx.sde)

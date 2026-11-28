@@ -609,6 +609,12 @@ async fn ensure_fob_damaged_hp_sync_spread_khanid_wh_and_fallback_corps_coverage
             },
         );
     });
+    ctx.systems
+        .wake_for_session_arrival(
+            fob_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake fob_sys");
     let spawned_id = ensure_campaign_pirate_fob(&ctx, fob_cid).await;
     assert_eq!(spawned_id, Some(fob_id));
     let fob_cs = ctx

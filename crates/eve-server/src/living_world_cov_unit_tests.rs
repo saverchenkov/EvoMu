@@ -131,6 +131,12 @@ async fn materialize_lod2_and_mining_op_under_fire_evasion_and_cleanup() {
         lod_level: 1,
         destroyed: false,
     });
+    systems
+        .wake_for_session_arrival(
+            30_000_144,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Perimeter");
     assert_eq!(dir.materialize_system_lod2(30_000_144, &systems, &sde).await, 2);
 
     let sh = systems.get_or_spawn(30_000_144);
@@ -223,6 +229,12 @@ async fn mining_op_hauler_lost_in_transit_station_stacking_and_depleted_belts() 
         lod_level: 1,
         destroyed: false,
     });
+    systems
+        .wake_for_session_arrival(
+            30_920_001,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake 30_920_001");
     let err = dir.step_npc_mining_op(empty_cid, &systems, &db, &sde).await.unwrap_err();
     assert!(err.contains("No minable asteroids remaining"));
 
@@ -296,6 +308,12 @@ async fn mining_op_hauler_lost_in_transit_station_stacking_and_depleted_belts() 
     });
 
     // Step 1 (t=0): purges orphan 333 cargo, mines 0 units, cargo stays 49_999
+    systems
+        .wake_for_session_arrival(
+            30_000_144,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Perimeter");
     let r1 = dir.step_npc_mining_op(cid, &systems, &db, &sde).await.unwrap();
     assert_eq!(r1.mined_units, 0);
     assert_eq!(dir.hauler_cargo_units(&db, cid), 0);

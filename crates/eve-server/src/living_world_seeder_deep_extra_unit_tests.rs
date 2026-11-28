@@ -365,6 +365,12 @@ async fn living_world_convoy_hauler_and_mining_full_lifecycle() {
     assert!(director.step_npc_mining_op(cid, &systems, &db, &sde).await.is_err());
 
     // Materialize Jita LOD 2, interdict convoy -> creates wreck (26557) + cargo loot
+    systems
+        .wake_for_session_arrival(
+            30_000_142,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Jita");
     let spawned = director.materialize_system_lod2(30_000_142, &systems, &sde).await;
     assert_eq!(spawned, 1);
     assert_eq!(director.materialize_system_lod2(30_000_142, &systems, &sde).await, 0);
@@ -450,6 +456,12 @@ async fn living_world_convoy_hauler_and_mining_full_lifecycle() {
     assert!(director.get_mining_hauler_convoy(mine_id + 1_000_000).is_some());
 
     // First tick (elapsed == 0): spawns miner + hauler balls
+    systems
+        .wake_for_session_arrival(
+            30_000_144,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Perimeter");
     let m1 = director.step_all_mining_ops(&systems, &db, &sde).await;
     assert_eq!(m1[0].1.as_ref().unwrap().mined_units, 0);
 

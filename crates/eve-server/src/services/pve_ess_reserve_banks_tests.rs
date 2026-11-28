@@ -933,6 +933,12 @@ async fn ess_gate_dogma_activate_decloak_clears_actor_cycle_slim_meta_velocity_a
         );
     });
 
+    ctx.systems
+        .wake_for_session_arrival(
+            null_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake null_sys");
     ensure_ess_intrusion_site_balls(&ctx, null_sys).await;
     let ess_ball_id = ESS_BEACON_ID_BASE + i64::from(null_sys);
     let gate_id = ESS_GATE_ID_BASE + i64::from(null_sys);
@@ -1676,6 +1682,12 @@ async fn ess_gate_auto_decloak_records_exact_attr_669_reactivation_delay_without
         );
     });
 
+    ctx.systems
+        .wake_for_session_arrival(
+            null_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake null_sys");
     ensure_ess_intrusion_site_balls(&ctx, null_sys).await;
     let ess_ball_id = ESS_BEACON_ID_BASE + i64::from(null_sys);
     let gate_id = ESS_GATE_ID_BASE + i64::from(null_sys);
@@ -1896,6 +1908,12 @@ async fn ess_gate_jump_gate_cloak_and_stale_slim_meta_do_not_emit_cloak_module_f
 
     let ctx = ServerContext::with_sde_and_repository(sde, Arc::clone(&db));
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix)));
+    ctx.systems
+        .wake_for_session_arrival(
+            null_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake null_sys");
     ensure_ess_intrusion_site_balls(&ctx, null_sys).await;
     let gate_id = ESS_GATE_ID_BASE + i64::from(null_sys);
     let sys = ctx.systems.get_or_spawn(null_sys);
@@ -2211,6 +2229,12 @@ async fn ess_gate_auto_decloak_evaluates_effective_dogma_attr_669_for_recon_bonu
         }
     });
 
+    ctx.systems
+        .wake_for_session_arrival(
+            null_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake null_sys");
     ensure_ess_intrusion_site_balls(&ctx, null_sys).await;
     let ess_ball_id = ESS_BEACON_ID_BASE + i64::from(null_sys);
     let gate_id = ESS_GATE_ID_BASE + i64::from(null_sys);
@@ -2567,6 +2591,12 @@ async fn ess_gate_force_decloak_preserves_concurrent_shield_armor_cap_tackle_and
         );
     });
 
+    ctx.systems
+        .wake_for_session_arrival(
+            null_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake null_sys");
     ensure_ess_intrusion_site_balls(&ctx, null_sys).await;
     let ess_ball_id = ESS_BEACON_ID_BASE + i64::from(null_sys);
     let gate_id = ESS_GATE_ID_BASE + i64::from(null_sys);

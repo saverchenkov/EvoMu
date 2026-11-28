@@ -347,6 +347,12 @@ async fn npc_mining_op_merges_station_ore_stacks_and_despawns_idle_hauler_440() 
     });
 
     // Tick 1: spawns miner & companion hauler.
+    systems
+        .wake_for_session_arrival(
+            sys_id,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Perimeter");
     let r1 = director
         .step_npc_mining_op(op_id, &systems, &db, &sde)
         .await

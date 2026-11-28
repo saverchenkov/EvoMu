@@ -35,7 +35,9 @@ pub async fn ensure_campaign_pirate_fob(ctx: &ServerContext, campaign_id: i64) -
     if is_destroyed {
         return None;
     }
-    let sys_handle = ctx.systems.get_or_spawn(fob_sys);
+    let Some(sys_handle) = ctx.systems.get_handle(fob_sys) else {
+        return Some(fob_id);
+    };
     if sys_handle.get_ball_snapshot(fob_id).await.ok().flatten().is_none() {
         let pos_vec = DVec3::from_array(pos);
         let ball = Ball {

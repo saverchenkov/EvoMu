@@ -280,7 +280,9 @@ pub async fn spawn_battlefield_wave_npc(
     fac_id: i64,
     npos: DVec3,
 ) {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
     if sys_handle.get_ball_snapshot(bf_id).await.ok().flatten().is_none() {
         let _ = sys_handle
             .spawn_ball(Ball {

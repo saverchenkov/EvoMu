@@ -624,7 +624,9 @@ pub async fn ensure_ess_intrusion_site_balls(ctx: &ServerContext, sys_id: SolarS
     if !is_kspace_nullsec(&ctx.sde, sys_id) {
         return;
     }
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
     let balls = sys_handle.list_balls().await.unwrap_or_default();
     let ess_pos = if let Some(existing) = balls.iter().find(|b| is_ess_beacon_ball(b, sys_id)) {
         existing.position

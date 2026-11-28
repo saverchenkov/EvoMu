@@ -1156,6 +1156,12 @@ async fn mutant_killers_wspace_bounty_nonempty_wreck_mission_vorton_arc_convoy_a
 
     // 5. Living-world Convoy interdiction kill in high_sys via canonical dogmaIM.Activate
     ctx.advance_secs(3);
+    ctx.systems
+        .wake_for_session_arrival(
+            high_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake high_sys");
     let convoy_id = ctx.living_world.ensure_system_hauler_convoy(high_sys, &ctx.sde);
     assert_eq!(
         ctx.living_world

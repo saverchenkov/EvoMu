@@ -316,6 +316,12 @@ async fn test_wave_reinforcements_regen_withdrawal_and_respawn_cadence() {
             .unwrap();
         s.escort_spawns[0].destroyed = true;
     });
+    ctx.systems
+        .wake_for_session_arrival(
+            vg_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Vanguard incursion system");
     advance_incursion_wave_on_escort_kill(&ctx.systems, &ctx.db, &ctx.sde, vg_sys, &vg_site_id)
         .await;
     with_pve_special_reg(&ctx, |reg| {
@@ -336,6 +342,12 @@ async fn test_wave_reinforcements_regen_withdrawal_and_respawn_cadence() {
             e.destroyed = true;
         }
     });
+    ctx.systems
+        .wake_for_session_arrival(
+            vg_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Vanguard incursion system");
     advance_incursion_wave_on_escort_kill(&ctx.systems, &ctx.db, &ctx.sde, vg_sys, &vg_site_id)
         .await;
     let escorts_w2 = with_pve_special_reg(&ctx, |reg| {
@@ -371,6 +383,12 @@ async fn test_wave_reinforcements_regen_withdrawal_and_respawn_cadence() {
             e.destroyed = true;
         }
     });
+    ctx.systems
+        .wake_for_session_arrival(
+            vg_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Vanguard incursion system");
     advance_incursion_wave_on_escort_kill(&ctx.systems, &ctx.db, &ctx.sde, vg_sys, &vg_site_id)
         .await;
     let boss_bid = with_pve_special_reg(&ctx, |reg| {

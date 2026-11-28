@@ -204,6 +204,12 @@ async fn step_hauler_convoy_full_route_warp_jump_dock_and_errors() {
     );
 
     // Tick 3 (+500s): jumps gate 30_800_001 -> 30_800_002, despawns in Sys1, spawns in Sys2.
+    systems
+        .wake_for_session_arrival(
+            30_800_002,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake sys 30_800_002");
     db.clock().advance_secs(500);
     assert_eq!(
         director.step_hauler_convoy(cid, &systems, &db, &sde).await.unwrap(),
@@ -216,6 +222,12 @@ async fn step_hauler_convoy_full_route_warp_jump_dock_and_errors() {
     assert!(systems.get_ball_position_sync(30_800_002, cid).is_some());
 
     // Tick 4 (+500s): jumps gate 30_800_002 -> 30_800_003.
+    systems
+        .wake_for_session_arrival(
+            30_800_003,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake sys 30_800_003");
     db.clock().advance_secs(500);
     assert_eq!(
         director.step_hauler_convoy(cid, &systems, &db, &sde).await.unwrap(),

@@ -81,7 +81,9 @@ pub async fn ensure_ice_heist_balls_spawned(
     sys_id: u32,
     instance_id: i64,
 ) -> bool {
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        return false;
+    };
     let existing = sys.list_balls().await.unwrap_or_default();
     let tanker_id = 1_896_000_000 + instance_id * 10 + 1;
     let guard_id = 1_896_000_000 + instance_id * 10 + 2;

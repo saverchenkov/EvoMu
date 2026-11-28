@@ -1564,7 +1564,9 @@ pub async fn ensure_mission_asteroid_spawned_on_pocket_entry(
     if !has_candidate {
         return;
     }
-    let handle = ctx.systems.get_or_spawn(solar_system_id);
+    let Some(handle) = ctx.systems.get_handle(solar_system_id) else {
+        return;
+    };
     ensure_mission_asteroid_spawned_with_handle(ctx, &handle, char_id, solar_system_id, target_mission_id).await;
 }
 

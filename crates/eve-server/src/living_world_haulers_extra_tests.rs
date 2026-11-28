@@ -143,6 +143,12 @@ async fn step_hauler_convoy_default_route_warp_distance_boundary_and_fallbacks()
     assert!(matches!(snap_5001.mode, MovementMode::Warp { .. }));
 
     // Advance past transit duration -> jumps to 30_910_002 using fallback gate_pos (10_000, 0, 0) + (1_200, 0, 0)
+    systems
+        .wake_for_session_arrival(
+            30_910_002,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake sys 30_910_002");
     db.clock().advance_secs(600);
     let st3 = step_hauler_convoy_internal(&director, cid, &systems, &db, &sde)
         .await

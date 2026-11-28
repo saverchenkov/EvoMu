@@ -298,3 +298,86 @@ async fn step_hauler_convoy_lod1_non_materialized_warp_guard_and_gate_fallbacks(
         ConvoyStepStatus::Destroyed
     );
 }
+
+#[tokio::test]
+async fn cold_next_system_hauler_jump_stays_cold_and_demotes_lod_to_1() {
+    let mut sde = SdeRegistry::with_canonical_seed();
+    let template_sys = sde.solar_systems[&30_000_142].clone();
+    let prev_sys = 30_961_001_u32;
+    let cold_next_sys = 30_961_002_u32;
+    for sid in [prev_sys, cold_next_sys] {
+        let mut sys = template_sys.clone();
+        sys.solar_system_id = sid;
+        sde.solar_systems.insert(sid, sys);
+    }
+    let sde = Arc::new(sde);
+    let db = Arc::new(WorldRepository::new_empty());
+    db.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_860_000_000)));
+    let systems = Arc::new(SystemRegistry::with_sde_and_db(Arc::clone(&sde), Arc::clone(&db)));
+    let director = LivingWorldDirector::new();
+
+    let cid = 800_961_001_i64;
+    director.register_convoy(LivingWorldConvoy {
+        convoy_id: cid,
+        archetype: NpcArchetype::HaulerConvoy,
+        ship_type_id: 648,
+        origin_system_id: prev_sys,
+        current_system_id: prev_sys,
+        destination_system_id: cold_next_sys,
+        destination_station_id: 60_003_760,
+        cargo_type_id: 34,
+        cargo_quantity: 5_000,
+        lod_level: 2,
+        destroyed: false,
+    });
+    director.set_convoy_route(cid, vec![prev_sys, cold_next_sys]);
+
+    let prev_handle = systems
+        .wake_for_session_arrival(
+            prev_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake prev_sys");
+    let (ball, combat) = sde_ball_and_combat(&sde, cid, 648, DVec3::ZERO);
+    prev_handle.spawn_ball_with_combat(ball, combat).await.unwrap();
+
+    assert_eq!(
+        step_hauler_convoy_internal(&director, cid, &systems, &db, &sde)
+            .await
+            .unwrap(),
+        ConvoyStepStatus::TraversingSystem { system_id: prev_sys }
+    );
+    db.clock().advance_secs(600);
+    assert!(systems.get_handle(cold_next_sys).is_none());
+
+    assert_eq!(
+        step_hauler_convoy_internal(&director, cid, &systems, &db, &sde)
+            .await
+            .unwrap(),
+        ConvoyStepStatus::JumpedGate {
+            from_system: prev_sys,
+            to_system: cold_next_sys,
+        }
+    );
+    assert!(prev_handle.get_ball_snapshot(cid).await.unwrap().is_none());
+    assert!(systems.get_handle(cold_next_sys).is_none());
+    let convoy_after_jump = director.get_convoy(cid).unwrap();
+    assert_eq!(convoy_after_jump.current_system_id, cold_next_sys);
+    assert_eq!(convoy_after_jump.lod_level, 1);
+
+    // When a player later wakes cold_next_sys, materialize_system_lod2 promotes it back to LOD 2.
+    systems
+        .wake_for_session_arrival(
+            cold_next_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake cold_next_sys");
+    assert_eq!(
+        director
+            .materialize_system_lod2(cold_next_sys, &systems, &sde)
+            .await,
+        1
+    );
+    assert_eq!(director.get_convoy(cid).unwrap().lod_level, 2);
+    assert!(systems.get_ball_position_sync(cold_next_sys, cid).is_some());
+}

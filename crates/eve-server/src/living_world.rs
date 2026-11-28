@@ -295,6 +295,9 @@ impl LivingWorldDirector {
         systems: &SystemRegistry,
         sde: &eve_sde::SdeRegistry,
     ) -> usize {
+        let Some(handle) = systems.get_handle(solar_system_id) else {
+            return 0;
+        };
         let to_spawn: Vec<LivingWorldConvoy> = {
             let mut guard = self.convoys.write().unwrap_or_else(|e| e.into_inner());
             let mut out = Vec::new();
@@ -310,7 +313,6 @@ impl LivingWorldDirector {
             return 0;
         }
 
-        let handle = systems.get_or_spawn(solar_system_id);
         let mut count = 0;
         for c in to_spawn {
             let station_pos = sde
@@ -526,13 +528,15 @@ impl LivingWorldDirector {
             )
         };
 
-        let handle = systems.get_or_spawn(sys_id);
+        let handle_opt = systems.get_handle(sys_id);
         let hauler_ball_id = convoy_id + 1_000_000;
         let escort_ball_id = convoy_id + 2_000_000;
         if destroyed {
-            let _ = handle.remove_ball(escort_ball_id).await;
-            let _ = handle.remove_ball(hauler_ball_id).await;
-            let _ = handle.remove_ball(convoy_id).await;
+            if let Some(handle) = handle_opt {
+                let _ = handle.remove_ball(escort_ball_id).await;
+                let _ = handle.remove_ball(hauler_ball_id).await;
+                let _ = handle.remove_ball(convoy_id).await;
+            }
             db.with_mut_snapshot(|snap| {
                 snap.items.retain(|_, item| {
                     !(item.location_id == hauler_ball_id && item.flag == eve_db::InventoryFlag::Cargo)
@@ -540,6 +544,18 @@ impl LivingWorldDirector {
             });
             return Err(format!("Convoy {convoy_id} is destroyed"));
         }
+        let Some(handle) = handle_opt else {
+            return Ok(NpcMiningStepResult {
+                convoy_id,
+                system_id: sys_id,
+                asteroid_id: 0,
+                ore_type_id: cargo_type,
+                mined_units: 0,
+                remaining_asteroid_units: 0,
+                convoy_cargo_units: current_cargo.max(0) as u64,
+                hauled_to_station: false,
+            });
+        };
         let asteroids = handle
             .populate_asteroid_belt_entities()
             .await

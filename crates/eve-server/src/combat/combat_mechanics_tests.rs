@@ -525,11 +525,25 @@ async fn npc_ai_spawn_belt_rats_step_machine_and_destruction() {
                 .any(|c| c.group_id == 9)
         })
         .unwrap_or(30_000_144);
+    ctx_mut
+        .systems
+        .wake_for_session_arrival(
+            belt_sys_id,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake belt system");
     let hi_rats = mgr
         .spawn_belt_rats_for_system(&ctx_mut, belt_sys_id)
         .await
         .unwrap();
     assert!(!hi_rats.is_empty());
+    ctx_mut
+        .systems
+        .wake_for_session_arrival(
+            31_000_005,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake wormhole system");
     let wh_rats = mgr.spawn_belt_rats_for_system(&ctx_mut, 31_000_005).await.unwrap();
     assert_eq!(wh_rats.len(), 2);
 

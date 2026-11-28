@@ -2022,6 +2022,12 @@ async fn test_b36_ess_grid_warp_and_module_restrictions() {
     sess_a.solar_system_id = Some(sys_id);
     sess_a.ship_id = Some(ship_a);
 
+    ctx.systems
+        .wake_for_session_arrival(
+            sys_id,
+            eve_server::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake ESS system");
     // 1. ESS intrusion site & ballpark acceleration gate (V24 0-arg essMgr.GetDataForClientSolarSystem)
     let ess_info = kv_map(
         &ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "GetDataForClientSolarSystem", &[], &kw, None)

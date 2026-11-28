@@ -446,6 +446,12 @@ async fn test_c4_npc_spawns_ai_state_machine_and_dynamic_bounties() {
     let mut spawn_mgr = NpcSpawnManager::new();
 
     // 1. Belt/gate spawn from SDE spawn group (e.g. mobile Asteroid Guristas Destroyer spawn_group_id = 56)
+    ctx.systems
+        .wake_for_session_arrival(
+            sys_id,
+            eve_server::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Jita");
     let spawned_ids = spawn_mgr
         .spawn_group(&ctx, sys_id, 56, belt_pos)
         .await

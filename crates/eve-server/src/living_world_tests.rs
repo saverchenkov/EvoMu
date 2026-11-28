@@ -145,6 +145,12 @@ async fn director_registry_materialize_lod2_and_interdiction() {
     assert!(err_lod1.contains("must be materialized at LOD 2"));
 
     // Materialize Perimeter (MiningOp + companion hauler) and verify idempotency.
+    systems
+        .wake_for_session_arrival(
+            30_000_144,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Perimeter");
     let spawned_perim = director
         .materialize_system_lod2(30_000_144, &systems, &sde)
         .await;
@@ -163,6 +169,12 @@ async fn director_registry_materialize_lod2_and_interdiction() {
         .is_some());
 
     // Materialize Jita HaulerConvoy to LOD 2 and interdict it.
+    systems
+        .wake_for_session_arrival(
+            30_000_142,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Jita");
     let spawned_jita = director
         .materialize_system_lod2(30_000_142, &systems, &sde)
         .await;
@@ -306,6 +318,12 @@ async fn npc_mining_op_full_cycle_haul_and_destroyed_hauler_recovery() {
         lod_level: 1,
         destroyed: false,
     });
+    systems
+        .wake_for_session_arrival(
+            30_900_002,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake 30_900_002");
     assert!(director
         .step_npc_mining_op(no_belt_op_id, &systems, &db, &sde)
         .await
@@ -313,6 +331,12 @@ async fn npc_mining_op_full_cycle_haul_and_destroyed_hauler_recovery() {
     director.mark_convoy_destroyed(no_belt_op_id);
 
     // Primary MiningOp in Perimeter (30_000_144): initial step spawns miner & hauler at belt.
+    systems
+        .wake_for_session_arrival(
+            30_000_144,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake Perimeter");
     let mining_id = director.ensure_system_mining_op(30_000_144, &sde);
     {
         let mut guard = director.convoys.write().unwrap();
@@ -530,4 +554,88 @@ async fn npc_mining_op_clamps_extraction_to_remaining_hold_capacity() {
     assert_eq!(step.mined_units, 500);
     assert_eq!(step.convoy_cargo_units, 0);
     assert_eq!(director.hauler_cargo_units(&db, cid), 5_000);
+}
+
+#[tokio::test]
+async fn cold_system_materialize_lod2_and_step_npc_mining_op_stay_cold() {
+    let (sde, db, systems) = build_living_world_fixture();
+    let director = LivingWorldDirector::new();
+    let cold_sys = 30_000_144_u32;
+    let mining_cid = 800_999_542_i64;
+    let hauler_cid = 800_999_543_i64;
+
+    director.register_convoy(LivingWorldConvoy {
+        convoy_id: mining_cid,
+        archetype: NpcArchetype::MiningOp,
+        ship_type_id: 32880,
+        origin_system_id: cold_sys,
+        current_system_id: cold_sys,
+        destination_system_id: cold_sys,
+        destination_station_id: 60_003_766,
+        cargo_type_id: 1230,
+        cargo_quantity: 42,
+        lod_level: 1,
+        destroyed: false,
+    });
+    director.register_convoy(LivingWorldConvoy {
+        convoy_id: hauler_cid,
+        archetype: NpcArchetype::HaulerConvoy,
+        ship_type_id: 648,
+        origin_system_id: cold_sys,
+        current_system_id: cold_sys,
+        destination_system_id: 30_000_142,
+        destination_station_id: 60_003_760,
+        cargo_type_id: 34,
+        cargo_quantity: 1_000,
+        lod_level: 1,
+        destroyed: false,
+    });
+
+    assert!(systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        director
+            .materialize_system_lod2(cold_sys, &systems, &sde)
+            .await,
+        0
+    );
+    assert!(systems.get_handle(cold_sys).is_none());
+    assert_eq!(director.get_convoy(mining_cid).unwrap().lod_level, 1);
+    assert_eq!(director.get_convoy(hauler_cid).unwrap().lod_level, 1);
+
+    let step = director
+        .step_npc_mining_op(mining_cid, &systems, &db, &sde)
+        .await
+        .expect("cold step_npc_mining_op returns zero-mined Ok");
+    assert_eq!(
+        step,
+        NpcMiningStepResult {
+            convoy_id: mining_cid,
+            system_id: cold_sys,
+            asteroid_id: 0,
+            ore_type_id: 1230,
+            mined_units: 0,
+            remaining_asteroid_units: 0,
+            convoy_cargo_units: 42,
+            hauled_to_station: false,
+        }
+    );
+    assert!(systems.get_handle(cold_sys).is_none());
+
+    // Once the system wakes, previously skipped convoys still promote and materialize at LOD 2.
+    systems
+        .wake_for_session_arrival(
+            cold_sys,
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        )
+        .expect("wake cold_sys");
+    assert_eq!(
+        director
+            .materialize_system_lod2(cold_sys, &systems, &sde)
+            .await,
+        2
+    );
+    assert_eq!(director.get_convoy(mining_cid).unwrap().lod_level, 2);
+    assert_eq!(director.get_convoy(hauler_cid).unwrap().lod_level, 2);
+    assert!(systems.get_ball_position_sync(cold_sys, mining_cid).is_some());
+    assert!(systems.get_ball_position_sync(cold_sys, hauler_cid).is_some());
 }

@@ -398,7 +398,15 @@ async fn test_hauler_convoy_multi_system_movement_and_cargo_drop() {
     });
     ctx.living_world.set_convoy_route(convoy_id, route.clone());
 
-    // Materialize in Jita space
+    // Materialize in Jita space and pre-warm transit destination systems so LOD 2 convoy survives jumps
+    for sys_id in [SYS_JITA, SYS_PERIMETER, SYS_URLEN] {
+        ctx.systems
+            .wake_for_session_arrival(
+                sys_id,
+                eve_server::system_actor::SessionArrivalWakeReason::LoginInSpace,
+            )
+            .expect("wake convoy route system");
+    }
     let _ = ctx.living_world.materialize_system_lod2(SYS_JITA, &ctx.systems, &ctx.sde).await;
 
     // Step 1: Living-world cluster tick advances convoy along route: Jumps stargate from Jita into Perimeter
