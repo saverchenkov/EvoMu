@@ -86,6 +86,13 @@ pub type PreTakeBallHook = Box<
         + 'static,
 >;
 
+#[cfg(any(test, feature = "testkit"))]
+#[derive(Default)]
+pub(crate) struct StargateJumpTestHooks {
+    pub(crate) pre_take_ball: Mutex<HashMap<i64, PreTakeBallHook>>,
+    pub(crate) post_dest_spawn: Mutex<HashMap<i64, PreTakeBallHook>>,
+}
+
 #[cfg(test)]
 type PostZarzakhTollHook = Box<dyn FnOnce() + Send + 'static>;
 
@@ -105,12 +112,12 @@ pub fn set_pre_take_ball_hook_for_test(
     char_id: i64,
     hook: Option<PreTakeBallHook>,
 ) {
-    set_context_char_hook(&*ctx.stargate_pre_take_ball_hooks, char_id, hook);
+    set_context_char_hook(&ctx.stargate_test_hooks.pre_take_ball, char_id, hook);
 }
 
 #[cfg(any(test, feature = "testkit"))]
 async fn run_pre_take_ball_hook_for_test(ctx: &ServerContext, char_id: i64) {
-    if let Some(h) = take_context_char_hook(&*ctx.stargate_pre_take_ball_hooks, &char_id) {
+    if let Some(h) = take_context_char_hook(&ctx.stargate_test_hooks.pre_take_ball, &char_id) {
         h().await;
     }
 }
@@ -124,12 +131,12 @@ pub fn set_post_dest_spawn_hook_for_test(
     char_id: i64,
     hook: Option<PreTakeBallHook>,
 ) {
-    set_context_char_hook(&*ctx.stargate_post_dest_spawn_hooks, char_id, hook);
+    set_context_char_hook(&ctx.stargate_test_hooks.post_dest_spawn, char_id, hook);
 }
 
 #[cfg(any(test, feature = "testkit"))]
 async fn run_post_dest_spawn_hook_for_test(ctx: &ServerContext, char_id: i64) {
-    if let Some(h) = take_context_char_hook(&*ctx.stargate_post_dest_spawn_hooks, &char_id) {
+    if let Some(h) = take_context_char_hook(&ctx.stargate_test_hooks.post_dest_spawn, &char_id) {
         h().await;
     }
 }

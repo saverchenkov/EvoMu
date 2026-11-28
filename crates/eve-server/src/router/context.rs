@@ -138,11 +138,8 @@ pub struct ServerContext {
     #[cfg(any(test, feature = "testkit"))]
     pub(crate) fixture_census: Arc<super::fixture_census::FixtureCensusCollector>,
     #[cfg(any(test, feature = "testkit"))]
-    pub(crate) stargate_pre_take_ball_hooks:
-        Arc<std::sync::Mutex<HashMap<i64, crate::services::space_warp_jump::PreTakeBallHook>>>,
-    #[cfg(any(test, feature = "testkit"))]
-    pub(crate) stargate_post_dest_spawn_hooks:
-        Arc<std::sync::Mutex<HashMap<i64, crate::services::space_warp_jump::PreTakeBallHook>>>,
+    pub(crate) stargate_test_hooks:
+        Arc<crate::services::space_warp_jump::StargateJumpTestHooks>,
 }
 
 /// Non-owning weak handle to all shared [`ServerContext`] state (`RFC-1 E-4`, `#839`, `#919`).
@@ -228,11 +225,8 @@ pub(crate) struct ServerContextWeak {
     #[cfg(any(test, feature = "testkit"))]
     fixture_census: std::sync::Weak<super::fixture_census::FixtureCensusCollector>,
     #[cfg(any(test, feature = "testkit"))]
-    stargate_pre_take_ball_hooks:
-        std::sync::Weak<std::sync::Mutex<HashMap<i64, crate::services::space_warp_jump::PreTakeBallHook>>>,
-    #[cfg(any(test, feature = "testkit"))]
-    stargate_post_dest_spawn_hooks:
-        std::sync::Weak<std::sync::Mutex<HashMap<i64, crate::services::space_warp_jump::PreTakeBallHook>>>,
+    stargate_test_hooks:
+        std::sync::Weak<crate::services::space_warp_jump::StargateJumpTestHooks>,
 }
 
 impl ServerContextWeak {
@@ -306,9 +300,7 @@ impl ServerContextWeak {
             #[cfg(any(test, feature = "testkit"))]
             fixture_census: self.fixture_census.upgrade()?,
             #[cfg(any(test, feature = "testkit"))]
-            stargate_pre_take_ball_hooks: self.stargate_pre_take_ball_hooks.upgrade()?,
-            #[cfg(any(test, feature = "testkit"))]
-            stargate_post_dest_spawn_hooks: self.stargate_post_dest_spawn_hooks.upgrade()?,
+            stargate_test_hooks: self.stargate_test_hooks.upgrade()?,
         })
     }
 }
@@ -502,9 +494,7 @@ impl ServerContext {
             #[cfg(any(test, feature = "testkit"))]
             fixture_census: Arc::downgrade(&self.fixture_census),
             #[cfg(any(test, feature = "testkit"))]
-            stargate_pre_take_ball_hooks: Arc::downgrade(&self.stargate_pre_take_ball_hooks),
-            #[cfg(any(test, feature = "testkit"))]
-            stargate_post_dest_spawn_hooks: Arc::downgrade(&self.stargate_post_dest_spawn_hooks),
+            stargate_test_hooks: Arc::downgrade(&self.stargate_test_hooks),
         }
     }
 
@@ -690,9 +680,9 @@ impl ServerContext {
             #[cfg(any(test, feature = "testkit"))]
             fixture_census: Arc::new(super::fixture_census::FixtureCensusCollector::new()),
             #[cfg(any(test, feature = "testkit"))]
-            stargate_pre_take_ball_hooks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            #[cfg(any(test, feature = "testkit"))]
-            stargate_post_dest_spawn_hooks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            stargate_test_hooks: Arc::new(
+                crate::services::space_warp_jump::StargateJumpTestHooks::default(),
+            ),
         };
         if let Err(err) = crate::services::pve_content_providers::register_default_pve_content_providers(
             &ctx.systems,
