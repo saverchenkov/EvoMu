@@ -357,7 +357,7 @@ mod tests {
     use super::*;
     use crate::outbound_sequencer::{DestinyStream, OutFrame};
     use crate::system_actor::SystemLifecycleState;
-    use eve_db::{CharacterRecord, InventoryFlag, InventoryItemRecord};
+    use eve_db::{AccountRecord, CharacterRecord, InventoryFlag, InventoryItemRecord};
 
     #[tokio::test]
     async fn prechar_and_docked_wire_sessions_keep_systems_cold_and_undock_subscribes_set_state() {
@@ -373,6 +373,17 @@ mod tests {
         assert!(ctx.sde.stations.contains_key(&station_id));
 
         ctx.db.with_mut_snapshot(|snap| {
+            snap.accounts.insert(
+                format!("wire_cold_{user_id}"),
+                AccountRecord {
+                    user_id,
+                    username: format!("wire_cold_{user_id}"),
+                    password_token: String::new(),
+                    role: eve_machonet::service_roles::ROLE_PLAYER_DEFAULT,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
             snap.characters.insert(
                 char_id,
                 CharacterRecord {
@@ -483,8 +494,8 @@ mod tests {
             SystemLifecycleState::Cold
         );
 
-        // 3. Undocking through `call_wire` subscribes to `sys_id` and emits `SetState` without
-        //    ever spawning system 0.
+        // 3. Undocking + binding `beyonce` through `call_wire` subscribes to `sys_id` and emits
+        //    `SetState` without ever spawning system 0.
         let undock_out = wire.call_wire("ship", None, "Undock", &[], &kw).await;
         assert!(
             undock_out.rpc_result.is_ok(),
@@ -495,16 +506,38 @@ mod tests {
         assert!(ctx.systems.get_handle(0).is_none());
         assert_eq!(wire.subscribed_sys_id, Some(sys_id));
         assert!(ctx.systems.get_handle(sys_id).is_some());
+
+        let bind_out = wire
+            .call_wire(
+                "beyonce",
+                None,
+                "MachoBindObject",
+                &[PyRep::Integer(i64::from(sys_id)), PyRep::None],
+                &kw,
+            )
+            .await;
         assert!(
-            undock_out.out_frames.iter().any(|f| matches!(
-                f,
-                OutFrame::DoDestinyUpdate {
-                    has_set_state: true,
-                    ..
-                }
-            )),
-            "undock through call_wire must emit SetState, got {:?}",
-            undock_out.out_frames
+            bind_out.rpc_result.is_ok(),
+            "beyonce.MachoBindObject after undock failed: {:?}",
+            bind_out.rpc_result
+        );
+        assert!(bind_out.marshal_errors.is_empty());
+        assert!(ctx.systems.get_handle(0).is_none());
+        assert_eq!(wire.subscribed_sys_id, Some(sys_id));
+        assert!(
+            undock_out
+                .out_frames
+                .iter()
+                .chain(bind_out.out_frames.iter())
+                .any(|f| matches!(
+                    f,
+                    OutFrame::DoDestinyUpdate {
+                        has_set_state: true,
+                        ..
+                    }
+                )),
+            "undock + ballpark bind through call_wire must emit SetState, got {:?}",
+            bind_out.out_frames
         );
         assert!(matches!(wire.wire_state.destiny, DestinyStream::Live { .. }));
     }
