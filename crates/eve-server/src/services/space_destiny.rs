@@ -440,14 +440,12 @@ pub async fn handle(
                     client_error: None,
                 }));
             }
-            let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "OutsideEssLinkRange".into(),
-                    message: "Active ship is not present in system space near the ESS beacon".into(),
-                    client_error: None,
-                }));
+            let sys_handle_opt = ctx.systems.get_handle(sys_id);
+            let ship_ball_opt = match sys_handle_opt.as_ref() {
+                Some(sys_handle) => sys_handle.get_ball_snapshot(ship_id).await.ok().flatten(),
+                None => None,
             };
-            let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
+            let (Some(sys_handle), Some((_, ship_ball))) = (sys_handle_opt, ship_ball_opt) else {
                 return Some(Err(BridgeRpcError {
                     code: "OutsideEssLinkRange".into(),
                     message: "Active ship is not present in system space near the ESS beacon".into(),
@@ -1036,25 +1034,12 @@ async fn handle_admin_get_bubble_id(
         .first()
         .and_then(|a| a.as_i64())
         .unwrap_or(ship_id);
-    let Some(handle) = ctx.systems.get_handle(sys_id) else {
-        return Err(if target_ball_id != ship_id {
-            BridgeRpcError {
-                code: "BallNotVisible".into(),
-                message: format!(
-                    "Ball {target_ball_id} is not visible in caller ship {ship_id}'s grid bubble"
-                ),
-                client_error: None,
-            }
-        } else {
-            BridgeRpcError {
-                code: "BallNotFound".into(),
-                message: format!("Ball {target_ball_id} is not present in system {sys_id}"),
-                client_error: None,
-            }
-        });
-    };
+    let handle_opt = ctx.systems.get_handle(sys_id);
     if target_ball_id != ship_id {
-        let visible = handle.list_balls_in_bubble(ship_id).await.unwrap_or_default();
+        let visible = match handle_opt.as_ref() {
+            Some(handle) => handle.list_balls_in_bubble(ship_id).await.unwrap_or_default(),
+            None => Vec::new(),
+        };
         if !visible.iter().any(|b| b.id == target_ball_id) {
             return Err(BridgeRpcError {
                 code: "BallNotVisible".into(),
@@ -1065,7 +1050,11 @@ async fn handle_admin_get_bubble_id(
             });
         }
     }
-    match handle.get_bubble_id_for_ball(target_ball_id).await {
+    let bubble_res = match handle_opt {
+        Some(handle) => handle.get_bubble_id_for_ball(target_ball_id).await,
+        None => Ok(None),
+    };
+    match bubble_res {
         Ok(Some(bid)) => Ok(PyRep::Integer(bid as i64)),
         Ok(None) => Err(BridgeRpcError {
             code: "BallNotFound".into(),
