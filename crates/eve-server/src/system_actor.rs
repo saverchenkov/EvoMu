@@ -545,10 +545,13 @@ impl CtActorDriver {
 impl Drop for CtActorDriver {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
+            let _ = tx.try_send(());
         }
+        let on_driver_runtime = tokio::runtime::Handle::try_current()
+            .ok()
+            .is_some_and(|cur| cur.id() == self.rt_handle.id());
         if let Some(thread) = self.thread.take() {
-            if thread.thread().id() != std::thread::current().id() {
+            if !on_driver_runtime && thread.thread().id() != std::thread::current().id() {
                 let _ = thread.join();
             }
         }
@@ -1926,15 +1929,16 @@ impl SystemRegistry {
             );
         }
         let post_unlock_tx_handle = post_unlock_tx.clone();
-        // Wrap BEFORE `spawn` so `Runtime::drop()` before first poll still sends `PostUnlockMsg::Shutdown`.
+        // Wrap BEFORE `spawn` so `Runtime::drop()` before first poll still sends `PostUnlockMsg::Shutdown`
+        // and releases `CtSentinelGuard` without waiting on the condvar timeout.
         let post_unlock_shutdown = post_unlock::PostUnlockShutdownGuard(Some(post_unlock_tx));
+        let (mut rt_alive_rx_opt, actor_exit_guard) = match ct_sentinel {
+            Some((rx, done_tx, exited)) => (Some(rx), ActorExitGuard(Some((done_tx, exited)))),
+            None => (None, ActorExitGuard(None)),
+        };
         let drone_hydration_actor = ballpark_shared.drone_hydration_shared().cloned().unwrap_or_default();
         actor_rt_handle.spawn(async move {
-            let (mut rt_alive_rx_opt, done_tx_exited_opt) = match ct_sentinel {
-                Some((rx, done_tx, exited)) => (Some(rx), Some((done_tx, exited))),
-                None => (None, None),
-            };
-            let _actor_exit_guard = ActorExitGuard(done_tx_exited_opt);
+            let _actor_exit_guard = actor_exit_guard;
             // Drop actor `Arc`s before closing `cmd_rx` and sending `shutdown_reply` (`#1542` R1 P2).
             let mut post_unlock_tx_opt = post_unlock_shutdown;
             let mut shutdown_reply = ShutdownReplyGuard(None);
@@ -3119,6 +3123,11 @@ impl SystemRegistry {
                 );
             }
             flush_actor_active_drones(true);
+            let leftover_post_unlock_actions = {
+                let mut actions = post_unlock_actions_actor.lock().unwrap_or_else(|e| e.into_inner());
+                std::mem::take(&mut *actions)
+            };
+            drop(leftover_post_unlock_actions);
             drop((ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor));
             cmd_rx.close();
             drop((cmd_rx, shutdown_reply));

@@ -1089,22 +1089,24 @@ async fn e1_p1_03_try_remove_ball_for_db_sqlite_busy_falls_back_to_post_unlock_a
 
     for _ in 0..200 {
         let busy_hit = h.entropic_spool(ship_id, mod_id).is_none()
+            && h.post_unlock_in_flight.load(Ordering::Acquire) > 0
             && h.view()
                 .weapon_effects_coord
                 .as_ref()
-                .is_some_and(|c| c.retry_needed.load(Ordering::Acquire));
+                .is_some_and(|c| c.has_pending_work());
         if busy_hit {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     assert!(h.entropic_spool(ship_id, mod_id).is_none());
+    assert!(h.post_unlock_in_flight.load(Ordering::Acquire) > 0);
     assert!(
         h.view()
             .weapon_effects_coord
             .as_ref()
-            .is_some_and(|c| c.retry_needed.load(Ordering::Acquire)),
-        "held SQLite writer must trigger nonblocking busy fallback"
+            .is_some_and(|c| c.has_pending_work()),
+        "held SQLite writer must keep weapon_effects pending until post_unlock completes"
     );
     assert!(!h.is_hibernated(), "must stay awake while weapon_effects flush is pending");
 
@@ -1139,6 +1141,112 @@ async fn e1_p1_03_try_remove_ball_for_db_sqlite_busy_falls_back_to_post_unlock_a
         .with_sqlite_conn(|c| load_system_checkpoints::<WeaponEffectCheckpointEntry>(c, sys_id, KIND_WEAPON_EFFECTS))
         .unwrap();
     assert!(rows.is_empty(), "cleared spool checkpoint must be deleted from SQLite");
+    assert!(reg.stop_system(sys_id).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf03_weapon_effects_contended_sqlite_persist_lock_does_not_stall_actor_commands() {
+    let (tmp, _guard) = temp_sqlite_db("bf03_sqlite_persist_lock_no_stall");
+    let db = Arc::new(eve_db::WorldRepository::open_sqlite(&tmp).expect("open_sqlite bf03"));
+    let sde = Arc::new(eve_sde::SdeRegistry::with_canonical_seed());
+    let reg = Arc::new(SystemRegistry::with_sde_and_db(sde, Arc::clone(&db)));
+    let sys_id = 30_000_142u32;
+    let (ship_id, mod_id, tgt_id) = (967_201i64, 767_201i64, 367_201i64);
+
+    let h = reg.get_or_spawn(sys_id);
+    let _ = h
+        .spawn_ball_with_combat(make_ship_ball(ship_id), CombatState::default())
+        .await
+        .unwrap();
+    h.upsert_entropic_spool_activation_sync(make_spool(sys_id, ship_id, mod_id, tgt_id), false)
+        .unwrap();
+    h.flush_weapon_effects_checkpoint().await.unwrap();
+    assert!(!h.is_hibernated());
+
+    let coord = h.view().weapon_effects_coord.clone().expect("weapon_effects_coord");
+
+    // Hold SQLite writer so `try_remove_ball_for_db` enters the post_unlock fallback.
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (rel_tx, rel_rx) = std::sync::mpsc::channel();
+    let db_hold = Arc::clone(&db);
+    let writer_holder = std::thread::spawn(move || {
+        db_hold.with_sqlite_conn(|_conn| {
+            held_tx.send(()).unwrap();
+            let _ = rel_rx.recv();
+        });
+    });
+    held_rx.recv().unwrap();
+
+    // Hold `coord.sqlite_persist_lock` on a separate OS thread to simulate `post_unlock_worker`
+    // blocked inside `persist_and_prune_checkpoint_op` -> `db.with_sqlite_conn`, and force
+    // `retry_needed = true` so subsequent actor commands enter `persist_checkpoint_op_to_sqlite_inner(..., true)`.
+    let (pg_held_tx, pg_held_rx) = std::sync::mpsc::channel();
+    let (pg_rel_tx, pg_rel_rx) = std::sync::mpsc::channel();
+    let coord_hold = Arc::clone(&coord);
+    let persist_holder = std::thread::spawn(move || {
+        let _guard = coord_hold
+            .sqlite_persist_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        pg_held_tx.send(()).unwrap();
+        let _ = pg_rel_rx.recv();
+    });
+    pg_held_rx.recv().unwrap();
+
+    let db_rm = Arc::clone(&db);
+    let rm_thread = std::thread::spawn(move || {
+        crate::system_actor::try_remove_ball_for_db(&db_rm, sys_id, ship_id);
+    });
+    for _ in 0..200 {
+        if h.entropic_spool(ship_id, mod_id).is_none() && coord.has_pending_work() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(h.entropic_spool(ship_id, mod_id).is_none());
+
+    // Simulate a command batch seeing `retry_needed = true` while `sqlite_persist_lock` is held.
+    coord.retry_needed.store(true, Ordering::Release);
+    let second_cmd = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        h.set_ball_max_velocity(999_999, 1.0),
+    )
+    .await
+    .expect("second actor command must not stall on contended sqlite_persist_lock");
+    assert_eq!(second_cmd, Ok(false));
+
+    let probe_op = super::WeaponEffectsCheckpointOp {
+        solar_system_id: sys_id,
+        seq: 1,
+        rows: Vec::new(),
+        flush_coord: Some(Arc::clone(&coord)),
+        legacy_prune: None,
+    };
+    let probe_start = std::time::Instant::now();
+    assert!(
+        !super::persist_checkpoint_op_to_sqlite_inner(&db, &probe_op, true),
+        "nonblocking checkpoint persistence must fail fast under contended sqlite_persist_lock"
+    );
+    assert!(probe_start.elapsed() < std::time::Duration::from_millis(500));
+
+    pg_rel_tx.send(()).unwrap();
+    persist_holder.join().unwrap();
+    rel_tx.send(()).unwrap();
+    writer_holder.join().unwrap();
+    rm_thread.join().unwrap();
+
+    for _ in 0..100 {
+        if !coord.has_pending_work() && h.is_hibernated() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(h.is_hibernated(), "system must hibernate once SQLite writer + persist lock release");
+    assert!(!coord.has_pending_work());
+    let rows = db
+        .with_sqlite_conn(|c| load_system_checkpoints::<WeaponEffectCheckpointEntry>(c, sys_id, KIND_WEAPON_EFFECTS))
+        .unwrap();
+    assert!(rows.is_empty());
     assert!(reg.stop_system(sys_id).await);
 }
 

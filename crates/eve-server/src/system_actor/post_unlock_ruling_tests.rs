@@ -2490,8 +2490,10 @@ async fn track_4d2_current_thread_runtime_drop_sentinel_closes_channels() {
     );
     assert!(!reg.dead_live_system_handles().is_empty());
 
-    // Case B: `SystemRegistry` and `SystemHandle` dropped before `CurrentThread` runtime drops.
+    // Case B: `SystemRegistry` and `SystemHandle` dropped before `CurrentThread` runtime polls the
+    // actor future or drops (verifies BF-02: no 6-second stall in `CtSentinelGuard::drop`).
     let sde_b = Arc::clone(&ctx.sde);
+    let case_b_start = std::time::Instant::now();
     std::thread::spawn(move || {
         let ct_rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2503,10 +2505,139 @@ async fn track_4d2_current_thread_runtime_drop_sentinel_closes_channels() {
             let h_b = reg_b.get_or_spawn(30_000_144);
             assert!(h_b.ct_driver.is_some());
         }
+        // Polling while `ct_rt` stays alive must also not hit the 6s condvar timeout.
+        ct_rt.block_on(tokio::task::yield_now());
         drop(ct_rt);
     })
     .join()
     .expect("dropping SystemRegistry+SystemHandle before CurrentThread Runtime must not panic");
+    assert!(
+        case_b_start.elapsed() < Duration::from_secs(2),
+        "dropping CurrentThread actor before first poll must not stall CtSentinelGuard for 6s (elapsed: {:?})",
+        case_b_start.elapsed()
+    );
+}
+
+/// `#1342` Track 4D-2 (`BF-01`): Dropping the last `Arc<CtActorDriver>` / `SystemHandle` from
+/// inside a `CtActorDriver` worker thread (including via `post_unlock_actions`) must not deadlock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn track_4d2_ct_actor_driver_drop_from_own_worker_and_post_unlock_actions_no_deadlock() {
+    use crate::system_actor::SystemRegistry;
+
+    let ctx = test_ctx();
+
+    // Part A: Last `Arc<CtActorDriver>` dropped directly from a task running on `CtActorDriver`'s
+    // worker threads.
+    let reg_a = Arc::new(SystemRegistry::with_sde(Arc::clone(&ctx.sde)));
+    let (h_a, ct_thread_a) = {
+        let reg_spawn_a = Arc::clone(&reg_a);
+        let (h_tx, h_rx) = std::sync::mpsc::sync_channel(1);
+        let (drop_rt_tx, drop_rt_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let join_a = std::thread::spawn(move || {
+            let ct_rt_a = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build CurrentThread runtime A");
+            let h_a = {
+                let _enter = ct_rt_a.enter();
+                reg_spawn_a.get_or_spawn(SYS_ID)
+            };
+            let _ = h_tx.send(h_a);
+            let _ = drop_rt_rx.recv();
+            drop(ct_rt_a);
+        });
+        let h_a = h_rx.recv().unwrap();
+        let driver_a = Arc::clone(h_a.ct_driver.as_ref().expect("CurrentThread attaches driver"));
+        let driver_rt_a = driver_a.rt_handle().clone();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel::<()>();
+        let (ext_dropped_tx, ext_dropped_rx) = tokio::sync::oneshot::channel::<()>();
+        driver_rt_a.spawn(async move {
+            let _ = ext_dropped_rx.await;
+            drop(driver_a);
+            let _ = dropped_tx.send(());
+        });
+        drop(h_a);
+        drop(reg_a);
+        let _ = ext_dropped_tx.send(());
+        tokio::time::timeout(Duration::from_secs(2), dropped_rx)
+            .await
+            .expect("dropping last Arc<CtActorDriver> on its own worker thread must not deadlock")
+            .expect("driver worker task must complete");
+        let _ = drop_rt_tx.send(());
+        ((), join_a)
+    };
+    let _ = h_a;
+    ct_thread_a.join().expect("join CurrentThread runtime thread A");
+
+    // Part B: Cloned `SystemHandle` moved into `post_unlock_actions`, executed by actor on
+    // `CtActorDriver` worker thread after external `SystemRegistry` + `SystemHandle` drop.
+    let part_b_start = std::time::Instant::now();
+    let reg_b = Arc::new(SystemRegistry::with_sde(Arc::clone(&ctx.sde)));
+    let (h_b, drop_rt_tx_b, join_b) = {
+        let reg_spawn_b = Arc::clone(&reg_b);
+        let (h_tx, h_rx) = std::sync::mpsc::sync_channel(1);
+        let (drop_rt_tx, drop_rt_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let join_b = std::thread::spawn(move || {
+            let ct_rt_b = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build CurrentThread runtime B");
+            let h_b = {
+                let _enter = ct_rt_b.enter();
+                reg_spawn_b.get_or_spawn(30_000_145)
+            };
+            let _ = h_tx.send(h_b);
+            let _ = drop_rt_rx.recv();
+            drop(ct_rt_b);
+        });
+        (h_rx.recv().unwrap(), drop_rt_tx, join_b)
+    };
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (action_tx, action_rx) = tokio::sync::oneshot::channel::<()>();
+    let h_b_captured = h_b.clone();
+    let driver_weak = Arc::downgrade(
+        h_b.ct_driver
+            .as_ref()
+            .expect("CurrentThread attaches driver"),
+    );
+    h_b.enqueue_post_unlock_action(Box::new(move || {
+        // Confirm execution has already entered `CtActorDriver`'s worker thread, then wait briefly
+        // so external `h_b` and `reg_b` drop first and `h_b_captured` is the last strong ref.
+        let _ = entered_tx.send(());
+        let _ = ready_rx.recv();
+        drop(h_b_captured);
+        let _ = action_tx.send(());
+    }));
+    // Dispatch non-blocking wake command so `flush_post_unlock_actions_on_actor` executes on
+    // `CtActorDriver`'s worker thread without waiting on a synchronous actor reply.
+    let (tick_tx, _tick_rx) = tokio::sync::oneshot::channel();
+    h_b.cmd_sender()
+        .try_send(crate::system_actor::SystemCommand::CurrentTick { reply: tick_tx })
+        .expect("enqueue non-blocking CurrentTick wake command");
+    tokio::time::timeout(Duration::from_secs(2), entered_rx)
+        .await
+        .expect("post_unlock_actions closure must enter on CtActorDriver worker thread")
+        .expect("entered_tx must fire");
+    drop(h_b);
+    drop(reg_b);
+    let _ = ready_tx.send(());
+    tokio::time::timeout(Duration::from_secs(2), action_rx)
+        .await
+        .expect("post_unlock_actions closure must finish without deadlock")
+        .expect("action channel must signal completion");
+    let _ = drop_rt_tx_b.send(());
+    join_b.join().expect("join CurrentThread runtime thread B");
+    wait_until(
+        "CtActorDriver weak count must reach 0 without reference cycles",
+        || driver_weak.strong_count() == 0,
+    )
+    .await;
+    assert!(
+        part_b_start.elapsed() < Duration::from_secs(2),
+        "Part B must complete promptly without hitting 5s sync timeout (elapsed: {:?})",
+        part_b_start.elapsed()
+    );
 }
 
 /// `#1342` Track 4D-2 static check: `post_unlock.rs` has zero `ballpark` / `actor_state` lock acquisitions.
