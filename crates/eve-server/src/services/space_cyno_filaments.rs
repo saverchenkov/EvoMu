@@ -14,6 +14,28 @@ use super::{execute_cosmic_wormhole_jump, AU_IN_METERS};
 
 const BEYONCE_SVC: &str = "beyonce";
 
+async fn wake_jump_destination_system(
+    ctx: &ServerContext,
+    dest_sys_id: SolarSystemId,
+) -> Result<crate::system_actor::SystemHandle, BridgeRpcError> {
+    ctx.systems
+        .wake_for_session_arrival_async(
+            dest_sys_id,
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        )
+        .await
+        .map_err(|wake_err| {
+            let msg = format!(
+                "Failed to activate destination solar system {dest_sys_id}: {wake_err}"
+            );
+            BridgeRpcError::with_client_error(
+                "SystemTransitionFailed",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            )
+        })
+}
+
 pub(crate) async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -705,6 +727,16 @@ async fn handle_random_jump_filament(
         }
     }
 
+    let new_handle = match wake_jump_destination_system(ctx, dest_sys_id).await {
+        Ok(h) => h,
+        Err(e) => {
+            for (_, _, taken) in taken_jumpers {
+                let _ = old_handle.restore_ball(taken).await;
+            }
+            return Err(e);
+        }
+    };
+
     let committed_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<Vec<(i64, i64, crate::system_actor::TakenBall)>, BridgeRpcError> {
         let caller_ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
@@ -799,7 +831,6 @@ async fn handle_random_jump_filament(
         crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, p_char, p_ship);
     }
     let (old_const, old_reg) = ctx.sde.solar_systems.get(&old_sys).map(|s| (s.constellation_id, s.region_id)).unwrap_or((0, 0));
-    let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
     let pvp_until = now_unix.saturating_add(crate::sp6_lifecycle::PVP_TIMER_SECS);
     for (j_idx, (p_char, p_ship, taken)) in jumpers.into_iter().enumerate() {
         let prev_cs = taken.combat_state;
@@ -1114,6 +1145,13 @@ async fn handle_cmd_jump_to_structure_beacon(
             client_error: None,
         });
     };
+    let dest_handle = match wake_jump_destination_system(ctx, target_sys_id).await {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = cur_sys_handle.restore_ball(taken).await;
+            return Err(e);
+        }
+    };
     let prev_cs = taken.combat_state.clone();
     if let Err(e) = nav::consume_jump_fuel(ctx, ship_id, &plan) {
         let _ = cur_sys_handle.restore_ball(taken).await;
@@ -1150,7 +1188,6 @@ async fn handle_cmd_jump_to_structure_beacon(
         );
     });
     let target_pos = DVec3::from_array(target_struct.position) + DVec3::new(5_000.0, 0.0, 0.0);
-    let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
     let ball = Ball {
         id: ship_id,
         type_id: taken.ball.type_id,
@@ -1659,6 +1696,13 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
             client_error: None,
         });
     };
+    let dest_handle = match wake_jump_destination_system(ctx, target_sys_id).await {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = cur_sys_handle.restore_ball(taken).await;
+            return Err(e);
+        }
+    };
     let prev_cs = taken.combat_state.clone();
     if let Err(e) = nav::consume_jump_fuel(ctx, ship_id, &plan) {
         let _ = cur_sys_handle.restore_ball(taken).await;
@@ -1701,7 +1745,6 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
 
     let _ = (dest_const_id, dest_reg_id);
     let target_pos = beacon.position + DVec3::new(2_500.0, 0.0, 0.0);
-    let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
     let ball = Ball {
         id: ship_id, type_id: taken.ball.type_id, position: target_pos, velocity: DVec3::ZERO,
         max_velocity: taken.ball.max_velocity, inertia: taken.ball.inertia, mass: taken.ball.mass,

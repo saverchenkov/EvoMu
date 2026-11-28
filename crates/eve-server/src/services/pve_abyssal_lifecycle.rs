@@ -19,6 +19,30 @@ use std::collections::{HashMap, HashSet};
 type CharacterId = i64;
 type ItemId = i64;
 
+fn try_spawn_evacuated_ship_in_origin(
+    ctx: &ServerContext,
+    origin_sys: SolarSystemId,
+    ball: eve_destiny::Ball,
+    cs: eve_destiny::CombatState,
+    meta: eve_destiny::SlimItemMeta,
+) {
+    match ctx.systems.wake_for_cluster_tick(
+        origin_sys,
+        crate::system_actor::ClusterTickWakeReason::ScheduledWork,
+    ) {
+        Ok(origin_handle) => {
+            origin_handle.try_spawn_ball_with_meta(ball, cs, meta);
+        }
+        Err(err) => {
+            tracing::warn!(
+                solar_system_id = origin_sys,
+                %err,
+                "Failed to wake origin system during abyssal/void evacuation"
+            );
+        }
+    }
+}
+
 pub(crate) fn random_offset_around_trace_origin(
     ctx: &ServerContext,
     origin_pos: [f64; 3],
@@ -551,9 +575,7 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
             DVec3::from_array(evacuated_pos),
         );
         let meta = ctx.build_ship_slim_meta(*cid, ship_type);
-        ctx.systems
-            .get_or_spawn(*origin_sys)
-            .try_spawn_ball_with_meta(ball, cs, meta);
+        try_spawn_evacuated_ship_in_origin(ctx, *origin_sys, ball, cs, meta);
         ctx.sync_character_local_chat(*cid, Some(*abyss_sys), *origin_sys);
         crate::services::map_service::record_solar_system_visit(ctx, *cid, *origin_sys);
         let origin_sec = ctx
@@ -707,9 +729,7 @@ pub fn evacuate_void_space_session_sync(
         DVec3::from_array(exit_pos),
     );
     let meta = ctx.build_ship_slim_meta(char_id, ship_type);
-    ctx.systems
-        .get_or_spawn(origin_sys)
-        .try_spawn_ball_with_meta(ball, cs, meta);
+    try_spawn_evacuated_ship_in_origin(ctx, origin_sys, ball, cs, meta);
     ctx.sync_character_local_chat(char_id, Some(VOID_SPACE_SYSTEM_ID), origin_sys);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, origin_sys);
 

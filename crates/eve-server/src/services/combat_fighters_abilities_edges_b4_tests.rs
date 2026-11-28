@@ -432,6 +432,7 @@ async fn point_targeted_bomb_security_range_cooldown_charges_and_aoe_filtering()
     );
 
     // 2. Non-pointTargeted slot 0 -> InvalidTargetMode
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     assert_eq!(
         handle_activate_fighter_ability_slots_on_point(
             &ctx,
@@ -499,7 +500,6 @@ async fn point_targeted_bomb_security_range_cooldown_charges_and_aoe_filtering()
     );
 
     // Spawn carrier, f1, f2, normal target, cloaked target, and pod target
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     sys_handle
         .spawn_ball_with_combat(
             make_ball(ship_id, 23915, DVec3::ZERO, 1_500.0),
@@ -674,5 +674,155 @@ async fn point_targeted_bomb_security_range_cooldown_charges_and_aoe_filtering()
             .unwrap_err()
             .code,
         "FighterNotOwned"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fighter_abilities_on_cold_system_never_wake_cold_system_and_preserve_error_parity() {
+    let (mut ctx, mut session, char_id, ship_id, cold_sys) = make_fighter_ctx_and_session();
+    let other_sys = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&s| s != cold_sys)
+        .expect("second solar system in SDE");
+    let heavy_tid = 40_574_u32;
+    let f_missing = 5_009_001_i64;
+    let f_other = 5_009_002_i64;
+
+    let mut sde = make_fighter_sde_registry();
+    insert_ability(&mut sde, 1, "itemTargeted", false, false);
+    insert_ability(&mut sde, 22, "pointTargeted", false, false);
+    sde.fighter_abilities_by_type.insert(
+        heavy_tid,
+        vec![
+            FighterAbilitySlot {
+                slot_index: 0,
+                ability_id: 1,
+                cooldown_seconds: None,
+                charges: None,
+            },
+            FighterAbilitySlot {
+                slot_index: 2,
+                ability_id: 22,
+                cooldown_seconds: Some(30.0),
+                charges: Some(FighterAbilityCharges {
+                    charge_count: 1,
+                    rearm_time_seconds: 60.0,
+                }),
+            },
+        ],
+    );
+    sde.types.insert(
+        heavy_tid,
+        make_fighter_type(heavy_tid, 1653, 87, 50.0, vec![]),
+    );
+    ctx.sde = Arc::new(sde);
+
+    // Seed an active fighter in `other_sys` while leaving `cold_sys` strictly Cold.
+    let _other_h = ctx.systems.get_or_spawn(other_sys);
+    fighter_test_helpers::insert_active_fighter_in_system(
+        &ctx,
+        other_sys,
+        f_other,
+        ActiveFighterSquadron {
+            ball_id: f_other,
+            item_id: f_other,
+            type_id: heavy_tid,
+            owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            tube_index: 0,
+            squadron_size: 3,
+            target_id: None,
+            mwd_active: false,
+            is_abandoned: false,
+        },
+    );
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    let point = PyRep::Tuple(vec![
+        PyRep::Real(10_000.0),
+        PyRep::Real(0.0),
+        PyRep::Real(0.0),
+    ]);
+
+    assert_eq!(
+        handle_activate_fighter_ability_slots(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(f_missing), PyRep::Integer(0)],
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "FighterNotFound"
+    );
+    assert_eq!(
+        handle_activate_fighter_ability_slots(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(f_other), PyRep::Integer(0)],
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "FighterNotInSystem"
+    );
+    assert_eq!(
+        handle_activate_fighter_ability_slots_on_point(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(f_missing), PyRep::Integer(2), point.clone()],
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "FighterNotFound"
+    );
+    assert_eq!(
+        handle_activate_fighter_ability_slots_on_point(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(f_other), PyRep::Integer(2), point],
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "FighterNotInSystem"
+    );
+    assert_eq!(
+        handle_deactivate_fighter_ability_slots(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(f_missing), PyRep::Integer(0)],
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "FighterNotFound"
+    );
+    assert_eq!(
+        handle_deactivate_fighter_ability_slots(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(f_other), PyRep::Integer(0)],
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "FighterNotFound"
+    );
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(cold_sys),
+        crate::system_actor::SystemLifecycleState::Cold
     );
 }

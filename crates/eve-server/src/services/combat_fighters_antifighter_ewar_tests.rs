@@ -43,6 +43,7 @@ async fn fighter_abilities_validation_errors_and_security_gates() {
         .unwrap_err();
     assert_eq!(err.code, "FighterNotFound");
 
+    let sys = ctx.systems.get_or_spawn(sys_id);
     fighter_test_helpers::insert_active_fighter(
         &ctx,
         fid,
@@ -63,7 +64,6 @@ async fn fighter_abilities_validation_errors_and_security_gates() {
 
     // Spawn fighter & target in system
     spawn_fighter_and_ship(&ctx, sys_id, ship_id, fid, 23_057, char_id).await;
-    let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
         .spawn_ball_with_combat(
             Ball {

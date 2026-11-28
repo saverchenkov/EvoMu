@@ -2376,7 +2376,35 @@ async fn handle_cmd_stargate_jump(
     ctx.invalidate_ship_fitting_cache_only(ship_id);
 
     let old_tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, old_sys);
-    let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
+    let new_handle = match ctx
+        .systems
+        .wake_for_session_arrival_async(
+            dest_sys_id,
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        )
+        .await
+    {
+        Ok(h) => h,
+        Err(wake_err) => {
+            tracing::error!(
+                char_id,
+                ship_id,
+                old_sys,
+                dest_sys_id,
+                error = %wake_err,
+                "Stargate destination wake_for_session_arrival_async failed; rolling back stargate jump"
+            );
+            rollback_guard.rollback_and_restore().await;
+            let msg = format!(
+                "Failed to activate destination solar system {dest_sys_id}: {wake_err}"
+            );
+            return Err(BridgeRpcError::with_client_error(
+                "SystemTransitionFailed",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            ));
+        }
+    };
     let dest_tidi = new_handle.tidi_factor();
     let mut new_ball = rollback_guard
         .taken()

@@ -793,3 +793,112 @@ async fn teleport_players_active_ship_fallback_caller_session_transition_and_res
     let restr_err = check_tourney_warp_restricted(&ctx, arena_sys, gm_cid).unwrap_err();
     assert_eq!(restr_err.code, "WarpRestrictedInTourney");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tourney_create_match_and_teleport_wake_cold_match_sys_with_gm_command_while_rejects_stay_cold() {
+    let ctx = make_ctx();
+    let kw = HashMap::new();
+    let start_sys = 30_000_142_u32;
+    let arena_sys = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&s| s != start_sys && s < 31_000_000)
+        .expect("second k-space solar system in SDE");
+    let gm_cid = 97_900_001_i64;
+    let gm_ship = 97_900_101_i64;
+    let player_cid = 97_900_002_i64;
+    let player_ship = 97_900_102_i64;
+    seed_pilot(&ctx, gm_cid, start_sys, gm_ship, 587);
+    seed_pilot(&ctx, player_cid, start_sys, player_ship, 587);
+
+    let mut gm = mk_sess(Some(gm_cid), Some(start_sys), true);
+    let mut player = mk_sess(Some(player_cid), Some(start_sys), false);
+    assert!(ctx.systems.get_handle(arena_sys).is_none());
+
+    let mut cm_kw = HashMap::new();
+    cm_kw.insert("redTeamID".into(), PyRep::Integer(1_000_009));
+    cm_kw.insert("blueTeamID".into(), PyRep::Integer(1_000_125));
+    cm_kw.insert("redCaptainID".into(), PyRep::Integer(gm_cid));
+    cm_kw.insert("blueCaptainID".into(), PyRep::Integer(player_cid));
+    cm_kw.insert("systemID".into(), PyRep::Integer(i64::from(arena_sys)));
+
+    // 1. Non-GM CreateMatch fails before waking cold arena_sys.
+    let auth_err = tm(
+        &ctx,
+        &mut player,
+        "CreateMatch",
+        &[PyRep::Integer(88), PyRep::Integer(8401), PyRep::Integer(50)],
+        &cm_kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(auth_err.code, "AdminAccessDenied");
+    assert!(ctx.systems.get_handle(arena_sys).is_none());
+
+    // 2. Valid GM CreateMatch wakes cold arena_sys with GmCommand("tourneyMgr.CreateMatch").
+    tm(
+        &ctx,
+        &mut gm,
+        "CreateMatch",
+        &[PyRep::Integer(88), PyRep::Integer(8401), PyRep::Integer(50)],
+        &cm_kw,
+    )
+    .await
+    .expect("CreateMatch succeeds");
+    assert_eq!(
+        ctx.systems.last_wake_reason(arena_sys),
+        Some(crate::system_actor::SystemWakeReason::GmCommand(
+            "tourneyMgr.CreateMatch".to_string()
+        ))
+    );
+
+    // 3. Stop arena_sys back to Cold; duplicate CreateMatch and unauthorized TeleportPlayers leave it Cold.
+    assert!(ctx.systems.stop_system(arena_sys).await);
+    assert!(ctx.systems.get_handle(arena_sys).is_none());
+    let dup_err = tm(
+        &ctx,
+        &mut gm,
+        "CreateMatch",
+        &[PyRep::Integer(88), PyRep::Integer(8401), PyRep::Integer(50)],
+        &cm_kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(dup_err.code, "DuplicateMatchID");
+    assert!(ctx.systems.get_handle(arena_sys).is_none());
+
+    tm(&ctx, &mut gm, "AddPlayer", &[PyRep::Integer(0), PyRep::Integer(gm_cid)], &kw)
+        .await
+        .expect("AddPlayer succeeds");
+    let non_ref_err = tm(
+        &ctx,
+        &mut player,
+        "TeleportPlayers",
+        &[PyRep::Integer(8401), PyRep::Integer(0), PyRep::Integer(0)],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert!(!non_ref_err.code.is_empty());
+    assert!(ctx.systems.get_handle(arena_sys).is_none());
+
+    // 4. Valid GM TeleportPlayers wakes cold arena_sys with GmCommand("tourneyMgr.TeleportPlayers").
+    let tp_ok = tm(
+        &ctx,
+        &mut gm,
+        "TeleportPlayers",
+        &[PyRep::Integer(8401), PyRep::Integer(0), PyRep::Integer(0)],
+        &kw,
+    )
+    .await
+    .expect("TeleportPlayers succeeds");
+    assert_eq!(tp_ok, PyRep::Bool(true));
+    assert_eq!(
+        ctx.systems.last_wake_reason(arena_sys),
+        Some(crate::system_actor::SystemWakeReason::GmCommand(
+            "tourneyMgr.TeleportPlayers".to_string()
+        ))
+    );
+}

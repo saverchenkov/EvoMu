@@ -324,10 +324,20 @@ pub fn handle(
 
             let mut stepped_ticks: u64 = 0;
             if tokio::runtime::Handle::try_current().is_ok() {
-                let sys_handle = ctx.systems.get_or_spawn(target_sys);
-                for _ in 0..ticks {
-                    sys_handle.try_step_manual(1.0);
-                    stepped_ticks += 1;
+                match ctx.systems.wake_for_gm_command(target_sys, "loadService.StartLoad") {
+                    Ok(sys_handle) => {
+                        for _ in 0..ticks {
+                            sys_handle.try_step_manual(1.0);
+                            stepped_ticks += 1;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target_sys,
+                            %err,
+                            "loadService.StartLoad failed to wake target system"
+                        );
+                    }
                 }
             }
             let sde_types_len = ctx.sde.types.len() as u64;

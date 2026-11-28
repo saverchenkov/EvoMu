@@ -912,3 +912,128 @@ async fn each_action_breaks_cyno_protection_once_while_other_pilot_keeps_protect
         let _ = dest_handle.remove_ball(ship_b).await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relocate_ship_wakes_cold_dest_with_jump_reason_and_rolls_back_on_wake_failure() {
+    struct FailCynoDestWakeProvider {
+        target_sys: u32,
+    }
+    impl crate::system_actor::SystemContentProvider for FailCynoDestWakeProvider {
+        fn name(&self) -> &'static str {
+            "test_cyno_fail_dest_wake"
+        }
+
+        fn seed(
+            &self,
+            seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+        ) -> Result<(), String> {
+            if seed_ctx.solar_system_id == self.target_sys {
+                return Err(format!("injected cyno wake failure for {}", self.target_sys));
+            }
+            Ok(())
+        }
+    }
+
+    let origin_sys = 30_002_505_u32;
+    let dest_sys = 30_002_506_u32;
+    let char_id = 95_421_001_i64;
+    let ship_id = 1_000_542_001_i64;
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.solar_systems.insert(
+            origin_sys,
+            custom_system(sde, origin_sys, 10_000_001, -0.5, [0.0, 0.0, 0.0]),
+        );
+        sde.solar_systems.insert(
+            dest_sys,
+            custom_system(sde, dest_sys, 10_000_001, -0.5, [2.0, 0.0, 0.0]),
+        );
+    });
+    ensure_char(&ctx, char_id, 98_000_020, origin_sys, ship_id, None);
+    insert_item(
+        &ctx,
+        ship_id,
+        587,
+        char_id,
+        i64::from(origin_sys),
+        InventoryFlag::None,
+        1,
+        true,
+    );
+    spawn_ship(&ctx, origin_sys, ship_id, 587, char_id, DVec3::ZERO, 0.0, 1_000.0).await;
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+
+    let (cd_min, fat_min) = relocate_ship(
+        &ctx,
+        char_id,
+        ship_id,
+        origin_sys,
+        dest_sys,
+        DVec3::new(10_000.0, 0.0, 0.0),
+        2.0,
+        0.5,
+    )
+    .await
+    .expect("relocate_ship wakes cold dest");
+    assert!(cd_min > 0.0 && fat_min > 0.0);
+    assert_eq!(
+        ctx.systems.last_wake_reason(dest_sys),
+        Some(crate::system_actor::SystemWakeReason::SessionArrival(
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        ))
+    );
+
+    // Wake failure leaves origin ball & DB intact and destination Cold.
+    let ctx_fail = test_ctx_with_custom(|sde| {
+        sde.solar_systems.insert(
+            origin_sys,
+            custom_system(sde, origin_sys, 10_000_001, -0.5, [0.0, 0.0, 0.0]),
+        );
+        sde.solar_systems.insert(
+            dest_sys,
+            custom_system(sde, dest_sys, 10_000_001, -0.5, [2.0, 0.0, 0.0]),
+        );
+    });
+    ctx_fail
+        .systems
+        .register_content_provider(Arc::new(FailCynoDestWakeProvider { target_sys: dest_sys }))
+        .expect("register fail provider");
+    ensure_char(&ctx_fail, char_id, 98_000_020, origin_sys, ship_id, None);
+    insert_item(
+        &ctx_fail,
+        ship_id,
+        587,
+        char_id,
+        i64::from(origin_sys),
+        InventoryFlag::None,
+        1,
+        true,
+    );
+    spawn_ship(&ctx_fail, origin_sys, ship_id, 587, char_id, DVec3::ZERO, 0.0, 1_000.0).await;
+
+    let err = relocate_ship(
+        &ctx_fail,
+        char_id,
+        ship_id,
+        origin_sys,
+        dest_sys,
+        DVec3::new(10_000.0, 0.0, 0.0),
+        2.0,
+        0.5,
+    )
+    .await
+    .expect_err("wake failure must fail relocate_ship with SystemTransitionFailed");
+    assert_eq!(err.code, "SystemTransitionFailed");
+    assert!(ctx_fail.systems.get_handle(dest_sys).is_none());
+    assert!(ctx_fail
+        .systems
+        .get_handle(origin_sys)
+        .unwrap()
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        ctx_fail.db.with_snapshot(|s| s.characters[&char_id].solar_system_id),
+        origin_sys
+    );
+}

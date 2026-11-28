@@ -1156,3 +1156,272 @@ async fn test_abyssal_and_void_gate_handoffs_gate_missing_ball_and_restore_on_db
         });
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abyssal_and_void_gates_record_session_arrival_jump_and_rollback_on_wake_failure() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    struct GateFailWakeProvider {
+        name_id: &'static str,
+        target_sys: u32,
+        should_fail: Arc<AtomicBool>,
+    }
+    impl crate::system_actor::SystemContentProvider for GateFailWakeProvider {
+        fn name(&self) -> &'static str {
+            self.name_id
+        }
+
+        fn seed(
+            &self,
+            seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+        ) -> Result<(), String> {
+            if seed_ctx.solar_system_id == self.target_sys && self.should_fail.load(Ordering::Acquire)
+            {
+                return Err(format!("injected wake failure for {}", self.target_sys));
+            }
+            Ok(())
+        }
+    }
+
+    let (mut ctx, mut session, char_id, ship_id, origin_sys) = make_fighter_ctx_and_session();
+    let void_fil_type = 950_001_u32;
+    let void_fil_id = 777_901_i64;
+    Arc::make_mut(&mut ctx.sde).types.insert(
+        void_fil_type,
+        crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_type(
+            void_fil_type,
+            4145,
+            66,
+            0.1,
+            vec![],
+        ),
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.type_id = 621;
+        }
+        snap.items.insert(
+            void_fil_id,
+            crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_item(
+                void_fil_id,
+                void_fil_type,
+                char_id,
+                ship_id,
+                eve_db::InventoryFlag::Cargo,
+                2,
+            ),
+        );
+    });
+
+    let fail_void = Arc::new(AtomicBool::new(true));
+    let fail_origin = Arc::new(AtomicBool::new(false));
+    ctx.systems
+        .register_content_provider(Arc::new(GateFailWakeProvider {
+            name_id: "test_void_gate_fail_wake",
+            target_sys: VOID_SPACE_SYSTEM_ID,
+            should_fail: Arc::clone(&fail_void),
+        }))
+        .expect("register void fail provider");
+    ctx.systems
+        .register_content_provider(Arc::new(GateFailWakeProvider {
+            name_id: "test_origin_gate_fail_wake",
+            target_sys: origin_sys,
+            should_fail: Arc::clone(&fail_origin),
+        }))
+        .expect("register origin fail provider");
+
+    let origin_handle = ctx.systems.get_or_spawn(origin_sys);
+    let _ = origin_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 621,
+            position: DVec3::splat(500_000_000.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 10_000_000.0,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    // 1. Void Space entry wake failure keeps ship & filament intact and VOID_SPACE_SYSTEM_ID Cold.
+    assert!(ctx.systems.get_handle(VOID_SPACE_SYSTEM_ID).is_none());
+    let void_err = handle_void_space_player_jump(
+        &ctx,
+        &mut session,
+        char_id,
+        &[PyRep::Integer(void_fil_id), PyRep::Integer(1)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(void_err.code, "SystemTransitionFailed");
+    assert!(origin_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&void_fil_id].quantity), 2);
+    assert!(ctx.systems.get_handle(VOID_SPACE_SYSTEM_ID).is_none());
+
+    // Succeeding entry wakes cold VOID_SPACE_SYSTEM_ID with SessionArrival(Jump).
+    fail_void.store(false, Ordering::Release);
+    let void_ok = handle_void_space_player_jump(
+        &ctx,
+        &mut session,
+        char_id,
+        &[PyRep::Integer(void_fil_id), PyRep::Integer(1)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        void_ok.dict_get("solarSystemID").and_then(|v| v.as_i64()),
+        Some(i64::from(VOID_SPACE_SYSTEM_ID))
+    );
+    assert_eq!(
+        ctx.systems.last_wake_reason(VOID_SPACE_SYSTEM_ID),
+        Some(crate::system_actor::SystemWakeReason::SessionArrival(
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        ))
+    );
+
+    // 2. Void Space end gate: stop origin_sys to Cold, verify fail-closed rollback then SessionArrival(Jump).
+    assert!(ctx.systems.stop_system(origin_sys).await);
+    assert!(ctx.systems.get_handle(origin_sys).is_none());
+    fail_origin.store(true, Ordering::Release);
+    let void_h = ctx.systems.get_handle(VOID_SPACE_SYSTEM_ID).expect("void handle");
+    let vexit_err = handle_void_space_end_gate_activation(
+        &ctx,
+        &mut session,
+        char_id,
+        &[PyRep::Integer(888_001)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(vexit_err.code, "SystemTransitionFailed");
+    assert!(void_h.get_ball_snapshot(ship_id).await.unwrap().is_some());
+    assert!(with_abyssal_state(&ctx, |st| st.void_space_sessions.contains_key(&char_id)));
+    assert!(ctx.systems.get_handle(origin_sys).is_none());
+
+    fail_origin.store(false, Ordering::Release);
+    let vexit_ok = handle_void_space_end_gate_activation(
+        &ctx,
+        &mut session,
+        char_id,
+        &[PyRep::Integer(888_001)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        vexit_ok.dict_get("exitedVoidSpace").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.systems.last_wake_reason(origin_sys),
+        Some(crate::system_actor::SystemWakeReason::SessionArrival(
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        ))
+    );
+
+    // 3. Abyssal end gate: stop origin_sys to Cold, verify fail-closed rollback then SessionArrival(Jump).
+    assert!(ctx.systems.stop_system(origin_sys).await);
+    assert!(ctx.systems.get_handle(origin_sys).is_none());
+    let pid = 91_i64;
+    let abyss_sys = crate::services::abyssal_void_mgr::ABYSSAL_SPACE_SYSTEM_ID;
+    let r3_gate = 1_895_000_000 + pid * 10 + 3;
+    let now = ctx.now_unix();
+    let mk_room = |idx: u8| AbyssalRoomRecord {
+        room_index: idx,
+        dungeon_id: u32::from(idx),
+        dungeon_name: format!("Room {idx}"),
+        npc_ball_ids: Vec::new(),
+        cache_item_id: 0,
+        cleared: true,
+        gate_unlocked_at_sec: Some(now),
+    };
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
+            char_id,
+            AbyssalPocketSession {
+                pocket_id: pid,
+                character_id: char_id,
+                ship_id,
+                origin_solar_system_id: origin_sys,
+                abyssal_solar_system_id: abyss_sys,
+                origin_position: [0.0; 3],
+                grid_offset: [0.0; 3],
+                filament_type_id: 47_762,
+                tier: 1,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: -30.0,
+                weather_bonus_pct: 50.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 3,
+                rooms: [mk_room(1), mk_room(2), mk_room(3)],
+                started_at_sec: now,
+                collapse_at_sec: now + 1_200,
+                completed: false,
+                collapsed_destroyed: false,
+                trace_ball_id: 0,
+                fleet_ship_ids: vec![ship_id],
+                ship_room: HashMap::from([(ship_id, 3)]),
+                max_ships: 1,
+            },
+        );
+    });
+    let abyss_h = ctx.systems.get_or_spawn(abyss_sys);
+    for id in [ship_id, r3_gate] {
+        let _ = abyss_h
+            .spawn_ball(Ball {
+                id,
+                type_id: 621,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 10_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+    }
+    session.solar_system_id = Some(abyss_sys);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = abyss_sys;
+        }
+    });
+
+    fail_origin.store(true, Ordering::Release);
+    let ab_err = handle_abyssal_end_gate_activation(
+        &ctx,
+        &mut session,
+        char_id,
+        &[PyRep::Integer(r3_gate)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(ab_err.code, "SystemTransitionFailed");
+    assert!(abyss_h.get_ball_snapshot(ship_id).await.unwrap().is_some());
+    assert!(with_abyssal_state(&ctx, |st| st.pockets.contains_key(&char_id)));
+    assert!(ctx.systems.get_handle(origin_sys).is_none());
+
+    fail_origin.store(false, Ordering::Release);
+    let ab_ok = handle_abyssal_end_gate_activation(
+        &ctx,
+        &mut session,
+        char_id,
+        &[PyRep::Integer(r3_gate)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ab_ok.dict_get("exitedAbyssalSpace").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        ctx.systems.last_wake_reason(origin_sys),
+        Some(crate::system_actor::SystemWakeReason::SessionArrival(
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        ))
+    );
+}

@@ -531,3 +531,39 @@ fn load_service_macho_net_and_debug_exec_edge_cases() {
     let PyRep::List(rows) = ok_exec else { panic!("expected list") };
     assert_eq!(rows.len(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_load_wakes_cold_system_with_gm_command_while_rejected_calls_stay_cold() {
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let target_sys = 30_000_142_u32;
+    let mut gm = gm_sess(77_901, 90_000_010);
+    let mut player = player_sess(77_902, 90_000_011);
+
+    assert!(ctx.systems.get_handle(target_sys).is_none());
+
+    // Rejected authorization or invalid load spec must not wake cold target_sys.
+    let auth_err = handle(&ctx, &mut player, "loadService", "StartLoad", &[PyRep::Integer(2)], &kw)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(auth_err.code, "UserError");
+    assert!(ctx.systems.get_handle(target_sys).is_none());
+
+    let spec_err = handle(&ctx, &mut gm, "loadService", "StartLoad", &[PyRep::Real(0.0)], &kw)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(spec_err.message, "InvalidLoadSpec");
+    assert!(ctx.systems.get_handle(target_sys).is_none());
+
+    // Valid GM StartLoad wakes target_sys with GmCommand("loadService.StartLoad").
+    let ok = handle(&ctx, &mut gm, "loadService", "StartLoad", &[PyRep::Integer(3)], &kw)
+        .unwrap()
+        .expect("GM StartLoad succeeds");
+    assert_eq!(ok.dict_get("ticksExecuted").and_then(|v| v.as_i64()), Some(3));
+    assert_eq!(
+        ctx.systems.last_wake_reason(target_sys),
+        Some(crate::system_actor::SystemWakeReason::GmCommand(
+            "loadService.StartLoad".to_string()
+        ))
+    );
+}

@@ -250,11 +250,13 @@ async fn rollback_fighter_ability_slot(
         .await;
 }
 
-async fn spawn_hydrated_fighter_system(
+async fn resolve_hydrated_fighter_system(
     ctx: &ServerContext,
     sys_id: u32,
-) -> Result<SystemHandle, BridgeRpcError> {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+) -> Result<Option<SystemHandle>, BridgeRpcError> {
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Ok(None);
+    };
     ctx.systems
         .ensure_live_fighters_hydrated_async(sys_id, &sys_handle)
         .await
@@ -263,7 +265,44 @@ async fn spawn_hydrated_fighter_system(
             message: e,
             client_error: None,
         })?;
-    Ok(sys_handle)
+    Ok(Some(sys_handle))
+}
+
+async fn fighter_not_in_system_or_not_found_err(
+    ctx: &ServerContext,
+    sys_id: u32,
+    fighter_ball_id: i64,
+) -> BridgeRpcError {
+    let mut in_other_system = false;
+    for (other_sid, h) in ctx.systems.active_system_handles() {
+        if other_sid == sys_id {
+            continue;
+        }
+        ctx.systems
+            .ensure_live_fighters_hydrated_if_unlocked_async(other_sid, &h)
+            .await;
+        if h.view()
+            .fighters
+            .active_fighters
+            .contains_key(&fighter_ball_id)
+        {
+            in_other_system = true;
+            break;
+        }
+    }
+    if in_other_system {
+        BridgeRpcError {
+            code: "FighterNotInSystem".into(),
+            message: format!("Fighter squadron {fighter_ball_id} is not in solar system {sys_id}"),
+            client_error: None,
+        }
+    } else {
+        BridgeRpcError {
+            code: "FighterNotFound".into(),
+            message: format!("Fighter squadron {fighter_ball_id} not found or not launched"),
+            client_error: None,
+        }
+    }
 }
 
 async fn resolve_active_fighter_in_system(
@@ -272,31 +311,16 @@ async fn resolve_active_fighter_in_system(
     sys_id: u32,
     fighter_ball_id: i64,
 ) -> Result<ActiveFighterSquadron, BridgeRpcError> {
-    if let Some(f) = sys_handle.view().fighters.active_fighters.get(&fighter_ball_id).cloned() {
+    if let Some(f) = sys_handle
+        .view()
+        .fighters
+        .active_fighters
+        .get(&fighter_ball_id)
+        .cloned()
+    {
         return Ok(f);
     }
-    let mut in_other_system = false;
-    for (other_sid, h) in ctx.systems.active_system_handles() {
-        if other_sid == sys_id { continue; }
-        ctx.systems.ensure_live_fighters_hydrated_if_unlocked_async(other_sid, &h).await;
-        if h.view().fighters.active_fighters.contains_key(&fighter_ball_id) {
-            in_other_system = true;
-            break;
-        }
-    }
-    if in_other_system {
-        Err(BridgeRpcError {
-            code: "FighterNotInSystem".into(),
-            message: format!("Fighter squadron {fighter_ball_id} is not in solar system {sys_id}"),
-            client_error: None,
-        })
-    } else {
-        Err(BridgeRpcError {
-            code: "FighterNotFound".into(),
-            message: format!("Fighter squadron {fighter_ball_id} not found or not launched"),
-            client_error: None,
-        })
-    }
+    Err(fighter_not_in_system_or_not_found_err(ctx, sys_id, fighter_ball_id).await)
 }
 
 async fn activate_single_fighter_ability(
@@ -308,9 +332,13 @@ async fn activate_single_fighter_ability(
     slot_id: u32,
     target_id: Option<i64>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let sys_handle = match spawn_hydrated_fighter_system(ctx, sys_id).await {
+    let Some(sys_handle) = (match resolve_hydrated_fighter_system(ctx, sys_id).await {
         Ok(h) => h,
         Err(e) => return Some(Err(e)),
+    }) else {
+        return Some(Err(
+            fighter_not_in_system_or_not_found_err(ctx, sys_id, fighter_ball_id).await,
+        ));
     };
     let fighter = match resolve_active_fighter_in_system(ctx, &sys_handle, sys_id, fighter_ball_id).await {
         Ok(f) => f,
@@ -1314,9 +1342,13 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             Err(e) => return Some(Err(e)),
         };
 
-    let sys_handle = match spawn_hydrated_fighter_system(ctx, sys_id).await {
+    let Some(sys_handle) = (match resolve_hydrated_fighter_system(ctx, sys_id).await {
         Ok(h) => h,
         Err(e) => return Some(Err(e)),
+    }) else {
+        return Some(Err(
+            fighter_not_in_system_or_not_found_err(ctx, sys_id, fighter_ids[0]).await,
+        ));
     };
     let mut point_results: Vec<PyRep> = Vec::with_capacity(fighter_ids.len());
     for &fighter_ball_id in &fighter_ids {
@@ -1697,17 +1729,19 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
     }
     let slot_id = raw_slot_id as u32;
 
-    let sys_handle = match spawn_hydrated_fighter_system(ctx, sys_id).await {
+    let sys_handle_opt = match resolve_hydrated_fighter_system(ctx, sys_id).await {
         Ok(h) => h,
         Err(e) => return Some(Err(e)),
     };
-    let fighter_opt = sys_handle
-        .view()
-        .fighters
-        .active_fighters
-        .get(&fighter_ball_id)
-        .cloned();
-    let Some(fighter) = fighter_opt else {
+    let fighter_opt = sys_handle_opt.as_ref().and_then(|sys_handle| {
+        sys_handle
+            .view()
+            .fighters
+            .active_fighters
+            .get(&fighter_ball_id)
+            .cloned()
+    });
+    let (Some(sys_handle), Some(fighter)) = (sys_handle_opt, fighter_opt) else {
         return Some(Err(BridgeRpcError {
             code: "FighterNotFound".into(),
             message: format!("Fighter squadron {fighter_ball_id} not found or not launched"),

@@ -1189,6 +1189,23 @@ pub async fn relocate_ship(
     );
     let cd_secs = ((cd_min * 60.0).round() as u64).max(1);
     let fat_secs = ((fat_min * 60.0).round() as u64).max(cd_secs + 1);
+    let dest_handle = ctx
+        .systems
+        .wake_for_session_arrival_async(
+            to_sys,
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        )
+        .await
+        .map_err(|wake_err| {
+            let msg = format!(
+                "Failed to activate destination solar system {to_sys}: {wake_err}"
+            );
+            BridgeRpcError::with_client_error(
+                "SystemTransitionFailed",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            )
+        })?;
     let from_opt = ctx.systems.get_handle(from_sys);
     let taken_opt = match from_opt.as_ref() {
         Some(from) => from.take_ball(ship_id).await,
@@ -1262,7 +1279,6 @@ pub async fn relocate_ship(
         ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0)
     });
     let t = ctx.sde.types.get(&type_id);
-    let dest_handle = ctx.systems.get_or_spawn(to_sys);
     let mut arrival_pos = pos;
     let mut arrival_vel = DVec3::ZERO;
     let ship_radius = old.as_ref().map(|b| b.radius).or(t.map(|t| t.radius)).unwrap_or(50.0);

@@ -444,15 +444,30 @@ pub async fn handle(
                 Ok((PyRep::Tuple(vec![PyRep::Integer(match_id), PyRep::List(beacon_reps), PyRep::List(captain_reps)]), b1, b2))
             });
             if let Ok((rep, b1, b2)) = res {
-                let sys_handle = ctx.systems.get_or_spawn(match_sys_id as u32);
-                for (bid, x) in [(b1, -50_000.0), (b2, 50_000.0)] {
-                    let _ = sys_handle
-                        .spawn_ball_with_meta(
-                            eve_destiny::Ball { id: bid, type_id: 2977, position: glam::DVec3::new(x, 0.0, 0.0), velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 100.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Rigid },
-                            eve_destiny::CombatState::default(),
-                            eve_destiny::SlimItemMeta { group_id: 310, category_id: 2, owner_id: 1, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false , ..Default::default()},
-                        )
-                        .await;
+                match ctx
+                    .systems
+                    .wake_for_gm_command_async(match_sys_id as u32, "tourneyMgr.CreateMatch")
+                    .await
+                {
+                    Ok(sys_handle) => {
+                        for (bid, x) in [(b1, -50_000.0), (b2, 50_000.0)] {
+                            let _ = sys_handle
+                                .spawn_ball_with_meta(
+                                    eve_destiny::Ball { id: bid, type_id: 2977, position: glam::DVec3::new(x, 0.0, 0.0), velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 100.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Rigid },
+                                    eve_destiny::CombatState::default(),
+                                    eve_destiny::SlimItemMeta { group_id: 310, category_id: 2, owner_id: 1, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false , ..Default::default()},
+                                )
+                                .await;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            solar_system_id = match_sys_id,
+                            match_id,
+                            %err,
+                            "tourneyMgr.CreateMatch failed to wake match solar system"
+                        );
+                    }
                 }
                 Ok(rep)
             } else {
@@ -1094,7 +1109,21 @@ pub async fn handle(
 
             if res.is_ok() {
                 let base_pos = if beacon_idx == 0 { DVec3::new(-50_000.0, 0.0, 0.0) } else { DVec3::new(50_000.0, 0.0, 0.0) };
-                let sys_handle = ctx.systems.get_or_spawn(match_sys as u32);
+                let sys_handle_opt = match ctx
+                    .systems
+                    .wake_for_gm_command_async(match_sys as u32, "tourneyMgr.TeleportPlayers")
+                    .await
+                {
+                    Ok(h) => Some(h),
+                    Err(err) => {
+                        tracing::warn!(
+                            solar_system_id = match_sys,
+                            %err,
+                            "tourneyMgr.TeleportPlayers failed to wake match solar system"
+                        );
+                        None
+                    }
+                };
                 for (idx, (cid, user_id, ship_id, stid, old_sys, old_st)) in moved_pilots.into_iter().enumerate() {
                     let offset = DVec3::new((idx as f64) * 250.0, 0.0, (idx as f64) * 250.0);
                     let pos = base_pos + offset;
@@ -1105,17 +1134,19 @@ pub async fn handle(
                                 let _ = old_handle.remove_ball(ship_id).await;
                             }
                         }
-                        if sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().is_some() {
-                            let _ = sys_handle.set_ball_position(ship_id, pos).await;
-                        } else if is_online {
-                            let (mass, radius, max_vel, inertia) = ctx.sde.types.get(&stid).map(|t| {
-                                (if t.mass > 0.0 { t.mass } else { 1_200_000.0 }, if t.radius > 0.0 { t.radius } else { 80.0 }, t.default_attributes.get(&37).copied().unwrap_or(300.0), t.default_attributes.get(&70).copied().unwrap_or(2.5))
-                            }).unwrap_or((1_200_000.0, 80.0, 300.0, 2.5));
-                            let cs = ctx.build_ship_combat_state(cid, ship_id, stid);
-                            let _ = sys_handle.spawn_ball_with_combat(
-                                eve_destiny::Ball { id: ship_id, type_id: stid, position: pos, velocity: DVec3::ZERO, max_velocity: max_vel, inertia, mass, radius, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop },
-                                cs,
-                            ).await;
+                        if let Some(ref sys_handle) = sys_handle_opt {
+                            if sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().is_some() {
+                                let _ = sys_handle.set_ball_position(ship_id, pos).await;
+                            } else if is_online {
+                                let (mass, radius, max_vel, inertia) = ctx.sde.types.get(&stid).map(|t| {
+                                    (if t.mass > 0.0 { t.mass } else { 1_200_000.0 }, if t.radius > 0.0 { t.radius } else { 80.0 }, t.default_attributes.get(&37).copied().unwrap_or(300.0), t.default_attributes.get(&70).copied().unwrap_or(2.5))
+                                }).unwrap_or((1_200_000.0, 80.0, 300.0, 2.5));
+                                let cs = ctx.build_ship_combat_state(cid, ship_id, stid);
+                                let _ = sys_handle.spawn_ball_with_combat(
+                                    eve_destiny::Ball { id: ship_id, type_id: stid, position: pos, velocity: DVec3::ZERO, max_velocity: max_vel, inertia, mass, radius, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop },
+                                    cs,
+                                ).await;
+                            }
                         }
                     }
                     if session.character_id == Some(cid) {

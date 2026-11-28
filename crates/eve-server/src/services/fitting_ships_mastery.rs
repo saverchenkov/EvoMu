@@ -950,7 +950,24 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             client_error: None,
                         }));
                     }
-                    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                    let sys_handle = match ctx
+                        .systems
+                        .wake_for_session_arrival_async(
+                            sys_id,
+                            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+                        )
+                        .await
+                    {
+                        Ok(h) => h,
+                        Err(err) => {
+                            let msg = format!("Failed to activate solar system {sys_id}: {err}");
+                            return Some(Err(BridgeRpcError::with_client_error(
+                                "SystemTransitionFailed",
+                                msg.clone(),
+                                eve_proto::ClientError::CustomInfo(msg),
+                            )));
+                        }
+                    };
                     let mut cur_ball = sys_handle.get_ball_snapshot(cur_ship_id).await.ok().flatten();
                     if cur_ball.is_none() {
                         if let Some((cur_type_id, cur_pos)) = ctx.db.with_snapshot(|snap| {

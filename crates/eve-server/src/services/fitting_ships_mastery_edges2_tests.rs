@@ -939,3 +939,111 @@ async fn newbie_ship_clears_stale_future_cooldown_timestamp() {
         );
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn in_space_board_wakes_cold_system_with_login_in_space_and_fails_closed_on_wake_error() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct BoardFailWakeProvider {
+        target_sys: u32,
+        should_fail: Arc<AtomicBool>,
+    }
+    impl crate::system_actor::SystemContentProvider for BoardFailWakeProvider {
+        fn name(&self) -> &'static str {
+            "test_board_fail_wake"
+        }
+
+        fn seed(
+            &self,
+            seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+        ) -> Result<(), String> {
+            if seed_ctx.solar_system_id == self.target_sys && self.should_fail.load(Ordering::Acquire)
+            {
+                return Err(format!("injected wake failure for {}", self.target_sys));
+            }
+            Ok(())
+        }
+    }
+
+    let ctx = make_ctx();
+    let kw = HashMap::new();
+    let sys_id = 30_000_142_u32;
+    let char_id = 96_500_901_i64;
+    let pod_id = 96_500_902_i64;
+    let target_ship_id = 96_500_903_i64;
+    seed_pilot(&ctx, char_id, sys_id, None, pod_id, 670);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(pod_id, [0.0, 0.0, 0.0]);
+        snap.items.insert(
+            target_ship_id,
+            InventoryItemRecord {
+                item_id: target_ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let should_fail = Arc::new(AtomicBool::new(true));
+    ctx.systems
+        .register_content_provider(Arc::new(BoardFailWakeProvider {
+            target_sys: sys_id,
+            should_fail: Arc::clone(&should_fail),
+        }))
+        .expect("register fail provider");
+
+    let mut space_sess = make_session(char_id, sys_id, None, Some(pod_id));
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+
+    // 1. Wake failure returns SystemTransitionFailed and keeps sys_id Cold.
+    let wake_err = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut space_sess,
+        None,
+        "ship",
+        "Board",
+        &[PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Board route handled")
+    .expect_err("wake failure must return SystemTransitionFailed");
+    assert_eq!(wake_err.code, "SystemTransitionFailed");
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+
+    // 2. Clearing wake failure wakes cold sys_id with SessionArrival(LoginInSpace) and materializes pod_id.
+    should_fail.store(false, Ordering::Release);
+    let ship_err = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut space_sess,
+        None,
+        "ship",
+        "Board",
+        &[PyRep::Integer(target_ship_id)],
+        &kw,
+    )
+    .await
+    .expect("Board route handled")
+    .expect_err("absent target ship ball returns ShipNotInSpace");
+    assert_eq!(ship_err.code, "ShipNotInSpace");
+    assert_eq!(
+        ctx.systems.last_wake_reason(sys_id),
+        Some(crate::system_actor::SystemWakeReason::SessionArrival(
+            crate::system_actor::SessionArrivalWakeReason::LoginInSpace,
+        ))
+    );
+    assert!(ctx
+        .systems
+        .get_handle(sys_id)
+        .expect("sys_id live after Board")
+        .get_ball_snapshot(pod_id)
+        .await
+        .unwrap()
+        .is_some());
+}

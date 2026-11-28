@@ -49,6 +49,28 @@ fn gate_not_found_error() -> BridgeRpcError {
     }
 }
 
+async fn wake_jump_destination_system(
+    ctx: &ServerContext,
+    dest_sys_id: u32,
+) -> Result<crate::system_actor::SystemHandle, BridgeRpcError> {
+    ctx.systems
+        .wake_for_session_arrival_async(
+            dest_sys_id,
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        )
+        .await
+        .map_err(|wake_err| {
+            let msg = format!(
+                "Failed to activate destination solar system {dest_sys_id}: {wake_err}"
+            );
+            BridgeRpcError::with_client_error(
+                "SystemTransitionFailed",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            )
+        })
+}
+
 enum GateInspect {
     Expired { ship_id: i64, abyss_sys: u32, now: u64 },
     Err(BridgeRpcError),
@@ -491,6 +513,13 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         });
     };
     let taken_cs = taken.combat_state.clone();
+    let origin_sys_handle = match wake_jump_destination_system(ctx, origin_sys).await {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = abyss_handle.restore_ball(taken).await;
+            return Err(e);
+        }
+    };
 
     let exit_pos = [
         origin_pos[0] + 1_000.0,
@@ -605,7 +634,6 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
 
     ctx.invalidate_ship_fitting(ship_id);
 
-    let origin_sys_handle = ctx.systems.get_or_spawn(origin_sys);
     for tid in despawned_trace_ids {
         origin_sys_handle.try_remove_ball(tid);
     }
@@ -843,6 +871,13 @@ pub(crate) async fn handle_void_space_player_jump(
         });
     };
     let taken_void_cs = taken.combat_state.clone();
+    let void_handle = match wake_jump_destination_system(ctx, VOID_SPACE_SYSTEM_ID).await {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = origin_handle.restore_ball(taken).await;
+            return Err(e);
+        }
+    };
 
     // Server-validated target ID (filament or gate) is used as effective_content_id;
     // client-supplied content_id is not trusted directly.
@@ -964,7 +999,6 @@ pub(crate) async fn handle_void_space_player_jump(
         now_unix,
     );
 
-    let void_handle = ctx.systems.get_or_spawn(VOID_SPACE_SYSTEM_ID);
     for exit_gid in [888_001_i64, 888_002_i64] {
         if void_handle.get_ball_snapshot(exit_gid).await.ok().flatten().is_none() {
             let _ = void_handle
@@ -1169,6 +1203,13 @@ pub(crate) async fn handle_void_space_end_gate_activation(
     let taken_exit_cs = taken.combat_state.clone();
 
     let origin_sys = vs.origin_solar_system_id;
+    let origin_handle = match wake_jump_destination_system(ctx, origin_sys).await {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = void_handle.restore_ball(taken).await;
+            return Err(e);
+        }
+    };
     let exit_pos = [
         vs.origin_position[0] + 1_000.0,
         vs.origin_position[1] + 1_000.0,
@@ -1217,7 +1258,6 @@ pub(crate) async fn handle_void_space_end_gate_activation(
     });
     crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
 
-    let origin_handle = ctx.systems.get_or_spawn(origin_sys);
     let ship_type = ctx
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
