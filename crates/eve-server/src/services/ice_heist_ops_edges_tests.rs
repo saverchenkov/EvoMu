@@ -270,7 +270,7 @@ async fn step_ice_heist_system_stays_cold_below_corruption_stage_3_and_when_syst
         assert!(rt.ice_heist_instances.is_empty());
     });
 
-    // Even with a persisted active Ice Heist instance, cold system stepping does not spawn an actor.
+    // Escorting a tanker on an active instance when the system is cold updates DB state without spawning an actor.
     with_insurgency_runtime(&ctx, |rt| {
         rt.ice_heist_instances.push(eve_db::PersistedIceHeistRecord {
             instance_id: 99_542,
@@ -280,6 +280,12 @@ async fn step_ice_heist_system_stays_cold_below_corruption_stage_3_and_when_syst
             completed: false,
         });
     });
-    step_ice_heist_system(&ctx, cold_sys).await;
+    let escort_rep = escort_ice_heist_tanker(&ctx, 90_000_001, 99_542, true)
+        .await
+        .expect("escort_ice_heist_tanker must succeed when cold");
+    assert_eq!(
+        escort_rep.dict_get("pirateTankersSaved").and_then(|v| v.as_i64()),
+        Some(1)
+    );
     assert!(ctx.systems.get_handle(cold_sys).is_none());
 }

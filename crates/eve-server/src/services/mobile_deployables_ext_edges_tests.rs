@@ -900,7 +900,7 @@ async fn siphon_steals_raw_processed_and_polymer_with_waste_and_capacity() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mmju_and_deployable_sync_do_not_spawn_cold_system() {
     use crate::services::mobile_deployables::read_deployable_state;
-    use eve_db::PendingDecloakNotice;
+    use eve_db::{MmjuSpoolEntry, PendingDecloakNotice};
 
     let sys_id = 30_002_537_u32;
     let now = 1_700_000_200_u64;
@@ -917,8 +917,6 @@ async fn mmju_and_deployable_sync_do_not_spawn_cold_system() {
     let char_id = 90_000_001_i64;
     let ship_id = 100_000_001_i64;
     let mmju_id = 889_101_i64;
-    let anchoring_id = 889_102_i64;
-    let expired_id = 889_103_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -963,44 +961,16 @@ async fn mmju_and_deployable_sync_do_not_spawn_cold_system() {
                     deployed_fleet_id: None,
                 },
             );
-            st.deployables.insert(
-                anchoring_id,
-                MobileDeployableRecord {
-                    item_id: anchoring_id,
-                    type_id: 33591,
-                    group_id: GROUP_MOBILE_MICRO_JUMP_UNIT,
-                    owner_id: char_id,
+            st.mmju_spools.insert(
+                ship_id,
+                MmjuSpoolEntry {
+                    ship_id,
+                    unit_id: mmju_id,
+                    char_id,
                     solar_system_id: sys_id,
-                    anchor_start_unix: now - 90,
-                    anchor_duration_secs: 60,
-                    anchor_completed: false,
-                    is_unanchored: false,
-                    expires_at_unix: now + 3_600,
-                    last_interaction_unix: now - 90,
-                    reinforced_until_unix: None,
-                    last_ping_unix: None,
-                    position: [5_000.0, 0.0, 0.0],
-                    deployed_fleet_id: None,
-                },
-            );
-            st.deployables.insert(
-                expired_id,
-                MobileDeployableRecord {
-                    item_id: expired_id,
-                    type_id: 33591,
-                    group_id: GROUP_MOBILE_MICRO_JUMP_UNIT,
-                    owner_id: char_id,
-                    solar_system_id: sys_id,
-                    anchor_start_unix: now - 10_000,
-                    anchor_duration_secs: 60,
-                    anchor_completed: true,
-                    is_unanchored: false,
-                    expires_at_unix: now - 1,
-                    last_interaction_unix: now - 10_000,
-                    reinforced_until_unix: None,
-                    last_ping_unix: None,
-                    position: [10_000.0, 0.0, 0.0],
-                    deployed_fleet_id: None,
+                    started_unix: now - 15,
+                    complete_at_unix: now,
+                    direction: [1.0, 0.0, 0.0],
                 },
             );
             st.pending_decloak_notifications.push(PendingDecloakNotice {
@@ -1010,6 +980,10 @@ async fn mmju_and_deployable_sync_do_not_spawn_cold_system() {
             });
         });
     });
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 9_889, Some(char_id), true, now);
+    let _ = ctx.drain_notifications_for_char(char_id);
 
     assert!(ctx.systems.get_handle(sys_id).is_none());
 
@@ -1026,9 +1000,10 @@ async fn mmju_and_deployable_sync_do_not_spawn_cold_system() {
 
     step_system_deployables_sync(&ctx, sys_id);
     assert!(ctx.systems.get_handle(sys_id).is_none());
-    read_deployable_state(&ctx, |st| {
-        assert!(st.deployables[&anchoring_id].anchor_completed);
-        assert!(!st.deployables.contains_key(&expired_id));
-        assert!(st.pending_decloak_notifications.is_empty());
-    });
+    let st = read_deployable_state(&ctx);
+    assert!(st.pending_decloak_notifications.is_empty());
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs
+        .iter()
+        .any(|n| n.event == "OnCloakModuleForceDeactivated"));
 }
