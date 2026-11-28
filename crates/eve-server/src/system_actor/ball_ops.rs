@@ -4,9 +4,9 @@
 //! Async callers use [`call_actor_result_with_deadline`] with [`ACTOR_CMD_TIMEOUT`] so stopped,
 //! dropped, or backpressured solar system actors return explicit errors rather than silently
 //! falling back to external `ballpark` locks. Synchronous callers run the same mailbox commands
-//! via `tokio::task::block_in_place` on multi-thread runtimes (or transient `current_thread`
-//! runtimes outside Tokio), bridging legacy `#[tokio::test(flavor = "current_thread")]` tests
-//! directly through the shared actor handler only while the actor handle remains open.
+//! via `tokio::task::block_in_place` on multi-thread runtimes, via the system's `CtActorDriver`
+//! runtime on `current_thread` runtimes, or via transient `current_thread` runtimes outside
+//! Tokio, keeping direct lock execution scoped strictly to reentrant `actor_flush_thread` callbacks.
 
 #![forbid(unsafe_code)]
 
@@ -253,15 +253,66 @@ fn run_direct_ball_op_on_current_thread_inner<R>(
     out
 }
 
+fn await_actor_cmd_via_runtime<T: Send + 'static>(
+    handle: &SystemHandle,
+    target_rt: &tokio::runtime::Handle,
+    label: &str,
+    timeout_dur: Duration,
+    cmd: SystemCommand,
+    reply_rx: oneshot::Receiver<T>,
+    use_block_in_place: bool,
+) -> Result<T, String> {
+    let cmd_sender = handle.cmd_sender().clone();
+    let sys_id = handle.solar_system_id;
+    let label_owned = label.to_owned();
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Result<T, String>>(1);
+    target_rt.spawn(async move {
+        let res = await_actor_cmd_with_deadline(
+            &cmd_sender,
+            sys_id,
+            &label_owned,
+            timeout_dur,
+            cmd,
+            reply_rx,
+        )
+        .await;
+        let _ = done_tx.send(res);
+    });
+    let wait_dur = timeout_dur
+        .saturating_mul(2)
+        .saturating_add(Duration::from_secs(1));
+    let recv_res = if use_block_in_place {
+        tokio::task::block_in_place(|| done_rx.recv_timeout(wait_dur))
+    } else {
+        done_rx.recv_timeout(wait_dur)
+    };
+    match recv_res {
+        Ok(res) => res,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "system {sys_id} actor timed out awaiting {label} sync reply after {}ms",
+            wait_dur.as_millis()
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            if handle.cmd_sender().is_closed() {
+                Err(format!("system {sys_id} actor closed"))
+            } else {
+                Err(format!(
+                    "system {sys_id} actor task dropped {label} sync reply channel"
+                ))
+            }
+        }
+    }
+}
+
 fn dispatch_actor_sync_reply_with_deadline_inner<P, T: Send + 'static>(
     handle: &SystemHandle,
     label: &str,
     timeout_dur: Duration,
-    run_post_flush: bool,
-    already_finalized_and_published: bool,
+    _run_post_flush: bool,
+    _already_finalized_and_published: bool,
     payload: P,
     make_cmd: impl FnOnce(P, oneshot::Sender<T>) -> SystemCommand,
-    direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
+    _direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
 ) -> Result<T, String> {
     if handle.is_on_actor_flush_thread() {
         return Err(format!("refusing sync actor call {label} on sys {} flush thread", handle.solar_system_id));
@@ -272,39 +323,41 @@ fn dispatch_actor_sync_reply_with_deadline_inner<P, T: Send + 'static>(
     match tokio::runtime::Handle::try_current() {
         Ok(rt_handle) => match rt_handle.runtime_flavor() {
             tokio::runtime::RuntimeFlavor::CurrentThread => {
-                // Legacy `#[tokio::test(flavor = "current_thread")]` caller running on the
-                // actor's single thread cannot block synchronously on the mailbox; run the exact
-                // same shared actor handler directly under the actor locks + publish view.
-                Ok(run_direct_ball_op_on_current_thread_inner(
+                let Some(actor_rt) = handle
+                    .actor_rt_handle
+                    .as_ref()
+                    .filter(|r| r.id() != rt_handle.id())
+                else {
+                    return Err(format!(
+                        "system {} actor runtime unavailable for {label} on current_thread",
+                        handle.solar_system_id
+                    ));
+                };
+                let (reply_tx, reply_rx) = oneshot::channel::<T>();
+                let cmd = make_cmd(payload, reply_tx);
+                await_actor_cmd_via_runtime(
                     handle,
-                    run_post_flush,
-                    already_finalized_and_published,
-                    |ctx| direct_fn(ctx, payload),
-                ))
+                    actor_rt,
+                    label,
+                    timeout_dur,
+                    cmd,
+                    reply_rx,
+                    false,
+                )
             }
             _ => {
                 // Isolate sync waiting from Tokio's thread-local `CURRENT_PARKER` (no nested `block_on`).
                 let (reply_tx, reply_rx) = oneshot::channel::<T>();
                 let cmd = make_cmd(payload, reply_tx);
-                let cmd_sender = handle.cmd_sender().clone();
-                let sys_id = handle.solar_system_id;
-                let label_owned = label.to_owned();
-                let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Result<T, String>>(1);
-                rt_handle.spawn(async move {
-                    let res = await_actor_cmd_with_deadline(&cmd_sender, sys_id, &label_owned, timeout_dur, cmd, reply_rx).await;
-                    let _ = done_tx.send(res);
-                });
-                let wait_dur = timeout_dur.saturating_mul(2).saturating_add(Duration::from_secs(1));
-                match tokio::task::block_in_place(|| done_rx.recv_timeout(wait_dur)) {
-                    Ok(res) => res,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
-                        "system {sys_id} actor timed out awaiting {label} sync reply after {}ms",
-                        wait_dur.as_millis()
-                    )),
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        Err(format!("system {sys_id} actor task dropped {label} sync reply channel"))
-                    }
-                }
+                await_actor_cmd_via_runtime(
+                    handle,
+                    &rt_handle,
+                    label,
+                    timeout_dur,
+                    cmd,
+                    reply_rx,
+                    true,
+                )
             }
         },
         Err(_) => {
@@ -2188,6 +2241,7 @@ mod tests {
             post_unlock_tx: mpsc::unbounded_channel().0,
             worker_cb_tx: mpsc::unbounded_channel().0,
             ct_driver: None,
+            actor_rt_handle: None,
             post_unlock_worker_thread_id: Arc::new(std::sync::OnceLock::new()),
             post_unlock_in_flight: Arc::new(AtomicUsize::new(0)),
             completed_post_unlock_seq: Arc::new(AtomicU64::new(0)),
@@ -2381,7 +2435,8 @@ mod tests {
 
     #[tokio::test]
     async fn reconnected_ship_else_branches_clear_stale_active_warps() {
-        let (handle, _rx) = make_test_handle(8);
+        let reg = crate::system_actor::SystemRegistry::new();
+        let handle = reg.get_or_spawn(30_000_142);
         let live_ship_id: BallId = 910_000_001;
         let spawn_ship_id: BallId = 910_000_002;
         let mk_ball = |id: BallId| Ball {
@@ -2397,26 +2452,26 @@ mod tests {
             mode: MovementMode::Stop,
         };
 
-        {
-            let mut bp = handle.ballpark.write_untracked().unwrap();
-            bp.add_ball(mk_ball(live_ship_id));
-            bp.combat_states.insert(
-                live_ship_id,
+        handle
+            .spawn_ball_with_combat(
+                mk_ball(live_ship_id),
                 eve_destiny::CombatState {
                     is_emergency_warping: true,
                     ..Default::default()
                 },
-            );
-        }
-        {
-            let mut st = handle.actor_state.write().unwrap();
-            st.warp_state.track_player_or_fleet_warp(live_ship_id, 90_001);
-            st.warp_state.return_warps.insert(live_ship_id);
-            st.warp_state.pending_warp_finished.insert(live_ship_id);
-            st.warp_state.track_player_or_fleet_warp(spawn_ship_id, 90_002);
-            st.warp_state.return_warps.insert(spawn_ship_id);
-            st.warp_state.pending_warp_finished.insert(spawn_ship_id);
-        }
+            )
+            .await
+            .expect("spawn_ball_with_combat must succeed");
+        handle
+            .test_with_actor_state_mut_async(move |st| {
+                st.warp_state.track_player_or_fleet_warp(live_ship_id, 90_001);
+                st.warp_state.return_warps.insert(live_ship_id);
+                st.warp_state.pending_warp_finished.insert(live_ship_id);
+                st.warp_state.track_player_or_fleet_warp(spawn_ship_id, 90_002);
+                st.warp_state.return_warps.insert(spawn_ship_id);
+                st.warp_state.pending_warp_finished.insert(spawn_ship_id);
+            })
+            .await;
 
         let pos = handle
             .reconnect_live_ship_in_space_sync(ReconnectLiveShipRequest {
@@ -2500,5 +2555,120 @@ mod tests {
 
         drop(handle);
         actor_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn current_thread_dispatch_actor_sync_routes_via_ct_driver_mailbox_never_direct_fn() {
+        let reg = Arc::new(crate::system_actor::SystemRegistry::new());
+        let live_handle = reg.get_or_spawn(30_000_142);
+        assert!(
+            live_handle.actor_rt_handle.is_some(),
+            "CurrentThread system handle must retain actor_rt_handle"
+        );
+        let stepped = live_handle
+            .step_manual(1.0)
+            .await
+            .expect("step_manual on live CurrentThread actor");
+
+        let tick = dispatch_actor_sync_reply_with_deadline(
+            &live_handle,
+            "ProbeCurrentThreadMailbox",
+            Duration::from_secs(2),
+            (),
+            |(), reply| SystemCommand::CurrentTick { reply },
+            |_, _| panic!("CurrentThread must route via CtActorDriver mailbox, not direct_fn"),
+        )
+        .expect("CurrentThread dispatch_actor_sync_reply_with_deadline must succeed via CtActorDriver");
+        assert_eq!(tick, stepped.tick);
+
+        let (dummy_handle, _dummy_rx) = make_test_handle(4);
+        let unavail_err = dispatch_actor_sync_reply_with_deadline(
+            &dummy_handle,
+            "ProbeCurrentThreadUnavailable",
+            Duration::from_secs(2),
+            (),
+            |(), reply| SystemCommand::CurrentTick { reply },
+            |_, _| panic!("dummy handle without actor_rt_handle must not invoke direct_fn"),
+        )
+        .expect_err("dummy unpolled handle with actor_rt_handle=None must fail closed");
+        assert!(
+            unavail_err.contains("actor runtime unavailable"),
+            "unexpected unavailable runtime error: {unavail_err}"
+        );
+
+        assert!(reg.stop_system(30_000_142).await);
+        let closed_err = dispatch_actor_sync_reply_with_deadline(
+            &live_handle,
+            "ProbeCurrentThreadClosed",
+            Duration::from_secs(2),
+            (),
+            |(), reply| SystemCommand::CurrentTick { reply },
+            |_, _| panic!("closed CurrentThread handle must not invoke direct_fn"),
+        )
+        .expect_err("closed live handle must fail with closed error");
+        assert!(
+            closed_err.contains("closed"),
+            "unexpected closed handle error: {closed_err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn current_thread_dispatch_actor_sync_try_queued_routes_via_ct_driver_mailbox_never_direct_fn() {
+        use crate::system_actor::handle_cmds::{
+            dispatch_actor_sync_try_queued_with_timeout, TryQueuedReply,
+        };
+
+        let reg = Arc::new(crate::system_actor::SystemRegistry::new());
+        let live_handle = reg.get_or_spawn(30_000_142);
+        let stepped = live_handle
+            .step_manual(1.0)
+            .await
+            .expect("step_manual on live CurrentThread actor");
+
+        match dispatch_actor_sync_try_queued_with_timeout(
+            &live_handle,
+            Duration::from_secs(2),
+            (),
+            |(), reply| SystemCommand::CurrentTick { reply },
+            |_, _| panic!("CurrentThread try_queued must route via CtActorDriver mailbox, not direct_fn"),
+        ) {
+            TryQueuedReply::Ready(tick) => assert_eq!(tick, stepped.tick),
+            TryQueuedReply::QueuedTimedOut => {
+                panic!("live CurrentThread try_queued unexpectedly timed out")
+            }
+            TryQueuedReply::FullOrClosed => {
+                panic!("live CurrentThread try_queued unexpectedly returned FullOrClosed")
+            }
+        }
+
+        let (dummy_handle, _dummy_rx) = make_test_handle(4);
+        assert!(
+            matches!(
+                dispatch_actor_sync_try_queued_with_timeout(
+                    &dummy_handle,
+                    Duration::from_secs(2),
+                    (),
+                    |(), reply| SystemCommand::CurrentTick { reply },
+                    |_, _| panic!("dummy handle without actor_rt_handle must not invoke direct_fn"),
+                ),
+                TryQueuedReply::FullOrClosed
+            ),
+            "dummy handle with actor_rt_handle=None must fail closed as FullOrClosed"
+        );
+
+        assert!(reg.stop_system(30_000_142).await);
+        assert!(
+            matches!(
+                dispatch_actor_sync_try_queued_with_timeout(
+                    &live_handle,
+                    Duration::from_secs(2),
+                    (),
+                    |(), reply| SystemCommand::CurrentTick { reply },
+                    |_, _| panic!("closed CurrentThread handle must not invoke direct_fn"),
+                ),
+                TryQueuedReply::FullOrClosed
+            ),
+            "closed live handle must fail closed as FullOrClosed"
+        );
     }
 }

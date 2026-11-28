@@ -2256,6 +2256,7 @@ pub struct SystemHandle {
         tokio::sync::mpsc::UnboundedSender<super::post_unlock::PostUnlockActorCallback>,
     #[allow(dead_code)] // Retains CurrentThread actor driver runtime while handle lives.
     pub(in crate::system_actor) ct_driver: Option<Arc<super::CtActorDriver>>,
+    pub(in crate::system_actor) actor_rt_handle: Option<tokio::runtime::Handle>,
     pub(in crate::system_actor) post_unlock_worker_thread_id: Arc<std::sync::OnceLock<std::thread::ThreadId>>,
     pub(in crate::system_actor) post_unlock_in_flight: Arc<std::sync::atomic::AtomicUsize>,
     pub(in crate::system_actor) completed_post_unlock_seq: Arc<std::sync::atomic::AtomicU64>,
