@@ -3714,6 +3714,11 @@ async fn stale_gen1_actor_exit_does_not_steal_gen2_transitions_or_tidi_mode() {
         .wake_for_session_arrival_async(jita, SessionArrivalWakeReason::Undock)
         .await
         .expect("gen 3 live");
+    reg.cluster_nodes
+        .write()
+        .unwrap()
+        .manual_tidi_overrides
+        .insert(jita, 0.25);
     let _ = h3.set_tidi_factor_raw(0.25);
     let (g3_entered_tx, g3_entered_rx) = std::sync::mpsc::channel();
     let (g3_release_tx, g3_release_rx) = std::sync::mpsc::channel();
