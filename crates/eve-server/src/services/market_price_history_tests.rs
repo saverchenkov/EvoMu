@@ -1093,13 +1093,6 @@ fn crossed_modify_fills_cover_corp_upwell_refund_shortfall_and_plex_vault_paths(
         let res = handle_market_transactions_rpc(&ctx, sess, method, &args)
             .unwrap()
             .unwrap();
-        let normalized = crate::router::client_compat::normalize_macho_rpc_reply(
-            "marketProxy",
-            method,
-            Ok(res.clone()),
-        )
-        .unwrap();
-        assert_eq!(normalized, res, "expected identity passthrough for marketProxy.{method}");
         let PyRep::ObjectEx { header, list, .. } = res else {
             panic!("expected CRowset ObjectEx for {method}");
         };

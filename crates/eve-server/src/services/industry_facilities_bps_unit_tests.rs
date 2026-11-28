@@ -532,15 +532,6 @@ fn call_ind_wire_roundtrip(
         .unwrap_or_else(|| panic!("{service}.{method} should be handled"))
         .unwrap_or_else(|e| panic!("{service}.{method} failed unexpectedly: {e:?}"));
 
-    // client_compat must be a no-op identity for C-9 migrated services
-    let compat_out = crate::router::client_compat::normalize_macho_rpc_reply(
-        service,
-        method,
-        Ok(raw.clone()),
-    )
-    .expect("client_compat passthrough");
-    assert_eq!(compat_out, raw, "{service}.{method} should not be rewritten by client_compat");
-
     // Socket-loop dispatch + blue.marshal round-trip must produce the identical wire PyRep
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

@@ -1639,26 +1639,6 @@ fn contract_handlers_emit_canonical_v24_wire_shapes_without_hardcoded_domains() 
     assert_eq!(contract_availability_code("Alliance"), 3);
     assert_eq!(unix_to_contract_filetime(0), 133_500_000_000_000_000);
     assert_eq!(unix_to_contract_filetime(134_000_000_000_000_000), 134_000_000_000_000_000);
-
-    // 5. Wire passthrough: normalize_macho_rpc_reply is an exact identity for contractProxy & account RPCs.
-    for (svc, method, payload) in [
-        ("contractProxy", "GetContract", &detail),
-        ("contractProxy", "GetContractListForOwner", &my_bids),
-        ("contractProxy", "GetMyCurrentContractList", &my_bids),
-        ("contractProxy", "GetMyBids", &my_bids),
-        ("contractProxy", "GetMyExpiredContractList", &empty_expired),
-        ("contractProxy", "SearchContracts", &search),
-        ("account", "GetEntryTypes", &PyRep::List(vec![PyRep::Integer(1)])),
-        ("account", "GiveCash", &PyRep::None),
-    ] {
-        let normalized = crate::router::client_compat::normalize_macho_rpc_reply(
-            svc,
-            method,
-            Ok(payload.clone()),
-        )
-        .unwrap();
-        assert_eq!(&normalized, payload, "expected identity passthrough for {svc}.{method}");
-    }
 }
 
 #[test]

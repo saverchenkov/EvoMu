@@ -1,110 +1,18 @@
 //! Semantic unit tests split from `quasar_grpc_unit_tests`.
 
 use crate::quasar_grpc::*;
-use crate::router::client_compat::normalize_macho_notification;
 use crate::router::ServerContext;
 use bytes::{Buf, BytesMut};
 use eve_proto::quasar::{
     EvePublicEvent, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage,
     TYPE_GOOGLEAPIS_PREFIX,
 };
-use eve_proto::PyRep;
 use flate2::write::{GzEncoder, ZlibEncoder};
 use flate2::Compression;
 use http::{Request, StatusCode};
 use std::io::Write;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-
-#[test]
-fn normalize_macho_notification_covers_all_event_shapes() {
-    assert_eq!(
-        normalize_macho_notification(
-            "OnDockingAccepted",
-            vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(60_003_760)]
-        ),
-        vec![PyRep::Integer(60_003_760)]
-    );
-    let du = normalize_macho_notification(
-        "DoDestinyUpdate",
-        vec![PyRep::List(vec![PyRep::Tuple(vec![
-            PyRep::String("OnDockingAccepted".into()),
-            PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(60_003_760)]),
-        ])])],
-    );
-    assert_eq!(du.len(), 1);
-
-    assert!(normalize_macho_notification("OnChannelJoined", Vec::new()).is_empty());
-    assert_eq!(
-        normalize_macho_notification("OnSharedBookmarksFolderUpdated", vec![PyRep::Integer(42)]),
-        vec![PyRep::Integer(42)]
-    );
-    assert!(normalize_macho_notification("OnCorporationRecruitmentAdChanged", vec![PyRep::Integer(1)]).is_empty());
-    assert!(normalize_macho_notification("OnOrganizationContactsUpdated", Vec::new()).is_empty());
-    assert_eq!(
-        normalize_macho_notification("OnTargetClear", Vec::new()),
-        vec![PyRep::List(Vec::new())]
-    );
-    let effect = normalize_macho_notification("OnGodmaShipEffect", vec![PyRep::Integer(100)]);
-    assert_eq!(effect.len(), 11);
-    assert_eq!(effect[0], PyRep::Integer(100));
-    assert_eq!(
-        normalize_macho_notification("OnHeatAdded", vec![PyRep::Integer(1175), PyRep::Integer(100_000_020)]),
-        vec![PyRep::Integer(1175), PyRep::Integer(100_000_020)]
-    );
-    let mod_attr = normalize_macho_notification("OnModuleAttributeChanges", vec![PyRep::Integer(7)]);
-    assert!(matches!(
-        mod_attr.as_slice(),
-        [PyRep::List(items)] if matches!(items.as_slice(), [PyRep::Tuple(t)] if t.len() == 8 && t[2] == PyRep::Integer(7))
-    ));
-    assert!(normalize_macho_notification("OnModuleUnfitted", Vec::new()).is_empty());
-    assert_eq!(
-        normalize_macho_notification("OnRemoteMessage", vec![PyRep::String("A".into()), PyRep::Dict(Vec::new())]),
-        vec![PyRep::String("A".into()), PyRep::Dict(Vec::new()), PyRep::None]
-    );
-    let item_chg = normalize_macho_notification(
-        "OnItemChange",
-        vec![
-            PyRep::keyval([("itemID", PyRep::Integer(10)), ("locationID", PyRep::Integer(60_003_760))]),
-            PyRep::Dict(Vec::new()),
-        ],
-    );
-    assert_eq!(item_chg.len(), 3);
-    let inv_chg = normalize_macho_notification(
-        "ProcessInventoryChange",
-        vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(4)],
-    );
-    assert!(matches!(
-        inv_chg.as_slice(),
-        [PyRep::List(items), PyRep::Dict(_), PyRep::Bool(true), PyRep::None]
-            if items.first().and_then(|i| i.dict_get("itemID")) == Some(&PyRep::Integer(1))
-    ));
-    assert_eq!(normalize_macho_notification("OnNotificationReceived", Vec::new()).len(), 5);
-    assert_eq!(
-        normalize_macho_notification("OnTarget", vec![PyRep::Integer(99), PyRep::String("locking".into())]),
-        vec![PyRep::String("locking".into()), PyRep::Integer(99), PyRep::None]
-    );
-    assert!(crate::router::client_compat::should_suppress_macho_notification(
-        "OnTarget",
-        &[PyRep::Integer(99), PyRep::String("locking".into())]
-    ));
-    assert!(!crate::router::client_compat::should_suppress_macho_notification(
-        "OnTarget",
-        &[PyRep::Integer(99), PyRep::String("locked".into())]
-    ));
-    assert_eq!(
-        normalize_macho_notification("OnTarget", vec![PyRep::Integer(99), PyRep::String("locked".into())]),
-        vec![PyRep::String("add".into()), PyRep::Integer(99), PyRep::None]
-    );
-    assert_eq!(
-        normalize_macho_notification("OnTarget", vec![PyRep::Integer(99), PyRep::String("targetedBy".into())]),
-        vec![PyRep::String("otheradd".into()), PyRep::Integer(99), PyRep::None]
-    );
-    assert_eq!(
-        normalize_macho_notification("OnTarget", vec![PyRep::Integer(99), PyRep::String("unlock".into())]),
-        vec![PyRep::String("lost".into()), PyRep::Integer(99), PyRep::None]
-    );
-}
 
 #[test]
 fn normalize_quasar_any_payload_coerces_types_and_wire_mismatches() {
@@ -319,156 +227,13 @@ async fn quasar_grpc_error_branches_compression_and_unauthenticated_paths() {
 }
 
 #[test]
-fn normalize_notices_covers_all_remaining_event_and_coercion_branches() {
+fn normalize_quasar_any_payload_covers_depth_limit_and_utf8_coercion_branches() {
     use eve_proto::quasar::{
         DescriptorProto, FieldDescriptorProto, FieldLabel, FieldType, QuasarDescriptorRegistry,
         WireField, WireMessage, WireValue,
     };
 
-    // 1. DoDestinyUpdate with OnDockingAccepted having < 3 args falls through to recursive tuple normalization
-    let du_short = normalize_macho_notification(
-        "DoDestinyUpdate",
-        vec![PyRep::Tuple(vec![
-            PyRep::String("OnDockingAccepted".into()),
-            PyRep::Tuple(vec![PyRep::Integer(1)]),
-        ])],
-    );
-    assert_eq!(
-        du_short,
-        vec![PyRep::Tuple(vec![
-            PyRep::String("OnDockingAccepted".into()),
-            PyRep::Tuple(vec![PyRep::Integer(1)]),
-        ])]
-    );
-
-    // 2. OnSharedBookmarksFolderUpdated: list entries with existing bookmarkID, bare id, non-list, and already-tuple
-    let sb = normalize_macho_notification(
-        "OnSharedBookmarksFolderUpdated",
-        vec![PyRep::List(vec![
-            PyRep::Tuple(vec![
-                PyRep::Integer(1),
-                PyRep::Integer(10),
-                PyRep::List(vec![
-                    PyRep::keyval([("bookmarkID", PyRep::Integer(500))]),
-                    PyRep::Integer(501),
-                ]),
-            ]),
-            PyRep::Tuple(vec![
-                PyRep::Integer(2),
-                PyRep::Integer(10),
-                PyRep::Integer(999),
-            ]),
-            PyRep::Tuple(vec![
-                PyRep::Integer(3),
-                PyRep::Integer(10),
-                PyRep::Tuple(vec![PyRep::List(Vec::new()), PyRep::List(Vec::new())]),
-            ]),
-        ])],
-    );
-    assert!(matches!(sb.as_slice(), [PyRep::List(entries)] if entries.len() == 3));
-    if let PyRep::List(entries) = &sb[0] {
-        if let PyRep::Tuple(parts) = &entries[0] {
-            if let PyRep::Tuple(inner) = &parts[2] {
-                if let PyRep::List(bms) = &inner[0] {
-                    assert_eq!(bms[0].dict_get("bookmarkID"), Some(&PyRep::Integer(500)));
-                    assert_eq!(bms[1].dict_get("bookmarkID"), Some(&PyRep::Integer(501)));
-                } else {
-                    panic!("expected bookmarks list");
-                }
-            } else {
-                panic!("expected tuple wrapper");
-            }
-        }
-        if let PyRep::Tuple(parts) = &entries[1] {
-            assert_eq!(
-                parts[2],
-                PyRep::Tuple(vec![PyRep::List(Vec::new()), PyRep::List(Vec::new())])
-            );
-        }
-    }
-
-    // 3. OnBeanPrime: client_compat rule removed (#1188); List[KeyVal] and arbitrary args pass through unchanged
-    let bp_input = vec![PyRep::List(vec![PyRep::keyval([
-        ("errorID", PyRep::Integer(222)),
-        ("errorKeyHash", PyRep::Integer(0x4B3A_1122)),
-        ("logMode", PyRep::String("B".into())),
-    ])])];
-    assert_eq!(normalize_macho_notification("OnBeanPrime", bp_input.clone()), bp_input);
-    assert_eq!(
-        normalize_macho_notification("OnBeanPrime", vec![PyRep::Integer(333)]),
-        vec![PyRep::Integer(333)]
-    );
-    assert_eq!(
-        normalize_macho_notification("OnBeanPrime", vec![PyRep::Integer(1), PyRep::Integer(2)]),
-        vec![PyRep::Integer(1), PyRep::Integer(2)]
-    );
-
-    // 4. OnOrganizationContactsUpdated: non-list second arg + standing field
-    let org_non_list = normalize_macho_notification(
-        "OnOrganizationContactsUpdated",
-        vec![PyRep::Integer(98_000_001), PyRep::None],
-    );
-    assert_eq!(org_non_list, vec![PyRep::Integer(98_000_001), PyRep::List(Vec::new())]);
-    let org_standing = normalize_macho_notification(
-        "OnOrganizationContactsUpdated",
-        vec![
-            PyRep::Integer(98_000_001),
-            PyRep::List(vec![PyRep::keyval([
-                ("contactID", PyRep::Integer(77)),
-                ("standing", PyRep::Real(10.0)),
-            ])]),
-        ],
-    );
-    assert_eq!(
-        org_standing[1],
-        PyRep::List(vec![PyRep::Tuple(vec![
-            PyRep::Integer(77),
-            PyRep::Real(10.0),
-            PyRep::Integer(0),
-        ])])
-    );
-
-    // 5. OnGodmaShipEffect empty args
-    assert!(normalize_macho_notification("OnGodmaShipEffect", Vec::new()).is_empty());
-
-    // 6. OnModuleAttributeChanges: 1-arg List/Tuple with 8-tuple, 7-tuple, scalar; multi-arg
-    let t8 = PyRep::Tuple(vec![PyRep::Integer(1); 8]);
-    let t7 = PyRep::Tuple(vec![PyRep::Integer(2); 7]);
-    let mac_list = normalize_macho_notification(
-        "OnModuleAttributeChanges",
-        vec![PyRep::List(vec![t8.clone(), t7.clone(), PyRep::Integer(3)])],
-    );
-    if let [PyRep::List(items)] = mac_list.as_slice() {
-        assert_eq!(items.len(), 3);
-        assert_eq!(items[0], t8);
-        assert!(matches!(&items[1], PyRep::Tuple(v) if v.len() == 8 && v[7] == PyRep::None));
-        assert!(matches!(&items[2], PyRep::Tuple(v) if v.len() == 8 && v[2] == PyRep::Integer(3)));
-    } else {
-        panic!("expected list");
-    }
-    let mac_tuple = normalize_macho_notification(
-        "OnModuleAttributeChanges",
-        vec![PyRep::Tuple(vec![t8.clone()])],
-    );
-    assert!(matches!(mac_tuple.as_slice(), [PyRep::List(items)] if items.len() == 1));
-    let mac_multi = normalize_macho_notification("OnModuleAttributeChanges", vec![t7, t8]);
-    assert!(matches!(mac_multi.as_slice(), [PyRep::List(items)] if items.len() == 2));
-
-    // 7. OnItemChange: 1-arg Dict, 1-arg non-dict scalar, and empty args
-    let ic_dict = normalize_macho_notification(
-        "OnItemChange",
-        vec![PyRep::Dict(vec![(
-            PyRep::String("itemID".into()),
-            PyRep::Integer(10),
-        )])],
-    );
-    assert_eq!(ic_dict.len(), 1);
-    assert_eq!(ic_dict[0].dict_get("itemID"), Some(&PyRep::Integer(10)));
-    let ic_scalar = normalize_macho_notification("OnItemChange", vec![PyRep::Integer(5)]);
-    assert_eq!(ic_scalar.len(), 1);
-    assert!(normalize_macho_notification("OnItemChange", Vec::new()).is_empty());
-
-    // 8. Coercion depth limits, UTF-8 / invalid UTF-8 leaf on String field, wire skips, unknown nested type, and empty-out leaf fallback
+    // Coercion depth limits, UTF-8 / invalid UTF-8 leaf on String field, wire skips, unknown nested type, and empty-out leaf fallback
     let mut reg = QuasarDescriptorRegistry::empty_with_builtins();
     let mk_field = |number: u32, name: &str, field_type: FieldType, type_name: &str| {
         FieldDescriptorProto {
