@@ -720,20 +720,29 @@ async fn staged_dispatch_tx_effects_dedup_and_legacy_same_epoch_ordering() {
         vec![("cash".to_string(), pilot_id, 55_000.0, "charid")]
     );
 
-    // Empty-args OnAccountChange marker effect also suppresses duplicate commit projection.
+    // Explicit OnAccountChange TxNotificationEffect also suppresses duplicate commit projection.
+    let explicit_args = vec![
+        PyRep::String("cash".into()),
+        PyRep::Integer(pilot_id),
+        PyRep::Real(1_000.0),
+    ];
     ctx.db
         .tx("test_empty_marker_effect", |wtx| -> Result<(), String> {
             if let Some(ch) = wtx.snap.characters.get_mut(&pilot_id) {
                 ch.balance = eve_db::IskCents::from_isk(56_000);
             }
-            wtx.effects
-                .notify_character(pilot_id, "OnAccountChange", "charid", Vec::new());
+            wtx.effects.notify_character(
+                pilot_id,
+                "OnAccountChange",
+                "charid",
+                explicit_args.clone(),
+            );
             Ok(())
         })
         .expect("marker tx");
     let marker_notifs = ctx.drain_notifications_for_char(pilot_id);
     assert_eq!(marker_notifs.len(), 1);
-    assert!(marker_notifs[0].args.is_empty());
+    assert_eq!(marker_notifs[0].args, explicit_args);
 
     // 2. Staged dispatch scope holds commit OnAccountChange until flushed, and drops on un-flushed abort.
     let mut rx = ctx.notify_tx.subscribe();

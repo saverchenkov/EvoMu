@@ -847,8 +847,17 @@ fn sample_session_change_dict() -> PyRep {
         "squadid",
         "warfactionid",
         "corprole",
+        "rolesAtAll",
+        "rolesAtHQ",
+        "rolesAtBase",
+        "rolesAtOther",
         "role",
         "hqid",
+        "hqID",
+        "baseID",
+        "cloneStationID",
+        "maxSessionTime",
+        "userType",
         "corpAccountKey",
         "raceID",
         "bloodlineID",
@@ -871,6 +880,24 @@ fn sample_session_change_dict() -> PyRep {
         entries.push((
             PyRep::String(key.into()),
             PyRep::Tuple(vec![PyRep::None, PyRep::None]),
+        ));
+    }
+    for key in ["languageID", "address"] {
+        entries.push((
+            PyRep::String(key.into()),
+            PyRep::Tuple(vec![PyRep::None, PyRep::ascii_bytes("EN")]),
+        ));
+        entries.push((
+            PyRep::String(key.into()),
+            PyRep::Tuple(vec![PyRep::ascii_bytes("EN"), PyRep::ascii_bytes("DE")]),
+        ));
+        entries.push((
+            PyRep::String(key.into()),
+            PyRep::Tuple(vec![PyRep::None, PyRep::String("EN".into())]),
+        ));
+        entries.push((
+            PyRep::String(key.into()),
+            PyRep::Tuple(vec![PyRep::String("EN".into()), PyRep::String("DE".into())]),
         ));
     }
     entries.push((
@@ -1409,9 +1436,14 @@ define_notifications! {
     },
     OnCloakModuleForceDeactivated => "OnCloakModuleForceDeactivated" ("charid") {
         fields: { notify_msg: String, notify_args: PyRep },
+        // `services/mobile_deployables_ext.rs:1412-1418` passes `shipID`/`moduleID` formatting kwargs.
         samples: || vec![vec![
             PyRep::String("CantCloakCloseToEntity".into()),
-            PyRep::Dict(vec![(PyRep::String("distance".into()), PyRep::Real(1500.0))]),
+            PyRep::Dict(vec![
+                (PyRep::String("distance".into()), PyRep::Real(1500.0)),
+                (PyRep::String("shipID".into()), PyRep::Integer(100_000_010)),
+                (PyRep::String("moduleID".into()), PyRep::Integer(100_000_020)),
+            ]),
         ]],
     },
     OnClusterShutdownCancelled => "OnClusterShutdownCancelled" ("clientID") {
@@ -2276,7 +2308,11 @@ define_notifications! {
     },
     OnPlexWithdrawFailed => "OnPlexWithdrawFailed" ("charid") {
         fields: { error_key: String, reference: PyRep },
-        samples: || vec![vec![PyRep::String("InsufficientFunds".into()), PyRep::Integer(1)]],
+        // `vgs/common/listeners.pyj` compares `reference` (`Integer` or `String`).
+        samples: || vec![
+            vec![PyRep::String("InsufficientFunds".into()), PyRep::Integer(1)],
+            vec![PyRep::String("VaultLocked".into()), PyRep::String("ref-2".into())],
+        ],
     },
     OnPodDeath => "OnPodDeath" ("charid") {
         samples: || vec![vec![]],
@@ -3304,14 +3340,39 @@ define_notifications! {
     },
     OnCorporationMemberChanged => "OnCorporationMemberChanged" ("corpid") {
         fields: { corporation_id: i64, member_id: i64, change: PyRep },
-        samples: || vec![vec![
-            PyRep::Integer(98_000_001),
-            PyRep::Integer(90_000_001),
-            PyRep::Dict(vec![(
-                PyRep::String("corporationID".into()),
-                PyRep::Tuple(vec![PyRep::Integer(98_000_001), PyRep::Integer(98_000_002)]),
-            )]),
-        ]],
+        // `services/corp_registry_ops.rs:822,1024,1050,1076`: integer keys + `description` `(String, String)`.
+        samples: || vec![
+            vec![
+                PyRep::Integer(98_000_001),
+                PyRep::Integer(90_000_001),
+                PyRep::Dict(vec![
+                    (
+                        PyRep::String("corporationID".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(98_000_001), PyRep::Integer(98_000_002)]),
+                    ),
+                    (
+                        PyRep::String("roles".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(1)]),
+                    ),
+                    (
+                        PyRep::String("accountKey".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(1000), PyRep::Integer(1001)]),
+                    ),
+                    (
+                        PyRep::String("titleMask".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(2)]),
+                    ),
+                ]),
+            ],
+            vec![
+                PyRep::Integer(98_000_001),
+                PyRep::Integer(90_000_001),
+                PyRep::Dict(vec![(
+                    PyRep::String("description".into()),
+                    PyRep::Tuple(vec![PyRep::String("old".into()), PyRep::String("new".into())]),
+                )]),
+            ],
+        ],
     },
     OnCorporationRecruitmentAdChanged => "OnCorporationRecruitmentAdChanged" ("corpid") {
         optional: { corp_id: Option<i64>, ad_id: Option<i64> },
@@ -3531,10 +3592,13 @@ define_notifications! {
     },
     OnInsurgencyCampaignUpdatedForLocation => "OnInsurgencyCampaignUpdatedForLocation" ("solarsystemid") {
         fields: { campaign_snapshot: PyRep },
-        samples: || vec![vec![PyRep::keyval([(
-            "coveredSolarsystemIDs",
-            PyRep::List(vec![PyRep::Integer(30_000_142)]),
-        )])]],
+        samples: || vec![vec![PyRep::keyval([
+            ("campaignID", PyRep::Integer(402)),
+            (
+                "coveredSolarsystemIDs",
+                PyRep::List(vec![PyRep::Integer(30_000_142)]),
+            ),
+        ])]],
     },
     OnInsurgencyStateChangedForFaction => "OnInsurgencyStateChangedForFaction" ("solarsystemid") {
         fields: { campaign_state: i64, pirate_faction_id: i64, origin_solar_system_id: i64 },
@@ -4128,16 +4192,29 @@ define_notifications! {
     },
     OnStructureHacked => "OnStructureHacked" ("corpid") {
         fields: { structure_id: i64, reinforce_timing: PyRep },
-        samples: || vec![vec![
-            PyRep::Integer(1_000_000_000_001),
-            PyRep::Tuple(vec![
-                PyRep::Integer(5),
-                PyRep::Integer(18),
-                PyRep::Integer(6),
-                PyRep::Integer(20),
-                PyRep::Integer(1_700_000_000),
-            ]),
-        ]],
+        // `services/structure_lifecycle.rs:2093-2096` emits `None` in slots `2..=4` when unscheduled.
+        samples: || vec![
+            vec![
+                PyRep::Integer(1_000_000_000_001),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(5),
+                    PyRep::Integer(18),
+                    PyRep::Integer(6),
+                    PyRep::Integer(20),
+                    PyRep::Integer(1_700_000_000),
+                ]),
+            ],
+            vec![
+                PyRep::Integer(1_000_000_000_001),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(5),
+                    PyRep::Integer(18),
+                    PyRep::None,
+                    PyRep::None,
+                    PyRep::None,
+                ]),
+            ],
+        ],
     },
     OnStructureStateChanged => "OnStructureStateChanged" ("solarsystemid") {
         fields: { solar_system_id: i64, structure_id: i64, state: String },
@@ -5063,20 +5140,47 @@ define_notifications! {
     },
     OnPVPFilamentsCharacterStatistics => "OnPVPFilamentsCharacterStatistics" ("charid") {
         fields: { info: PyRep },
-        samples: || vec![vec![PyRep::Dict(vec![(
-            PyRep::String("statistics".into()),
-            PyRep::Dict(vec![(PyRep::String("rank".into()), PyRep::Integer(1))]),
-        )])]],
+        // `services/pvp_filament_arena.rs:1118-1124` & `pvp_filament_mgr.rs:553-563`.
+        samples: || vec![vec![PyRep::Dict(vec![
+            (PyRep::String("eventID".into()), PyRep::Integer(1)),
+            (PyRep::String("event_id".into()), PyRep::Integer(1)),
+            (PyRep::String("matchTypeID".into()), PyRep::Integer(1)),
+            (PyRep::String("scheduleID".into()), PyRep::Integer(1)),
+            (
+                PyRep::String("statistics".into()),
+                PyRep::Dict(vec![
+                    (PyRep::String("character_id".into()), PyRep::Integer(90_000_001)),
+                    (PyRep::String("rank".into()), PyRep::Integer(1)),
+                    (PyRep::String("score".into()), PyRep::Integer(100)),
+                    (PyRep::String("wins".into()), PyRep::Integer(1)),
+                    (PyRep::String("losses".into()), PyRep::Integer(0)),
+                    (PyRep::String("draws".into()), PyRep::Integer(0)),
+                    (PyRep::String("kills".into()), PyRep::Integer(1)),
+                    (PyRep::String("damageDealt".into()), PyRep::Real(1200.0)),
+                ]),
+            ),
+        ])]],
     },
     OnPVPFilamentsLeaderboard => "OnPVPFilamentsLeaderboard" ("charid") {
         fields: { info: PyRep },
-        samples: || vec![vec![PyRep::Dict(vec![(
-            PyRep::String("entries".into()),
-            PyRep::List(vec![PyRep::Dict(vec![
-                (PyRep::String("character_id".into()), PyRep::Integer(90_000_001)),
-                (PyRep::String("rank".into()), PyRep::Integer(1)),
-            ])]),
-        )])]],
+        // `services/pvp_filament_arena.rs:1110-1116` & `pvp_filament_mgr.rs:518-525`.
+        samples: || vec![vec![PyRep::Dict(vec![
+            (PyRep::String("eventID".into()), PyRep::Integer(1)),
+            (PyRep::String("event_id".into()), PyRep::Integer(1)),
+            (PyRep::String("matchTypeID".into()), PyRep::Integer(1)),
+            (PyRep::String("scheduleID".into()), PyRep::Integer(1)),
+            (
+                PyRep::String("entries".into()),
+                PyRep::List(vec![PyRep::Dict(vec![
+                    (PyRep::String("character_id".into()), PyRep::Integer(90_000_001)),
+                    (PyRep::String("rank".into()), PyRep::Integer(1)),
+                    (PyRep::String("score".into()), PyRep::Integer(100)),
+                    (PyRep::String("wins".into()), PyRep::Integer(1)),
+                    (PyRep::String("losses".into()), PyRep::Integer(0)),
+                    (PyRep::String("draws".into()), PyRep::Integer(0)),
+                ])]),
+            ),
+        ])]],
     },
     OnServerSkillsChanged => "OnServerSkillsChanged" ("charid") {
         fields: { skill_infos: PyRep, event: PyRep, timestamp: WallFileTime },
@@ -6798,10 +6902,6 @@ define_notification_item!(OnNewCalendarEventOptAuto => "OnNewCalendarEvent" ("ch
 define_notification_item!(OnNotificationChange => "OnNotificationChange" ("charid") {
     fields: { char_id: i64 },
     samples: || vec![vec![PyRep::Integer(90_000_001)]],
-});
-define_notification_item!(OnInsurgencyCampaignUpdatedForLocationFallback => "OnInsurgencyCampaignUpdatedForLocation" ("solarsystemid") {
-    fields: { campaign_id: i64, state: i64 },
-    samples: || vec![vec![PyRep::Integer(1), PyRep::Integer(1)]],
 });
 define_notification_item!(DoBallsAddedShipRef => "DoBallsAdded" ("solarsystemid") {
     fields: { item_id: i64, type_id: i64 },

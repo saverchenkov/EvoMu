@@ -123,7 +123,7 @@ async fn machonet_cache_authentication_and_subscription_rpcs() {
             &[
                 PyRep::Integer(cid),
                 PyRep::String("OnNotificationReceived".into()),
-                PyRep::List(vec![PyRep::Integer(1)]),
+                PyRep::String("{}".into()),
             ],
             &kw,
         )
