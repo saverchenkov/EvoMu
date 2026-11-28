@@ -658,3 +658,131 @@ async fn tactical_modules_expired_entosis_replacement_unregisters_prior_module()
     assert!(!sys.active_module_ships.read().unwrap().contains(&ship_id));
     assert!(!sys.view().has_active_module(ship_id));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn wire_module_deactivation_hook_flushes_remote_assistance_on_current_thread_and_stop_all_ewar() {
+    let ctx = test_ctx_with_custom_types(|sde| {
+        sde.types.insert(
+            999_190,
+            custom_inv_type(sde, 999_190, 290, 7, "Remote Sensor Booster", &[(54, 40_000.0), (2044, 15_000.0), (309, 25.0), (566, 30.0)]),
+        );
+        sde.types.insert(
+            999_191,
+            custom_inv_type(sde, 999_191, 209, 7, "Remote Tracking Computer", &[(54, 40_000.0), (2044, 15_000.0), (351, 20.0)]),
+        );
+    });
+    ctx.wire_module_deactivation_hook();
+
+    let (char_id, logi_char_id) = (94_001_001_i64, 94_001_002_i64);
+    let sys_id = 30_002_506_u32;
+    let (ship_id, logi_ship_id) = (1_000_410_001_i64, 1_000_410_002_i64);
+    let (rsb_mod_id, rtc_mod_id) = (1_000_410_004_i64, 1_000_410_005_i64);
+
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id, 1);
+    ensure_char(&ctx, logi_char_id, 98_000_002, sys_id, logi_ship_id, 1);
+    insert_item(&ctx, ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, logi_ship_id, 587, logi_char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, rsb_mod_id, 999_190, logi_char_id, logi_ship_id, InventoryFlag::MedSlot0, 1, true);
+    insert_item(&ctx, rtc_mod_id, 999_191, logi_char_id, logi_ship_id, InventoryFlag::MedSlot1, 1, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(rsb_mod_id);
+        snap.module_active_states.insert(rtc_mod_id);
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    spawn_ship_ball_with_cs(&ctx, sys_id, ship_id, 587, char_id, DVec3::ZERO, 1_000.0).await;
+    spawn_ship_ball_with_cs(&ctx, sys_id, logi_ship_id, 587, logi_char_id, DVec3::new(5_000.0, 0.0, 0.0), 1_000.0).await;
+
+    let rsb_type = ctx.sde.types.get(&999_190).unwrap().clone();
+    let rsb_state = DogmaItemState::from_sde(logi_char_id, 999_190, &ctx.sde);
+    apply_projected_remote_assistance(&ctx, logi_char_id, logi_ship_id, rsb_mod_id, &rsb_type, &rsb_state, Some(ship_id), 10_000.0)
+        .expect("project RSB");
+
+    let rtc_type = ctx.sde.types.get(&999_191).unwrap().clone();
+    let rtc_state = DogmaItemState::from_sde(logi_char_id, 999_191, &ctx.sde);
+    apply_projected_remote_assistance(&ctx, logi_char_id, logi_ship_id, rtc_mod_id, &rtc_type, &rtc_state, Some(ship_id), 10_000.0)
+        .expect("project RTC");
+
+    assert_eq!(sys.view().remote_assistance_for(ship_id).map(|l| l.len()), Some(2));
+    let mut ship_attrs = HashMap::from([(76u16, 30_000.0), (79, 200.0), (208, 12.0)]);
+    apply_tactical_module_ship_attributes(&ctx, ship_id, &mut ship_attrs);
+    assert!(*ship_attrs.get(&76).unwrap() > 37_000.0);
+
+    let rev_before_deact = ctx.current_fit_rev(ship_id);
+    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+        ship_id: logi_ship_id,
+        owner_char_id: Some(logi_char_id),
+        module_id: rsb_mod_id,
+        module_type_id: 999_190,
+        duration_s: 10.0,
+        ..Default::default()
+    })
+    .await
+    .expect("register RSB cycle");
+
+    // Deactivating on a `current_thread` runtime freezes the actor task while `try_remove_module_cycle`
+    // waits for `post_unlock_worker`. Because `flush_module_ewar_in_state` pre-flushes
+    // `remote_assistance` inside the actor and `finish_flushed_module_ewar` pushes the target fit
+    // without blocking on the actor mailbox, this must complete without a 5s deadlock.
+    let t0 = std::time::Instant::now();
+    sys.try_remove_module_cycle(logi_ship_id, rsb_mod_id);
+    assert!(
+        t0.elapsed() < std::time::Duration::from_secs(2),
+        "deactivation hook must not deadlock against current_thread actor"
+    );
+    assert!(
+        ctx.current_fit_rev(ship_id) > rev_before_deact,
+        "finish_flushed_module_ewar must invalidate/bump target ship fit rev"
+    );
+    let remaining = sys
+        .view()
+        .remote_assistance_for(ship_id)
+        .expect("RTC entry still active");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].module_id, rtc_mod_id);
+
+    let mut ship_attrs_after = HashMap::from([(76u16, 30_000.0), (79, 200.0), (208, 12.0)]);
+    apply_tactical_module_ship_attributes(&ctx, ship_id, &mut ship_attrs_after);
+    assert!((*ship_attrs_after.get(&76).unwrap() - 30_000.0).abs() < 1e-6);
+
+    // `flush_ship_all_ewar_sync` must also discover target-only `remote_assistance` entries (P2).
+    let flushed_pairs = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(
+        &ctx,
+        char_id,
+        Some(sys_id),
+        ship_id,
+    );
+    assert_eq!(flushed_pairs, vec![(logi_ship_id, rtc_mod_id)]);
+    assert!(sys.view().remote_assistance_for(ship_id).is_none());
+    let mut mod_attrs = HashMap::from([(54u16, 10_000.0), (158, 5_000.0), (160, 0.05)]);
+    apply_projected_rtc_to_module_attrs(&ctx, ship_id, &mut mod_attrs);
+    assert!((*mod_attrs.get(&54).unwrap() - 10_000.0).abs() < 1e-6);
+
+    // `apply_projected_remote_assistance` must propagate actor failure and skip fit invalidation.
+    let rev_before_err = ctx.current_fit_rev(ship_id);
+    {
+        let lock: eve_db::lock_rank::RankedRwLock<(), { eve_db::lock_rank::RANK_NPC_SPAWNS }> =
+            eve_db::lock_rank::RankedRwLock::new(());
+        let _guard = lock.read().unwrap();
+        let err = apply_projected_remote_assistance(
+            &ctx,
+            logi_char_id,
+            logi_ship_id,
+            rsb_mod_id,
+            &rsb_type,
+            &rsb_state,
+            Some(ship_id),
+            10_000.0,
+        )
+        .unwrap_err();
+        assert!(matches!(err.client_error, Some(eve_proto::ClientError::Internal(_))));
+    }
+    assert_eq!(ctx.current_fit_rev(ship_id), rev_before_err);
+    assert!(sys.view().remote_assistance_for(ship_id).is_none());
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), ctx.systems.stop_system(sys_id))
+            .await
+            .expect("stop_system must drain cleanly")
+    );
+}

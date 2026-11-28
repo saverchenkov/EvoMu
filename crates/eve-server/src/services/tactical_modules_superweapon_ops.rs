@@ -269,8 +269,9 @@ struct InFlightSuperweaponGuard {
 
 impl InFlightSuperweaponGuard {
     async fn release(mut self) {
-        let _ = self.sys.release_in_flight_superweapon(self.ship_id).await;
-        self.released = true;
+        if self.sys.release_in_flight_superweapon(self.ship_id).await.is_ok() {
+            self.released = true;
+        }
     }
 }
 

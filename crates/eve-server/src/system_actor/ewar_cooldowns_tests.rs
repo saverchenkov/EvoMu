@@ -660,3 +660,146 @@ async fn release_in_flight_superweapon_best_effort_handles_open_and_full_channel
         SystemCommand::ReleaseInFlightSuperweapon { ship_id: 810_002, reply: None }
     ));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finalize_post_unlock_ops_flushes_remote_assistance_and_worker_thread_stops_cleanly() {
+    let (reg, db, _sde) = test_registry_with_db();
+    let jita = 30_000_142_u32;
+    let (src_ship, tgt_a, tgt_b, tgt_c) = (830_001_i64, 830_002_i64, 830_003_i64, 830_004_i64);
+    let (mod_direct, mod_hook, mod_worker) = (730_001_i64, 730_002_i64, 730_003_i64);
+    seed_ships_in_db(&db, jita, &[src_ship, tgt_a, tgt_b, tgt_c]);
+    let h = reg.get_or_spawn(jita);
+
+    // 1. `finalize_post_unlock_ops_deactivations_in_actor` must flush `remote_assistance`
+    // in-actor (`mutated_actor = true`) and populate `ewar_snap.remote_assistance_affected_ships`.
+    h.upsert_remote_assistance_sync(tgt_a, ra_entry(src_ship, mod_direct, 25.0))
+        .unwrap();
+    let raw_noop: crate::system_actor::ModuleDeactivationHook = Arc::new(|_, _, _| {});
+    let post_noop: crate::system_actor::ModuleDeactivationPostUnlockHook = Arc::new(|_, _, _, _| {});
+    let cmd_w = h.cmd_tx.downgrade();
+    let gate = Arc::clone(&h.cooldown_persist_gate);
+    let (mutated, promoted_affected) = h
+        .test_with_actor_state_mut_async(move |st| {
+            let mut ops = PostUnlockOps::default();
+            ops.push(PostUnlockIntent::DeactivationHook(DeferredDeactivationHookOp {
+                solar_system_id: jita,
+                char_id: Some(90_000_001),
+                fallback_owner_id: Some(90_000_001),
+                cycle: ActiveModuleCycle {
+                    ship_id: src_ship,
+                    owner_char_id: Some(90_000_001),
+                    module_id: mod_direct,
+                    module_type_id: 1964,
+                    ..Default::default()
+                },
+            }));
+            let mutated = finalize_post_unlock_ops_deactivations_in_actor(
+                jita,
+                st,
+                &mut ops,
+                Some(Arc::clone(&raw_noop)),
+                Some((raw_noop, post_noop)),
+                &gate,
+                Some(&cmd_w),
+                1.0,
+            );
+            let affected = ops
+                .intents
+                .into_iter()
+                .find_map(|intent| match intent {
+                    PostUnlockIntent::CooldownDeactivation(op) => {
+                        Some(op.ewar_snap.remote_assistance_affected_ships)
+                    }
+                    _ => None,
+                })
+                .expect("DeactivationHook promoted to CooldownDeactivation");
+            (mutated, affected)
+        })
+        .await;
+    assert!(mutated, "remote_assistance flush alone must mark actor mutated");
+    assert_eq!(promoted_affected, vec![tgt_a]);
+    assert!(h.view().remote_assistance_for(tgt_a).is_none());
+
+    // 2. While `ShutdownActor` (`stop_system`) waits to join `post_unlock_worker`, calling
+    // `remove_remote_assistance_by_module_sync` directly from `post_unlock_worker` must
+    // execute on `post_unlock_worker_thread_id` without a 5s `ACTOR_CMD_TIMEOUT` deadlock.
+    h.upsert_remote_assistance_sync(tgt_b, ra_entry(src_ship, mod_hook, 25.0))
+        .unwrap();
+    h.upsert_remote_assistance_sync(tgt_c, ra_entry(src_ship, mod_worker, 30.0))
+        .unwrap();
+    h.add_module_cycle(ActiveModuleCycle {
+        ship_id: src_ship,
+        owner_char_id: Some(90_000_001),
+        module_id: mod_hook,
+        module_type_id: 1964,
+        duration_s: 10.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    let (obs_tx, obs_rx) = std::sync::mpsc::channel();
+    let h_hook = h.clone();
+    let raw_hook: crate::system_actor::ModuleDeactivationHook = Arc::new(|_, _, _| {});
+    let post_hook: crate::system_actor::ModuleDeactivationPostUnlockHook = Arc::new(move |_, _, cycle, ewar_snap| {
+        if cycle.module_id != mod_hook {
+            return;
+        }
+        let _ = entered_tx.send(());
+        let _ = release_rx.lock().unwrap().recv();
+        let on_worker = h_hook.is_on_post_unlock_worker_thread();
+        let pre_flushed_view_clear = h_hook.view().remote_assistance_for(tgt_b).is_none();
+        let worker_removed = h_hook
+            .remove_remote_assistance_by_module_sync(src_ship, mod_worker)
+            .expect("worker thread direct removal must succeed during ShutdownActor");
+        let _ = obs_tx.send((
+            ewar_snap.remote_assistance_affected_ships,
+            pre_flushed_view_clear,
+            on_worker,
+            worker_removed,
+        ));
+    });
+    *h.module_deactivation_hook.write().unwrap() = Some(Arc::clone(&raw_hook));
+    *h.module_deactivation_post_unlock_hook.write().unwrap() = Some((raw_hook, post_hook));
+
+    h.cmd_tx
+        .try_send(SystemCommand::TryRemoveModuleCycle {
+            ship_id: src_ship,
+            module_id: mod_hook,
+            wait_for_post_unlock: false,
+            reply: tokio::sync::oneshot::channel().0,
+        })
+        .unwrap();
+    tokio::task::spawn_blocking(move || {
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("post_unlock_worker entered post_hook")
+    })
+    .await
+    .unwrap();
+
+    let stop_fut = tokio::spawn({
+        let reg = Arc::clone(&reg);
+        async move { reg.stop_system(jita).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    release_tx.send(()).unwrap();
+
+    let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), stop_fut)
+        .await
+        .expect("stop_system must drain post_unlock_worker without deadlock")
+        .unwrap();
+    assert!(stopped);
+
+    let (pre_flushed_affected, pre_flushed_view_clear, on_worker, worker_removed) = obs_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("post_hook observations");
+    assert_eq!(pre_flushed_affected, vec![tgt_b]);
+    assert!(pre_flushed_view_clear);
+    assert!(on_worker);
+    assert_eq!(worker_removed, vec![tgt_c]);
+    assert!(h.view().remote_assistance_for(tgt_c).is_none());
+}

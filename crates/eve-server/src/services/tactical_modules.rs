@@ -532,7 +532,18 @@ pub fn apply_projected_remote_assistance(
         .or_else(|| ctx.systems.find_ship_live_handle(ship_id))
         .or_else(|| ctx.systems.get_handle(sys_id));
     if let Some(handle) = handle_opt {
-        let _ = handle.upsert_remote_assistance_sync(target_id, entry);
+        if let Err(err) = handle.upsert_remote_assistance_sync(target_id, entry) {
+            tracing::warn!(
+                target_id,
+                source_ship_id = ship_id,
+                module_id,
+                error = %err,
+                "failed to upsert projected remote assistance in system actor"
+            );
+            return Err(BridgeRpcError::from_client_error(
+                eve_proto::ClientError::Internal(err),
+            ));
+        }
         ctx.invalidate_and_push_fit(target_id);
     }
     Ok(())

@@ -63,6 +63,7 @@ pub struct ModuleEwarFlushSnapshot {
     pub started_targets: Vec<(i64, &'static str)>,
     pub projected_targets: Vec<FlushedProjectedEwarTarget>,
     pub affected_ships: Vec<i64>,
+    pub remote_assistance_affected_ships: Vec<i64>,
 }
 
 
@@ -156,10 +157,16 @@ pub(in crate::system_actor) fn flush_module_ewar_in_state(
         source_module_id,
         allow_db_source_fallback,
     );
+    let remote_assistance_affected_ships = remove_remote_assistance_by_module_in_state(
+        ewar,
+        source_ship_id,
+        source_module_id,
+    );
     ModuleEwarFlushSnapshot {
         started_targets,
         projected_targets,
         affected_ships,
+        remote_assistance_affected_ships,
     }
 }
 
@@ -446,7 +453,8 @@ pub(in crate::system_actor) fn finalize_post_unlock_ops_deactivations_in_actor(
                 );
                 mutated_actor |= !ewar_snap.started_targets.is_empty()
                     || !ewar_snap.projected_targets.is_empty()
-                    || !ewar_snap.affected_ships.is_empty();
+                    || !ewar_snap.affected_ships.is_empty()
+                    || !ewar_snap.remote_assistance_affected_ships.is_empty();
                 let payload_opt = (hook_op.solar_system_id > 0
                     && hook_op.solar_system_id == solar_system_id)
                     .then(|| cloak_reactivation_delay_for_cycle(&actor_st.sde_opt, &hook_op.cycle))
@@ -824,6 +832,12 @@ impl SystemHandle {
         }).await
     }
 
+    pub(in crate::system_actor) fn is_on_post_unlock_worker_thread(&self) -> bool {
+        self.post_unlock_worker_thread_id
+            .get()
+            .is_some_and(|&tid| tid == std::thread::current().id())
+    }
+
     /// Synchronously removes active/projected EWAR state for `(source_ship_id, source_module_id)`
     /// and guarantees [`SystemView`] reflects the removal before returning.
     /// Requires no ranked locks held by the caller.
@@ -839,8 +853,8 @@ impl SystemHandle {
                 self.solar_system_id
             ));
         }
-        if self.is_on_actor_flush_thread() {
-            if self.cmd_tx.is_closed() {
+        if self.is_on_actor_flush_thread() || self.is_on_post_unlock_worker_thread() {
+            if self.is_on_actor_flush_thread() && self.cmd_tx.is_closed() {
                 return Err(format!("system {} actor closed", self.solar_system_id));
             }
             return Ok(super::ball_ops::run_direct_ball_op_on_current_thread(
@@ -885,6 +899,12 @@ impl SystemHandle {
         target_ship_id: i64,
         entry: ProjectedRemoteAssistance,
     ) -> Result<(), String> {
+        if !held_lock_ranks().is_empty() {
+            return Err(format!(
+                "refusing upsert_remote_assistance_sync on system {} while holding ranked locks",
+                self.solar_system_id
+            ));
+        }
         dispatch_actor_sync_with_deadline(
             self,
             "UpsertRemoteAssistance",
@@ -913,8 +933,8 @@ impl SystemHandle {
                 self.solar_system_id
             ));
         }
-        if self.is_on_actor_flush_thread() {
-            if self.cmd_tx.is_closed() {
+        if self.is_on_actor_flush_thread() || self.is_on_post_unlock_worker_thread() {
+            if self.is_on_actor_flush_thread() && self.cmd_tx.is_closed() {
                 return Err(format!("system {} actor closed", self.solar_system_id));
             }
             return Ok(super::ball_ops::run_direct_ball_op_on_current_thread(
