@@ -333,11 +333,12 @@ async fn test_structure_upwell_asset_safety_and_access_notifications() {
         }
     });
 
-    // 1. RenameStructure -> emits OnSlimItemChange(structureID, slimKeyVal).
+    // 1. RenameStructure -> emits OnSlimItemChange(oldSlim, newSlim).
     call(&ctx, &mut s1, "structureDeployment", "RenameStructure", &[PyRep::Integer(structure_id), PyRep::String("Jita Upwell Prime".into())]).await;
     let slim_changes = events(&ctx, P1, "OnSlimItemChange");
     assert_eq!(slim_changes.len(), 1);
-    assert_eq!(slim_changes[0][0], PyRep::Integer(structure_id));
+    assert_eq!(slim_changes[0][0].dict_get("itemID"), Some(&PyRep::Integer(structure_id)));
+    assert_ne!(slim_changes[0][0].dict_get("name"), Some(&PyRep::String("Jita Upwell Prime".into())));
     assert_eq!(slim_changes[0][1].dict_get("name"), Some(&PyRep::String("Jita Upwell Prime".into())));
     assert!(events(&ctx, p3, "OnSlimItemChange").is_empty());
 

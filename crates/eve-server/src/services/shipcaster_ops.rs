@@ -77,7 +77,6 @@ fn build_beacon_slim_keyval(ctx: &ServerContext, pad: &LandingPadRecord) -> crat
         },
     )
     .with_extra_pairs([
-        ("corpID", PyRep::Integer(0)),
         (
             "component_underConstruction_progress",
             PyRep::Dict(progress),

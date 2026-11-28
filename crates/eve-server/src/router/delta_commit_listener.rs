@@ -437,6 +437,11 @@ fn dispatch_tx_effects(
     let mut built = Vec::new();
 
     for effect in &effects.notifications {
+        #[cfg(any(test, feature = "testkit"))]
+        crate::router::notify_registry::assert_registered_event_shape_if_registered(
+            &effect.event,
+            &effect.args,
+        );
         let recipients = resolve_tx_effect_recipients(db, snap, effect);
         if recipients.is_empty() {
             continue;
@@ -451,13 +456,6 @@ fn dispatch_tx_effects(
         let suppression_key = fields_opt
             .as_ref()
             .map(|(k, owner_id, _)| (k.clone(), *owner_id));
-        if !recipients.is_empty() {
-            #[cfg(any(test, feature = "testkit"))]
-            crate::router::notify_registry::assert_registered_event_shape_if_registered(
-                &effect.event,
-                &effect.args,
-            );
-        }
         for (cid, uid) in recipients {
             let notif = assemble_pending_notification(
                 cid,

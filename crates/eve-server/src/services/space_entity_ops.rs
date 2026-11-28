@@ -193,7 +193,7 @@ pub async fn handle(
                             )
                             .with_extra_pairs([
                                 ("securityStatus", PyRep::Real(0.0)),
-                                ("isEmpty", PyRep::Integer(if is_empty { 1 } else { 0 })),
+                                ("isEmpty", PyRep::Bool(is_empty)),
                             ])
                         };
                         if let Some(scene) =

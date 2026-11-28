@@ -1859,14 +1859,14 @@ pub fn materialize_pending_notifications(
     resolved
         .into_iter()
         .filter_map(|notif| {
+            #[cfg(any(test, feature = "testkit"))]
+            crate::router::notify_registry::assert_registered_event_shape_if_registered(
+                &notif.event,
+                &notif.args,
+            );
             // Canonical internal `OnItemChange` uses 2 positional args `(row, change_dict)`
             // matching `cache_notifications.rs` (`client_compat` pads trailing `None` on TCP wire).
             if notif.event == OnItemChange::EVENT && notif.args.len() == 2 {
-                #[cfg(any(test, feature = "testkit"))]
-                crate::router::notify_registry::assert_registered_event_shape_if_registered(
-                    OnItemChange::EVENT,
-                    &notif.args,
-                );
                 return Some(crate::router::cache_notifications::assemble_pending_notification(
                     notif.recipient_char_id,
                     notif.recipient_user_id,

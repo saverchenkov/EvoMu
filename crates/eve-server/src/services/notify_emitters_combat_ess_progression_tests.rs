@@ -86,10 +86,10 @@ fn station_scanner_mining_damage_and_ess_notifications() {
     emit_system_ess_data_changed(
         &ctx,
         i64::from(sys_id),
-        PyRep::keyval([
-            ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-            ("mainBank", PyRep::Real(50_000_000.0)),
-            ("reserveBank", PyRep::Real(100_000_000.0)),
+        PyRep::Dict(vec![
+            (PyRep::String("solarSystemID".into()), PyRep::Integer(i64::from(sys_id))),
+            (PyRep::String("mainBank".into()), PyRep::Real(50_000_000.0)),
+            (PyRep::String("reserveBank".into()), PyRep::Real(100_000_000.0)),
         ]),
     );
     emit_system_dynamic_bounty_state_changed(&ctx, i64::from(sys_id), 1.35);

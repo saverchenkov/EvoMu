@@ -399,19 +399,23 @@ fn handle_structure_rename(ctx: &ServerContext, session: &mut SessionState, args
     let alliance_id = ctx
         .db
         .with_snapshot(|snap| snap.corporations.get(&st.owner_corp_id).and_then(|c| c.alliance_id));
-    let slim_kv = crate::router::notify_registry::SlimItemKeyVal::for_space_ship(
-        crate::router::notify_registry::SpaceShipSlimFields {
-            item_id: structure_id,
-            type_id: i64::from(st.type_id),
-            group_id,
-            category_id,
-            owner_id: st.owner_corp_id,
-            char_id: None,
-            corp_id: Some(st.owner_corp_id),
-            alliance_id,
-            name: new_name.clone(),
-        },
-    );
+    let make_slim_kv = |name: String| {
+        crate::router::notify_registry::SlimItemKeyVal::for_space_ship(
+            crate::router::notify_registry::SpaceShipSlimFields {
+                item_id: structure_id,
+                type_id: i64::from(st.type_id),
+                group_id,
+                category_id,
+                owner_id: st.owner_corp_id,
+                char_id: None,
+                corp_id: Some(st.owner_corp_id),
+                alliance_id,
+                name,
+            },
+        )
+    };
+    let old_slim_kv = make_slim_kv(st.name.clone());
+    let slim_kv = make_slim_kv(new_name.clone());
     if let Some(scene) =
         crate::router::notify_registry::BallparkScene::try_solar_system(st.solar_system_id)
     {
@@ -419,7 +423,7 @@ fn handle_structure_rename(ctx: &ServerContext, session: &mut SessionState, args
             crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
             crate::router::notify_registry::OnSlimItemChange {
                 scene,
-                old_slim: PyRep::Integer(structure_id),
+                old_slim: crate::router::notify_registry::ToNotifyArg::into_notify_arg(old_slim_kv),
                 new_slim: slim_kv,
             },
         );

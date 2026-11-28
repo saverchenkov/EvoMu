@@ -204,7 +204,18 @@ fn typed_issue_1562_and_sibling_notification_contracts() {
             OnSlimItemChange::EVENT,
             OnSlimItemChange {
                 scene: BallparkScene::try_solar_system(30_000_142).expect("non-zero scene"),
-                old_slim: PyRep::Integer(100_000_001),
+                old_slim: SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
+                    item_id: 100_000_001,
+                    type_id: 587,
+                    group_id: 25,
+                    category_id: 6,
+                    owner_id: 90_000_001,
+                    char_id: Some(90_000_001),
+                    corp_id: Some(98_000_001),
+                    alliance_id: None,
+                    name: "Rifter".into(),
+                })
+                .into_notify_arg(),
                 new_slim: SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
                     item_id: 100_000_001,
                     type_id: 587,
@@ -975,7 +986,18 @@ fn ballpark_marked_notifications_enforce_scene_field_and_registry_set() {
     assert!(OnSlimItemChange::IS_BALLPARK_SCOPED);
     let slim = OnSlimItemChange {
         scene,
-        old_slim: PyRep::Integer(100_000_001),
+        old_slim: SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
+            item_id: 100_000_001,
+            type_id: 587,
+            group_id: 25,
+            category_id: 6,
+            owner_id: 90_000_001,
+            char_id: Some(90_000_001),
+            corp_id: Some(98_000_001),
+            alliance_id: None,
+            name: "Rifter".into(),
+        })
+        .into_notify_arg(),
         new_slim: SlimItemKeyVal::for_space_ship(SpaceShipSlimFields {
             item_id: 100_000_001,
             type_id: 587,
@@ -1499,4 +1521,30 @@ fn incomplete_sample_events_allowlist_ratchet() {
         );
     }
     assert_eq!(trailing.len(), allowlist.len());
+}
+
+#[test]
+fn deferred_6b2_emitter_compat_allowlist_ratchet() {
+    let deferred = super::notify_shape_check::DEFERRED_6B2_EMITTER_COMPAT_EVENTS;
+    assert_eq!(
+        deferred,
+        &[
+            "OnDeathzoneStateUpdate",
+            "OnFighterAddedToController",
+            "OnMissionsUpdated",
+            "OnProgressionTaskWidgetUpdate",
+            "OnTaleData",
+        ],
+        "DEFERRED_6B2_EMITTER_COMPAT_EVENTS must remain pinned at these exact 5 deferred emitters (or shrink toward 0 in 6b-2); observed: {deferred:?}"
+    );
+    let registered: HashSet<&'static str> = all_registered_notifications()
+        .iter()
+        .map(|e| e.event)
+        .collect();
+    for &event in deferred {
+        assert!(
+            registered.contains(event),
+            "deferred compat entry '{event}' missing from all_registered_notifications()"
+        );
+    }
 }

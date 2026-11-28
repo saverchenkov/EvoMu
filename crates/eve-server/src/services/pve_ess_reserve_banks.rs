@@ -1323,10 +1323,10 @@ pub fn tick_ess_main_bank_autopayout(ctx: &ServerContext, now_unix: u64) -> usiz
             (events, changes)
         });
     for &(sys_id, post_main, post_reserve) in &paid_events {
-        let ess_data = PyRep::keyval([
-            ("solarSystemID", PyRep::Integer(sys_id as i64)),
-            ("mainBank", PyRep::Real(post_main)),
-            ("reserveBank", PyRep::Real(post_reserve)),
+        let ess_data = PyRep::Dict(vec![
+            (PyRep::String("solarSystemID".into()), PyRep::Integer(sys_id as i64)),
+            (PyRep::String("mainBank".into()), PyRep::Real(post_main)),
+            (PyRep::String("reserveBank".into()), PyRep::Real(post_reserve)),
         ]);
         super::notify_emitters_combat_ess_progression::emit_system_ess_data_changed(
             ctx,
@@ -1563,10 +1563,10 @@ pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> 
             }
             super::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, char_id, now_unix);
             if let Some((post_main, post_reserve)) = post_banks {
-                let ess_data = PyRep::keyval([
-                    ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                    ("mainBank", PyRep::Real(post_main)),
-                    ("reserveBank", PyRep::Real(post_reserve)),
+                let ess_data = PyRep::Dict(vec![
+                    (PyRep::String("solarSystemID".into()), PyRep::Integer(sys_id as i64)),
+                    (PyRep::String("mainBank".into()), PyRep::Real(post_main)),
+                    (PyRep::String("reserveBank".into()), PyRep::Real(post_reserve)),
                 ]);
                 super::notify_emitters_combat_ess_progression::emit_system_ess_data_changed(
                     ctx,

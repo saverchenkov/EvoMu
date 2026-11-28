@@ -593,11 +593,18 @@ fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
     });
 
     if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) {
+        let old_slim = crate::router::notify_registry::ToNotifyArg::into_notify_arg(
+            build_crab_beacon_slim_kv(
+                ctx,
+                beacon_id,
+                [("crabPhase", PyRep::String("Scanning".into()))],
+            ),
+        );
         ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
             crate::router::notify_registry::OnSlimItemChange {
                 scene,
-                old_slim: PyRep::Integer(beacon_id),
+                old_slim,
                 new_slim: build_crab_beacon_slim_kv(
                     ctx,
                     beacon_id,
@@ -622,6 +629,8 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
             return None;
         }
         let prev_phase = rec.phase;
+        let prev_link_completes = rec.link_completes_at_sec;
+        let prev_self_destruct = rec.self_destruct_at_sec;
         rec.phase = CrabBeaconPhase::SelfDestructed;
         let drones_to_clear = std::mem::take(&mut rec.wave_npc_ball_ids);
         Some((
@@ -630,6 +639,8 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
             rec.deployer_char_id,
             rec.linked_char_id,
             rec.linked_ship_id,
+            prev_link_completes,
+            prev_self_destruct,
             rec.position,
             drones_to_clear,
         ))
@@ -641,6 +652,8 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
         _deployer_char_id,
         linked_char_id,
         linked_ship_id,
+        prev_link_completes,
+        prev_self_destruct,
         pos_arr,
         drones_to_clear,
     )) = info
@@ -744,11 +757,27 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
     }
 
     if let Some(scene) = crate::router::notify_registry::BallparkScene::try_solar_system(sys_id) {
+        let old_extras: Vec<(&'static str, PyRep)> = match prev_phase {
+            CrabBeaconPhase::Idle | CrabBeaconPhase::SelfDestructed => Vec::new(),
+            CrabBeaconPhase::Linking => vec![
+                ("crabPhase", PyRep::String("Linking".into())),
+                ("crabLinkedShipID", PyRep::Integer(linked_ship_id.unwrap_or(0))),
+                ("crabLinkCompletesAt", PyRep::Integer(prev_link_completes as i64)),
+            ],
+            CrabBeaconPhase::Scanning => vec![("crabPhase", PyRep::String("Scanning".into()))],
+            CrabBeaconPhase::LootRestricted => vec![
+                ("crabPhase", PyRep::String("LootRestricted".into())),
+                ("crabSelfDestructAt", PyRep::Integer(prev_self_destruct as i64)),
+            ],
+        };
+        let old_slim = crate::router::notify_registry::ToNotifyArg::into_notify_arg(
+            build_crab_beacon_slim_kv(ctx, beacon_id, old_extras),
+        );
         ctx.emit_typed(
             NotificationTarget::SolarSystem(sys_id),
             crate::router::notify_registry::OnSlimItemChange {
                 scene,
-                old_slim: PyRep::Integer(beacon_id),
+                old_slim,
                 new_slim: build_crab_beacon_slim_kv(
                     ctx,
                     beacon_id,
@@ -1167,26 +1196,47 @@ pub async fn handle_crab_component_call(
                 link_completes,
             );
 
-            with_crab_beacons(ctx, |beacons| {
-                if let Some(b) = beacons.get_mut(&beacon_id) {
-                    b.phase = CrabBeaconPhase::Linking;
-                    b.linked_char_id = Some(char_id);
-                    b.linked_ship_id = Some(ship_id);
-                    b.link_started_at_sec = now;
-                    b.link_completes_at_sec = link_completes;
-                    b.scan_completes_at_sec = scan_completes;
-                    b.self_destruct_at_sec = self_destruct_at;
-                }
+            let old_slim_extras: Vec<(&'static str, PyRep)> = with_crab_beacons(ctx, |beacons| {
+                let Some(b) = beacons.get_mut(&beacon_id) else {
+                    return Vec::new();
+                };
+                let prev_extras = match b.phase {
+                    CrabBeaconPhase::Idle => Vec::new(),
+                    CrabBeaconPhase::Linking => vec![
+                        ("crabPhase", PyRep::String("Linking".into())),
+                        ("crabLinkedShipID", PyRep::Integer(b.linked_ship_id.unwrap_or(0))),
+                        ("crabLinkCompletesAt", PyRep::Integer(b.link_completes_at_sec as i64)),
+                    ],
+                    CrabBeaconPhase::Scanning => {
+                        vec![("crabPhase", PyRep::String("Scanning".into()))]
+                    }
+                    CrabBeaconPhase::LootRestricted => vec![
+                        ("crabPhase", PyRep::String("LootRestricted".into())),
+                        ("crabSelfDestructAt", PyRep::Integer(b.self_destruct_at_sec as i64)),
+                    ],
+                    CrabBeaconPhase::SelfDestructed => Vec::new(),
+                };
+                b.phase = CrabBeaconPhase::Linking;
+                b.linked_char_id = Some(char_id);
+                b.linked_ship_id = Some(ship_id);
+                b.link_started_at_sec = now;
+                b.link_completes_at_sec = link_completes;
+                b.scan_completes_at_sec = scan_completes;
+                b.self_destruct_at_sec = self_destruct_at;
+                prev_extras
             });
 
             if let Some(scene) =
                 crate::router::notify_registry::BallparkScene::try_solar_system(sys_id)
             {
+                let old_slim = crate::router::notify_registry::ToNotifyArg::into_notify_arg(
+                    build_crab_beacon_slim_kv(ctx, beacon_id, old_slim_extras),
+                );
                 ctx.emit_typed(
                     NotificationTarget::SolarSystem(sys_id),
                     crate::router::notify_registry::OnSlimItemChange {
                         scene,
-                        old_slim: PyRep::Integer(beacon_id),
+                        old_slim,
                         new_slim: build_crab_beacon_slim_kv(
                             ctx,
                             beacon_id,

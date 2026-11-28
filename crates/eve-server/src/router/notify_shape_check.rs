@@ -37,9 +37,46 @@ pub(crate) const INCOMPLETE_TRAILING_SLOT_DISCRIMINANTS: &[(&str, &[&[&str]])] =
     ("OnTradeOffer", &[&["Bool"]]),
 ];
 
+/// Registered notification events whose `sample_payloads()` hold canonical V24 shapes while an
+/// out-of-budget/overlapping `6b-2` emitter still temporarily sends a transitional payload on ONE
+/// documented slot (`Refs #933`). Non-deferred slots remain strictly recursively validated; deleted
+/// (`-> 0`) in Track `6b-2`.
+pub const DEFERRED_6B2_EMITTER_COMPAT_EVENTS: &[&str] = &[
+    "OnDeathzoneStateUpdate",
+    "OnFighterAddedToController",
+    "OnMissionsUpdated",
+    "OnProgressionTaskWidgetUpdate",
+    "OnTaleData",
+];
+
+/// Registered events whose `PyRep::Dict` payloads legitimately use dynamic runtime string keys
+/// (e.g., anomaly/signature IDs, localization formatting kwargs, or node-graph blackboard keys)
+/// rather than a closed fixed string key schema. Fixed-schema dicts (`OnSessionChanged`,
+/// `OnCombatMessage`, `OnDamageMessage`, `OnDamageMessages`, `OnOreMined`,
+/// `OnSystemESSDataChanged`, `OnMainBankPlayerLinkDisconnected`, `OnBountyAddedToPayout`, etc.)
+/// must NEVER be added here.
+pub const DYNAMIC_STRING_MAP_EVENTS: &[&str] = &[
+    "OnClientNodeGraphUpdate",
+    "OnEffectMessage",
+    "OnNotificationReceived",
+    "OnRemoteMessage",
+    "OnSignalTrackerAnomalyUpdate",
+    "OnSignalTrackerFullState",
+    "OnSignalTrackerSignatureUpdate",
+    "OnStartClientNodeGraph",
+];
+
 /// Returns `true` if `event` is on the shrink-only incomplete-sample allowlist.
 pub fn is_incomplete_sample_event(event: &str) -> bool {
     INCOMPLETE_SAMPLE_EVENTS.contains(&event)
+}
+
+fn is_deferred_6b2_compat_event(event: &str) -> bool {
+    DEFERRED_6B2_EMITTER_COMPAT_EVENTS.contains(&event)
+}
+
+fn is_dynamic_string_map_event(event: &str) -> bool {
+    DYNAMIC_STRING_MAP_EVENTS.contains(&event)
 }
 
 /// Returns the canonical `PyRep` discriminant variant name.
@@ -219,6 +256,7 @@ fn summarize_samples_list(samples: &[Vec<PyRep>]) -> String {
 }
 
 fn match_collection_elements(
+    event: &str,
     kind: &str,
     actual: &[PyRep],
     sample: &[PyRep],
@@ -238,7 +276,7 @@ fn match_collection_elements(
         let item_path = format!("{path}[{idx}]");
         if !sample
             .iter()
-            .any(|s_item| match_pyrep_recursive(item, s_item, &item_path, depth + 1).is_ok())
+            .any(|s_item| match_pyrep_recursive(event, item, s_item, &item_path, depth + 1).is_ok())
         {
             let expected: Vec<String> = sample.iter().map(summarize_pyrep_shape).collect();
             return Err(format!(
@@ -252,6 +290,7 @@ fn match_collection_elements(
 }
 
 fn match_dict_entries(
+    event: &str,
     actual: &[(PyRep, PyRep)],
     sample: &[(PyRep, PyRep)],
     path: &str,
@@ -266,6 +305,9 @@ fn match_dict_entries(
             actual.len()
         ));
     }
+    let sample_has_string_keys = sample
+        .iter()
+        .any(|(sk, _)| matches!(sk, PyRep::String(_)));
     for (idx, (ak, av)) in actual.iter().enumerate() {
         if let PyRep::String(k_str) = ak {
             let fixed_val_samples: Vec<&PyRep> = sample
@@ -276,7 +318,7 @@ fn match_dict_entries(
                 let val_path = format!("{path}[{k_str:?}]");
                 if !fixed_val_samples
                     .iter()
-                    .any(|sv| match_pyrep_recursive(av, sv, &val_path, depth + 1).is_ok())
+                    .any(|sv| match_pyrep_recursive(event, av, sv, &val_path, depth + 1).is_ok())
                 {
                     let expected: Vec<String> = fixed_val_samples
                         .iter()
@@ -290,12 +332,23 @@ fn match_dict_entries(
                 }
                 continue;
             }
+            if sample_has_string_keys && !is_dynamic_string_map_event(event) {
+                let mut expected_keys: Vec<&str> = sample
+                    .iter()
+                    .filter_map(|(sk, _)| sk.as_str())
+                    .collect();
+                expected_keys.sort();
+                expected_keys.dedup();
+                return Err(format!(
+                    "{path}[{k_str:?}]: unexpected Dict string key {k_str:?} for fixed-schema event '{event}' (expected keys: {expected_keys:?})"
+                ));
+            }
         }
         let key_path = format!("{path}[key#{idx}]");
         let val_path = format!("{path}[val#{idx}]");
         if !sample.iter().any(|(sk, sv)| {
-            match_pyrep_recursive(ak, sk, &key_path, depth + 1).is_ok()
-                && match_pyrep_recursive(av, sv, &val_path, depth + 1).is_ok()
+            match_pyrep_recursive(event, ak, sk, &key_path, depth + 1).is_ok()
+                && match_pyrep_recursive(event, av, sv, &val_path, depth + 1).is_ok()
         }) {
             let expected: Vec<String> = sample
                 .iter()
@@ -313,6 +366,7 @@ fn match_dict_entries(
 }
 
 fn match_keyval_fields(
+    event: &str,
     actual: &HashMap<String, PyRep>,
     sample: &HashMap<String, PyRep>,
     path: &str,
@@ -322,6 +376,20 @@ fn match_keyval_fields(
         return Err(format!(
             "{path}: non-empty KeyVal (len={}) does not match empty sample KeyVal({{}})",
             actual.len()
+        ));
+    }
+    let mut extra_keys: Vec<&String> = actual
+        .keys()
+        .filter(|k| !sample.contains_key(k.as_str()))
+        .collect();
+    if !extra_keys.is_empty() {
+        extra_keys.sort();
+        let mut expected_keys: Vec<&String> = sample.keys().collect();
+        expected_keys.sort();
+        return Err(format!(
+            "{path}.{}: KeyVal contains unexpected field(s) {:?} absent from sample (expected fields: {expected_keys:?})",
+            extra_keys[0],
+            extra_keys
         ));
     }
     let mut keys: Vec<&String> = sample.keys().collect();
@@ -335,12 +403,13 @@ fn match_keyval_fields(
                 summarize_pyrep_shape(sv)
             ));
         };
-        match_pyrep_recursive(av, sv, &field_path, depth + 1)?;
+        match_pyrep_recursive(event, av, sv, &field_path, depth + 1)?;
     }
     Ok(())
 }
 
 fn match_row_against_samples(
+    event: &str,
     kind: &str,
     row_idx: usize,
     actual_row: &[PyRep],
@@ -359,6 +428,7 @@ fn match_row_against_samples(
         srow.len() == actual_row.len()
             && actual_row.iter().enumerate().all(|(c_idx, cell)| {
                 match_pyrep_recursive(
+                    event,
                     cell,
                     &srow[c_idx],
                     &format!("{path}.rows[{row_idx}][{c_idx}]"),
@@ -377,6 +447,7 @@ fn match_row_against_samples(
 }
 
 fn match_tabular_rep(
+    event: &str,
     kind: &str,
     ac: &[String],
     ar: &[Vec<PyRep>],
@@ -400,12 +471,13 @@ fn match_tabular_rep(
         ));
     }
     for (r_idx, row) in ar.iter().enumerate() {
-        match_row_against_samples(kind, r_idx, row, ac.len(), sr, path, depth)?;
+        match_row_against_samples(event, kind, r_idx, row, ac.len(), sr, path, depth)?;
     }
     Ok(())
 }
 
 fn match_pyrep_recursive(
+    event: &str,
     actual: &PyRep,
     sample: &PyRep,
     path: &str,
@@ -437,21 +509,21 @@ fn match_pyrep_recursive(
                 ));
             }
             for (idx, (ae, se)) in a.iter().zip(s.iter()).enumerate() {
-                match_pyrep_recursive(ae, se, &format!("{path}[{idx}]"), depth + 1)?;
+                match_pyrep_recursive(event, ae, se, &format!("{path}[{idx}]"), depth + 1)?;
             }
             Ok(())
         }
         (PyRep::List(a), PyRep::List(s)) => {
-            match_collection_elements("List", a, s, path, depth)
+            match_collection_elements(event, "List", a, s, path, depth)
         }
         (PyRep::Set(a), PyRep::Set(s)) => {
-            match_collection_elements("Set", a, s, path, depth)
+            match_collection_elements(event, "Set", a, s, path, depth)
         }
         (PyRep::PySet(a), PyRep::PySet(s)) => {
-            match_collection_elements("PySet", a, s, path, depth)
+            match_collection_elements(event, "PySet", a, s, path, depth)
         }
-        (PyRep::Dict(a), PyRep::Dict(s)) => match_dict_entries(a, s, path, depth),
-        (PyRep::KeyVal(a), PyRep::KeyVal(s)) => match_keyval_fields(a, s, path, depth),
+        (PyRep::Dict(a), PyRep::Dict(s)) => match_dict_entries(event, a, s, path, depth),
+        (PyRep::KeyVal(a), PyRep::KeyVal(s)) => match_keyval_fields(event, a, s, path, depth),
         (
             PyRep::Rowset {
                 columns: ac,
@@ -461,7 +533,7 @@ fn match_pyrep_recursive(
                 columns: sc,
                 rows: sr,
             },
-        ) => match_tabular_rep("Rowset", ac, ar, sc, sr, path, depth),
+        ) => match_tabular_rep(event, "Rowset", ac, ar, sc, sr, path, depth),
         (
             PyRep::TupleSet {
                 columns: ac,
@@ -471,7 +543,7 @@ fn match_pyrep_recursive(
                 columns: sc,
                 rows: sr,
             },
-        ) => match_tabular_rep("TupleSet", ac, ar, sc, sr, path, depth),
+        ) => match_tabular_rep(event, "TupleSet", ac, ar, sc, sr, path, depth),
         (
             PyRep::IndexRowset {
                 key_column: ak,
@@ -508,10 +580,17 @@ fn match_pyrep_recursive(
                 }
                 let matched = si.iter().any(|(sk_i, srow_i)| {
                     srow_i.len() == row.len()
-                        && match_pyrep_recursive(k, sk_i, &format!("{path}.items[{idx}].key"), depth + 1)
-                            .is_ok()
+                        && match_pyrep_recursive(
+                            event,
+                            k,
+                            sk_i,
+                            &format!("{path}.items[{idx}].key"),
+                            depth + 1,
+                        )
+                        .is_ok()
                         && row.iter().enumerate().all(|(c_idx, cell)| {
                             match_pyrep_recursive(
+                                event,
                                 cell,
                                 &srow_i[c_idx],
                                 &format!("{path}.items[{idx}][{c_idx}]"),
@@ -542,7 +621,7 @@ fn match_pyrep_recursive(
                 ..
             },
         ) => {
-            match_pyrep_recursive(ah, sh, &format!("{path}.header"), depth + 1)?;
+            match_pyrep_recursive(event, ah, sh, &format!("{path}.header"), depth + 1)?;
             if ac.len() != sc.len() {
                 return Err(format!(
                     "{path}: DBRow column count mismatch: got {}, expected {}",
@@ -556,7 +635,7 @@ fn match_pyrep_recursive(
                         "{path}: DBRow column name mismatch: got {an:?}, expected {sn:?}"
                     ));
                 }
-                match_pyrep_recursive(av, sv, &format!("{path}.{an}"), depth + 1)?;
+                match_pyrep_recursive(event, av, sv, &format!("{path}.{an}"), depth + 1)?;
             }
             Ok(())
         }
@@ -575,7 +654,7 @@ fn match_pyrep_recursive(
                     "{path}: Object type_name mismatch: got {at:?}, expected {st:?}"
                 ));
             }
-            match_pyrep_recursive(aa, sa, &format!("{path}<{at}>"), depth + 1)
+            match_pyrep_recursive(event, aa, sa, &format!("{path}<{at}>"), depth + 1)
         }
         (
             PyRep::ObjectEx {
@@ -596,18 +675,18 @@ fn match_pyrep_recursive(
                     "{path}: ObjectEx is_type_2 mismatch: got {at2}, expected {st2}"
                 ));
             }
-            match_pyrep_recursive(ah, sh, &format!("{path}.header"), depth + 1)?;
-            match_collection_elements("ObjectEx.list", al, sl, &format!("{path}.list"), depth)?;
-            match_dict_entries(ad, sd, &format!("{path}.dict"), depth)
+            match_pyrep_recursive(event, ah, sh, &format!("{path}.header"), depth + 1)?;
+            match_collection_elements(event, "ObjectEx.list", al, sl, &format!("{path}.list"), depth)?;
+            match_dict_entries(event, ad, sd, &format!("{path}.dict"), depth)
         }
         (PyRep::SubStruct(a), PyRep::SubStruct(s)) => {
-            match_pyrep_recursive(a, s, &format!("{path}.SubStruct"), depth + 1)
+            match_pyrep_recursive(event, a, s, &format!("{path}.SubStruct"), depth + 1)
         }
         (PyRep::ChecksumedStream { body: a, .. }, PyRep::ChecksumedStream { body: s, .. }) => {
-            match_pyrep_recursive(a, s, &format!("{path}.ChecksumedStream"), depth + 1)
+            match_pyrep_recursive(event, a, s, &format!("{path}.ChecksumedStream"), depth + 1)
         }
         (PyRep::SubStream(a), PyRep::SubStream(s)) => {
-            match_pyrep_recursive(a, s, &format!("{path}.SubStream"), depth + 1)
+            match_pyrep_recursive(event, a, s, &format!("{path}.SubStream"), depth + 1)
         }
         (a, s) => Err(format!(
             "{path}: expected {}, got {}",
@@ -617,11 +696,255 @@ fn match_pyrep_recursive(
     }
 }
 
+fn check_shared_bookmarks_folder_updated(
+    samples: &[Vec<PyRep>],
+    args: &[PyRep],
+) -> Result<(), String> {
+    let event = "OnSharedBookmarksFolderUpdated";
+    if args.len() != 1 {
+        return Err(format!(
+            "Notification shape mismatch for event '{event}': expected 1 arg, got {}",
+            args.len()
+        ));
+    }
+    let PyRep::List(entries) = &args[0] else {
+        return Err(format!(
+            "Notification shape mismatch for allowlisted event '{event}': arg[0] expected List, got {}",
+            summarize_pyrep_shape(&args[0])
+        ));
+    };
+    let mut part2_candidates: Vec<PyRep> = samples
+        .iter()
+        .filter_map(|s| match s.first() {
+            Some(PyRep::List(items)) => items.first().and_then(|it| match it {
+                PyRep::Tuple(parts) if parts.len() == 3 => Some(parts[2].clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect();
+    part2_candidates.push(PyRep::Integer(1));
+    part2_candidates.push(PyRep::Bool(false));
+    part2_candidates.push(PyRep::List(vec![PyRep::keyval([(
+        "bookmarkID",
+        PyRep::Integer(1),
+    )])]));
+
+    let sample_folder_key = PyRep::Tuple(vec![PyRep::Integer(1)]);
+    let sample_action = PyRep::String("FolderChanged".into());
+    for (idx, entry) in entries.iter().enumerate() {
+        let PyRep::Tuple(parts) = entry else {
+            return Err(format!(
+                "Notification shape mismatch for allowlisted event '{event}' at arg[0][{idx}]: expected 3-tuple (folder_key, action, payload), got {}",
+                summarize_pyrep_shape(entry)
+            ));
+        };
+        if parts.len() != 3 {
+            return Err(format!(
+                "Notification shape mismatch for allowlisted event '{event}' at arg[0][{idx}]: expected Tuple(3), got Tuple({})",
+                parts.len()
+            ));
+        }
+        match_pyrep_recursive(
+            event,
+            &parts[0],
+            &sample_folder_key,
+            &format!("arg[0][{idx}][0]"),
+            1,
+        )?;
+        match_pyrep_recursive(
+            event,
+            &parts[1],
+            &sample_action,
+            &format!("arg[0][{idx}][1]"),
+            1,
+        )?;
+        let part2_path = format!("arg[0][{idx}][2]");
+        if !part2_candidates
+            .iter()
+            .any(|cand| match_pyrep_recursive(event, &parts[2], cand, &part2_path, 1).is_ok())
+        {
+            return Err(format!(
+                "Notification shape mismatch for allowlisted event '{event}' at {part2_path}: got {}, expected bookmark update payload or legacy FolderChanged Integer/Bool",
+                summarize_pyrep_shape(&parts[2])
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_deferred_6b2_compat(
+    event: &str,
+    samples: &[Vec<PyRep>],
+    args: &[PyRep],
+) -> Result<(), String> {
+    let same_len: Vec<&Vec<PyRep>> = samples.iter().filter(|s| s.len() == args.len()).collect();
+    if same_len.is_empty() {
+        return Err(format!(
+            "Notification shape mismatch for deferred compat event '{event}': unexpected arg count {}; actual={}",
+            args.len(),
+            summarize_args_shape(args)
+        ));
+    }
+    match event {
+        "OnFighterAddedToController" => {
+            for idx in 0..4 {
+                if !same_len.iter().any(|s| {
+                    match_pyrep_recursive(event, &args[idx], &s[idx], &format!("arg[{idx}]"), 0)
+                        .is_ok()
+                }) {
+                    return Err(format!(
+                        "Notification shape mismatch for deferred compat event '{event}' at arg[{idx}]: got {}, expected {}",
+                        summarize_pyrep_shape(&args[idx]),
+                        summarize_pyrep_shape(&same_len[0][idx])
+                    ));
+                }
+            }
+            if matches!(args[4], PyRep::List(_))
+                || same_len
+                    .iter()
+                    .any(|s| match_pyrep_recursive(event, &args[4], &s[4], "arg[4]", 0).is_ok())
+            {
+                return Ok(());
+            }
+            Err(format!(
+                "Notification shape mismatch for deferred compat event '{event}' at arg[4]: expected Dict or transitional empty List, got {}",
+                summarize_pyrep_shape(&args[4])
+            ))
+        }
+        "OnDeathzoneStateUpdate" => {
+            for idx in 0..2 {
+                match_pyrep_recursive(
+                    event,
+                    &args[idx],
+                    &same_len[0][idx],
+                    &format!("arg[{idx}]"),
+                    0,
+                )?;
+            }
+            let legacy_dict = PyRep::Dict(vec![
+                (PyRep::String("timeRemainingMs".into()), PyRep::Real(15_000.0)),
+                (PyRep::String("dangerLevel".into()), PyRep::Real(1.0)),
+            ]);
+            if same_len
+                .iter()
+                .any(|s| match_pyrep_recursive(event, &args[2], &s[2], "arg[2]", 0).is_ok())
+                || match_pyrep_recursive(event, &args[2], &legacy_dict, "arg[2]", 0).is_ok()
+            {
+                return Ok(());
+            }
+            Err(format!(
+                "Notification shape mismatch for deferred compat event '{event}' at arg[2]: expected None, Deathzone KeyVal, or legacy abyssal Dict, got {}",
+                summarize_pyrep_shape(&args[2])
+            ))
+        }
+        "OnTaleData" => {
+            match_pyrep_recursive(event, &args[0], &same_len[0][0], "arg[0]", 0)?;
+            let PyRep::Dict(entries) = &args[1] else {
+                return Err(format!(
+                    "Notification shape mismatch for deferred compat event '{event}' at arg[1]: expected Dict, got {}",
+                    summarize_pyrep_shape(&args[1])
+                ));
+            };
+            let canonical_val = match &same_len[0][1] {
+                PyRep::Dict(pairs) => pairs.first().map(|(_, v)| v.clone()),
+                _ => None,
+            };
+            for (idx, (k, v)) in entries.iter().enumerate() {
+                match_pyrep_recursive(
+                    event,
+                    k,
+                    &PyRep::Integer(701),
+                    &format!("arg[1][key#{idx}]"),
+                    1,
+                )?;
+                let dict_ok = canonical_val.as_ref().is_some_and(|cv| {
+                    match_pyrep_recursive(event, v, cv, &format!("arg[1][val#{idx}]"), 1).is_ok()
+                });
+                let legacy_kv_ok = matches!(
+                    v,
+                    PyRep::KeyVal(kv) if matches!(kv.get("taleID"), Some(PyRep::Integer(_)))
+                );
+                if !dict_ok && !legacy_kv_ok {
+                    return Err(format!(
+                        "Notification shape mismatch for deferred compat event '{event}' at arg[1][val#{idx}]: expected incursion Dict or transitional tale KeyVal with integer taleID, got {}",
+                        summarize_pyrep_shape(v)
+                    ));
+                }
+            }
+            Ok(())
+        }
+        "OnMissionsUpdated" => {
+            let PyRep::List(entries) = &args[0] else {
+                return Err(format!(
+                    "Notification shape mismatch for deferred compat event '{event}' at arg[0]: expected List, got {}",
+                    summarize_pyrep_shape(&args[0])
+                ));
+            };
+            let canonical_dict = match &same_len[0][0] {
+                PyRep::List(items) => items.first().cloned(),
+                _ => None,
+            };
+            let legacy_kv = canonical_dict.as_ref().and_then(|d| match d {
+                PyRep::Dict(pairs) => Some(PyRep::KeyVal(
+                    pairs
+                        .iter()
+                        .filter_map(|(k, v)| k.as_str().map(|ks| (ks.to_string(), v.clone())))
+                        .collect(),
+                )),
+                _ => None,
+            });
+            for (idx, item) in entries.iter().enumerate() {
+                let path = format!("arg[0][{idx}]");
+                let dict_ok = canonical_dict
+                    .as_ref()
+                    .is_some_and(|cd| match_pyrep_recursive(event, item, cd, &path, 1).is_ok());
+                let kv_ok = legacy_kv
+                    .as_ref()
+                    .is_some_and(|lk| match_pyrep_recursive(event, item, lk, &path, 1).is_ok());
+                if !dict_ok && !kv_ok {
+                    return Err(format!(
+                        "Notification shape mismatch for deferred compat event '{event}' at {path}: expected mission Dict or transitional mission KeyVal, got {}",
+                        summarize_pyrep_shape(item)
+                    ));
+                }
+            }
+            Ok(())
+        }
+        "OnProgressionTaskWidgetUpdate" => {
+            for idx in 0..2 {
+                match_pyrep_recursive(
+                    event,
+                    &args[idx],
+                    &same_len[0][idx],
+                    &format!("arg[{idx}]"),
+                    0,
+                )?;
+            }
+            if matches!(args[2], PyRep::Integer(_) | PyRep::String(_))
+                || same_len
+                    .iter()
+                    .any(|s| match_pyrep_recursive(event, &args[2], &s[2], "arg[2]", 0).is_ok())
+            {
+                return Ok(());
+            }
+            Err(format!(
+                "Notification shape mismatch for deferred compat event '{event}' at arg[2]: expected widget_state Dict or transitional Integer/String, got {}",
+                summarize_pyrep_shape(&args[2])
+            ))
+        }
+        _ => unreachable!("unhandled deferred compat event '{event}'"),
+    }
+}
+
 fn check_incomplete_allowlist_top_level(
     event: &str,
     samples: &[Vec<PyRep>],
     args: &[PyRep],
 ) -> Result<(), String> {
+    if event == "OnSharedBookmarksFolderUpdated" {
+        return check_shared_bookmarks_folder_updated(samples, args);
+    }
     let same_len: Vec<(usize, &Vec<PyRep>)> = samples
         .iter()
         .enumerate()
@@ -690,6 +1013,55 @@ fn check_incomplete_allowlist_top_level(
     Ok(())
 }
 
+fn try_match_with_keyval_nullable_unions(
+    event: &str,
+    same_len: &[(usize, &Vec<PyRep>)],
+    args: &[PyRep],
+) -> bool {
+    if same_len.len() < 2 || !args.iter().any(|a| matches!(a, PyRep::KeyVal(_))) {
+        return false;
+    }
+    let kv_slots: Vec<usize> = args
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, a)| matches!(a, PyRep::KeyVal(_)).then_some(idx))
+        .collect();
+    let cohort: Vec<&Vec<PyRep>> = same_len
+        .iter()
+        .filter_map(|(_, s)| {
+            let ok = args.iter().enumerate().all(|(idx, a)| match a {
+                PyRep::KeyVal(akv) => matches!(
+                    &s[idx],
+                    PyRep::KeyVal(skv)
+                        if skv.len() == akv.len()
+                            && akv.keys().all(|k| skv.contains_key(k.as_str()))
+                ),
+                _ => match_pyrep_recursive(event, a, &s[idx], &format!("arg[{idx}]"), 0).is_ok(),
+            });
+            ok.then_some(*s)
+        })
+        .collect();
+    if cohort.is_empty() {
+        return false;
+    }
+    kv_slots.into_iter().all(|slot_idx| {
+        let PyRep::KeyVal(akv) = &args[slot_idx] else {
+            return false;
+        };
+        akv.iter().all(|(k, av)| {
+            let field_path = format!("arg[{slot_idx}].{k}");
+            cohort.iter().any(|s| {
+                let PyRep::KeyVal(skv) = &s[slot_idx] else {
+                    return false;
+                };
+                skv.get(k.as_str()).is_some_and(|sv| {
+                    match_pyrep_recursive(event, av, sv, &field_path, 1).is_ok()
+                })
+            })
+        })
+    })
+}
+
 /// Validates an emitted `args` slice against registered arity bounds and sample payload shapes.
 pub fn check_event_shape_against_samples(
     event: &str,
@@ -716,6 +1088,9 @@ pub fn check_event_shape_against_samples(
     if is_incomplete_sample_event(event) {
         return check_incomplete_allowlist_top_level(event, samples, args);
     }
+    if is_deferred_6b2_compat_event(event) {
+        return check_deferred_6b2_compat(event, samples, args);
+    }
 
     let same_len: Vec<(usize, &Vec<PyRep>)> = samples
         .iter()
@@ -735,10 +1110,12 @@ pub fn check_event_shape_against_samples(
     }
 
     let mut failures = Vec::new();
-    for (sample_idx, sample) in same_len {
+    for &(sample_idx, sample) in &same_len {
         let mut mismatch = None;
         for (i, (actual_arg, sample_arg)) in args.iter().zip(sample.iter()).enumerate() {
-            if let Err(err) = match_pyrep_recursive(actual_arg, sample_arg, &format!("arg[{i}]"), 0) {
+            if let Err(err) =
+                match_pyrep_recursive(event, actual_arg, sample_arg, &format!("arg[{i}]"), 0)
+            {
                 mismatch = Some(format!("sample[{sample_idx}] failed at {err}"));
                 break;
             }
@@ -747,6 +1124,10 @@ pub fn check_event_shape_against_samples(
             None => return Ok(()),
             Some(msg) => failures.push(msg),
         }
+    }
+
+    if try_match_with_keyval_nullable_unions(event, &same_len, args) {
+        return Ok(());
     }
 
     Err(format!(
@@ -850,6 +1231,19 @@ mod tests {
             &samples,
             &[
                 PyRep::Bool(false),
+                PyRep::keyval([("charid", PyRep::Integer(90_000_002))]),
+                PyRep::Dict(Vec::new()),
+            ],
+        )
+        .is_ok());
+
+        let err_extra = check_event_shape_against_samples(
+            "TestMulti",
+            3,
+            3,
+            &samples,
+            &[
+                PyRep::Bool(false),
                 PyRep::keyval([
                     ("charid", PyRep::Integer(90_000_002)),
                     ("extraField", PyRep::String("ok".into())),
@@ -857,7 +1251,8 @@ mod tests {
                 PyRep::Dict(Vec::new()),
             ],
         )
-        .is_ok());
+        .unwrap_err();
+        assert!(err_extra.contains("extraField"), "{err_extra}");
     }
 
     #[test]
@@ -1148,5 +1543,219 @@ mod tests {
             err_money.contains("OnTradeMoneyOffer") && err_money.contains("arg[2]"),
             "{err_money}"
         );
+    }
+
+    #[test]
+    fn shape_check_rejects_misspelled_fixed_dict_keys_and_allows_dynamic_string_maps() {
+        let on_session_changed = all_registered_notifications()
+            .into_iter()
+            .find(|e| e.event == "OnSessionChanged")
+            .expect("OnSessionChanged entry");
+        let err_session = check_notification_shape(
+            on_session_changed,
+            &[
+                PyRep::Bool(false),
+                PyRep::None,
+                PyRep::Dict(vec![(
+                    PyRep::String("solarSystemId".into()),
+                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(30_000_142)]),
+                )]),
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            err_session.contains("solarSystemId") && err_session.contains("OnSessionChanged"),
+            "{err_session}"
+        );
+
+        let on_combat_msg = all_registered_notifications()
+            .into_iter()
+            .find(|e| e.event == "OnCombatMessage")
+            .expect("OnCombatMessage entry");
+        let err_combat = check_notification_shape(
+            on_combat_msg,
+            &[
+                PyRep::String("Hit".into()),
+                PyRep::Dict(vec![(PyRep::String("damaeg".into()), PyRep::Real(12.5))]),
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            err_combat.contains("damaeg") && err_combat.contains("OnCombatMessage"),
+            "{err_combat}"
+        );
+
+        let on_anom = all_registered_notifications()
+            .into_iter()
+            .find(|e| e.event == "OnSignalTrackerAnomalyUpdate")
+            .expect("OnSignalTrackerAnomalyUpdate entry");
+        assert!(check_notification_shape(
+            on_anom,
+            &[
+                PyRep::Integer(30_000_142),
+                PyRep::Dict(vec![(
+                    PyRep::String("ANOM-DYNAMIC-999".into()),
+                    PyRep::keyval([
+                        ("instanceID", PyRep::String("ANOM-DYNAMIC-999".into())),
+                        (
+                            "position",
+                            PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+                        ),
+                        ("targetID", PyRep::String("ANOM-DYNAMIC-999".into())),
+                        ("difficulty", PyRep::Integer(1)),
+                        ("dungeonID", PyRep::Integer(2_134)),
+                        ("archetypeID", PyRep::Integer(24)),
+                        ("dungeonName", PyRep::String("Dynamic".into())),
+                        ("dungeonNameID", PyRep::None),
+                        ("factionID", PyRep::Integer(500_010)),
+                        ("scanStrengthAttribute", PyRep::Integer(210)),
+                        ("allowedTypes", PyRep::None),
+                    ]),
+                )]),
+                PyRep::List(Vec::new()),
+            ],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn shape_check_rejects_unexpected_extra_keyval_fields() {
+        let samples = vec![vec![PyRep::keyval([
+            ("itemID", PyRep::Integer(1)),
+            ("name", PyRep::String("Rifter".into())),
+        ])]];
+        let err = check_event_shape_against_samples(
+            "TestClosedKeyVal",
+            1,
+            1,
+            &samples,
+            &[PyRep::keyval([
+                ("itemID", PyRep::Integer(2)),
+                ("name", PyRep::String("Rifter".into())),
+                ("unexpectedField", PyRep::Bool(true)),
+            ])],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("TestClosedKeyVal") && err.contains("unexpectedField"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn shape_check_shared_bookmarks_validates_nested_tuples_strictly() {
+        let entry = all_registered_notifications()
+            .into_iter()
+            .find(|e| e.event == "OnSharedBookmarksFolderUpdated")
+            .expect("OnSharedBookmarksFolderUpdated entry");
+
+        let err_garbage =
+            check_notification_shape(entry, &[PyRep::List(vec![PyRep::String("garbage".into())])])
+                .unwrap_err();
+        assert!(
+            err_garbage.contains("OnSharedBookmarksFolderUpdated")
+                && err_garbage.contains("arg[0][0]"),
+            "{err_garbage}"
+        );
+
+        let err_bad_key = check_notification_shape(
+            entry,
+            &[PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::String("not-tuple".into()),
+                PyRep::String("FolderChanged".into()),
+                PyRep::Integer(1),
+            ])])],
+        )
+        .unwrap_err();
+        assert!(err_bad_key.contains("arg[0][0][0]"), "{err_bad_key}");
+
+        assert!(check_notification_shape(
+            entry,
+            &[PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Tuple(vec![PyRep::Integer(7)]),
+                PyRep::String("FolderChanged".into()),
+                PyRep::Integer(90_000_001),
+            ])])],
+        )
+        .is_ok());
+
+        assert!(check_notification_shape(
+            entry,
+            &[PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Tuple(vec![PyRep::Integer(7)]),
+                PyRep::String("FolderChanged".into()),
+                PyRep::Tuple(vec![
+                    PyRep::List(vec![PyRep::keyval([("bookmarkID", PyRep::Integer(55))])]),
+                    PyRep::List(vec![PyRep::Integer(55)]),
+                ]),
+            ])])],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn shape_check_closed_keyval_nullable_unions_reject_cross_anchor_and_extra_keys() {
+        let samples = vec![
+            vec![
+                PyRep::Integer(1),
+                PyRep::keyval([
+                    ("a", PyRep::Integer(10)),
+                    ("b", PyRep::Integer(20)),
+                ]),
+            ],
+            vec![
+                PyRep::Integer(1),
+                PyRep::keyval([
+                    ("a", PyRep::None),
+                    ("b", PyRep::None),
+                ]),
+            ],
+            vec![
+                PyRep::String("str-anchor".into()),
+                PyRep::keyval([
+                    ("a", PyRep::String("x".into())),
+                    ("b", PyRep::Integer(30)),
+                ]),
+            ],
+        ];
+        assert!(check_event_shape_against_samples(
+            "TestUnionKeyVal",
+            2,
+            2,
+            &samples,
+            &[
+                PyRep::Integer(2),
+                PyRep::keyval([("a", PyRep::Integer(1)), ("b", PyRep::None)]),
+            ],
+        )
+        .is_ok());
+        // Cross-anchor mixing (`a: String` from sample[2] with arg[0]=Integer) must fail.
+        assert!(check_event_shape_against_samples(
+            "TestUnionKeyVal",
+            2,
+            2,
+            &samples,
+            &[
+                PyRep::Integer(2),
+                PyRep::keyval([("a", PyRep::String("x".into())), ("b", PyRep::None)]),
+            ],
+        )
+        .is_err());
+        // Extra or missing keys must still fail cleanly.
+        assert!(check_event_shape_against_samples(
+            "TestUnionKeyVal",
+            2,
+            2,
+            &samples,
+            &[
+                PyRep::Integer(2),
+                PyRep::keyval([
+                    ("a", PyRep::None),
+                    ("b", PyRep::None),
+                    ("c", PyRep::Integer(1)),
+                ]),
+            ],
+        )
+        .is_err());
     }
 }
