@@ -1843,6 +1843,7 @@ pub(in crate::system_actor) fn enqueue_actor_cmd_post_unlock_ops(
     }
 }
 
+#[cfg(test)]
 pub(in crate::system_actor) enum PostUnlockWaitTicket {
     None,
     WaitWorker(std::sync::mpsc::Receiver<()>),
@@ -1856,6 +1857,7 @@ impl PostUnlockWaitTicket {
     }
 }
 
+#[cfg(test)]
 fn enqueue_work_ticket_with_seq(
     handle: &super::SystemHandle,
     db_opt: Option<&Arc<WorldRepository>>,
@@ -1896,12 +1898,14 @@ fn enqueue_work_ticket_with_seq(
 }
 
 /// Enqueues `ops` onto `handle.post_unlock_tx` under actor locks, or an empty-ops FIFO barrier when work is in flight (`W1`, `W4`).
+#[cfg(test)]
 pub(in crate::system_actor) fn enqueue_post_unlock_or_barrier_under_locks(handle: &super::SystemHandle, db_opt: Option<&Arc<WorldRepository>>, sde_opt: Option<&Arc<SdeRegistry>>, ops: PostUnlockOps, caller_can_wait: bool) -> PostUnlockWaitTicket {
     if !ops.is_empty() { enqueue_work_ticket_with_seq(handle, db_opt, sde_opt, ops, caller_can_wait, 0).1 }
     else if caller_can_wait && handle.has_in_flight_post_unlock() { enqueue_barrier_under_locks(handle) }
     else { PostUnlockWaitTicket::None }
 }
 
+#[cfg(test)]
 pub(in crate::system_actor) fn enqueue_tick_post_unlock_or_barrier_under_locks(
     handle: &super::SystemHandle,
     actor_st: &mut SystemActorState,
@@ -1926,6 +1930,7 @@ pub(in crate::system_actor) fn enqueue_tick_post_unlock_or_barrier_under_locks(
 }
 
 /// Enqueues an empty-ops FIFO barrier onto `handle.post_unlock_tx` while actor locks are held (`W4`, `BF-3`).
+#[cfg(test)]
 pub(in crate::system_actor) fn enqueue_barrier_under_locks(handle: &super::SystemHandle) -> PostUnlockWaitTicket {
     enqueue_work_ticket_with_seq(handle, None, None, PostUnlockOps::default(), true, 0).1
 }
@@ -2133,6 +2138,7 @@ pub(in crate::system_actor) fn execute_unsent_work_item_direct(
 }
 
 /// Finishes waiting or fallback execution strictly **after** all actor locks are dropped (`W2`, `W3`).
+#[cfg(test)]
 pub(in crate::system_actor) fn finish_post_unlock_after_unlock(handle: &super::SystemHandle, deact_guard: Option<&ModuleDeactivationHook>, lock_guard: Option<&TargetLockCompletedHook>, ticket: PostUnlockWaitTicket) {
     let safe_sync = can_run_post_unlock_sync_now() && !handle.is_on_post_unlock_callback_thread();
     match ticket {
@@ -2202,6 +2208,7 @@ pub(in crate::system_actor) struct PostCommitActorTargets {
 }
 
 impl PostCommitActorTargets {
+    #[cfg(test)]
     fn from_handle(handle: &super::SystemHandle) -> Self {
         Self {
             solar_system_id: handle.solar_system_id,

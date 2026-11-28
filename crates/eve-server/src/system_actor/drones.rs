@@ -730,12 +730,6 @@ pub(in crate::system_actor) async fn flush_from_handle_async(handle: &SystemHand
     }
 }
 
-pub(in crate::system_actor) fn try_flush_from_handle(handle: &SystemHandle) {
-    if let Some(shared) = handle.ballpark.drone_hydration_shared() {
-        flush_sync_from_handle(handle, shared, false);
-    }
-}
-
 pub(in crate::system_actor) fn flush_from_handle(handle: &SystemHandle) {
     if let Some(shared) = handle.ballpark.drone_hydration_shared() {
         flush_sync_from_handle(handle, shared, true);

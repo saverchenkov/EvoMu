@@ -352,17 +352,6 @@ impl SystemHandle {
             > 0
     }
 
-    /// Publishes a fresh [`super::SystemView`] from an already-locked `ballpark` and `actor_state`.
-    pub(crate) fn publish_view_from(
-        &self,
-        ballpark: &Ballpark,
-        actor_state: &super::SystemActorState,
-    ) {
-        let tidi = self.tidi_factor();
-        let next = super::SystemView::from_ballpark(ballpark, Some(actor_state), tidi, None);
-        send_view_preserving_atomic_tidi(&self.view_tx, &self.tidi_factor_bits, next);
-    }
-
     #[track_caller]
     pub(crate) fn cmd_sender(&self) -> &mpsc::Sender<SystemCommand> {
         assert_no_locks_held();
@@ -2270,6 +2259,7 @@ pub struct SystemHandle {
     pub(crate) warp_stopped_at: Arc<RankedRwLock<HashMap<BallId, tokio::time::Instant>, RANK_LEAF>>,
     pub(crate) active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     pub ballpark: Arc<BallparkHandle>,
+    #[allow(dead_code)] // Retained for tests until Track 4D-6 moves SystemActorState by value into actor.
     pub(crate) actor_state: Arc<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>,
     pub(crate) view_tx: Arc<tokio::sync::watch::Sender<Arc<super::SystemView>>>,
     pub(crate) view_rx: tokio::sync::watch::Receiver<Arc<super::SystemView>>,
