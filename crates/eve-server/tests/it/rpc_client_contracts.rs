@@ -3563,7 +3563,7 @@ fn test_crowset_descriptor_columns_reads_canonical_empty_rowsets() {
 }
 
 /// Validates and normalizes ephemeral `beyonceBoundID` / `boundResult[0]` integer handles across
-/// independent C-2 `ServerContext`s so per-process `NEXT_BOUND_ID` increments do not cause false diffs
+/// independent C-2 `ServerContext`s so per-context bound ID allocations do not cause false diffs
 /// while malformed or unbound IDs still register as differences.
 fn canonicalize_c2_ephemeral_beyonce_bound(
     ctx: &ServerContext,
@@ -4142,9 +4142,16 @@ async fn test_restore_session_profile_and_c2_beyonce_canonicalization() {
     let bid_a = ctx_a
         .bind_object(&sess_a, "beyonce", i64::from(SYSTEM_ID))
         .expect("bind beyonce A");
+    let bid_b_first = ctx_b
+        .bind_object(&sess_b, "beyonce", i64::from(SYSTEM_ID))
+        .expect("bind beyonce B first");
+    assert_eq!(
+        bid_a, bid_b_first,
+        "independent ServerContexts start bound IDs at the same baseline"
+    );
     let bid_b = ctx_b
         .bind_object(&sess_b, "beyonce", i64::from(SYSTEM_ID))
-        .expect("bind beyonce B");
+        .expect("bind beyonce B second");
 
     let mk_undock_rep = |bid: u64, ready_at_ft: i64| {
         PyRep::keyval([
@@ -4160,7 +4167,10 @@ async fn test_restore_session_profile_and_c2_beyonce_canonicalization() {
 
     let rep_a = mk_undock_rep(bid_a, 123_456);
     let rep_b = mk_undock_rep(bid_b, 123_456);
-    assert_ne!(rep_a, rep_b, "independent ServerContexts must allocate distinct bound IDs");
+    assert_ne!(
+        rep_a, rep_b,
+        "subsequent bound ID allocation on ctx_b must produce a distinct bound ID"
+    );
     assert_eq!(
         canonicalize_c2_ephemeral_beyonce_bound(&ctx_a, &sess_a, &rep_a),
         canonicalize_c2_ephemeral_beyonce_bound(&ctx_b, &sess_b, &rep_b),

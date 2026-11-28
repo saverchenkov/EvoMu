@@ -1586,7 +1586,7 @@ async fn test_abyssal_downtime_evacuation_purges_abandoned_and_orphaned_drones()
 }
 
 #[tokio::test]
-async fn test_world_repository_monotonic_instance_id_and_ballpark_isolation() {
+async fn test_world_repository_distinct_instance_id_and_ballpark_isolation() {
     let r1 = Arc::new(WorldRepository::with_demo_seed());
     let r2 = Arc::new(WorldRepository::new_in_memory().unwrap());
     let tmp = std::env::temp_dir().join(format!("evomu_repo_id_{}.sqlite", std::process::id()));
