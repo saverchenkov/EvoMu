@@ -311,6 +311,7 @@ fn enqueue_pvp_char_notification<N: crate::router::notify_registry::TypedNotific
     }
     let created_filetime = ((db.clock().now_unix_secs() + 11_644_473_600) * 10_000_000) as i64;
     crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+        db.next_notification_seq_id(),
         pending_opt,
         notify_tx_opt,
         cid,

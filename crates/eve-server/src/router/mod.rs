@@ -43,7 +43,7 @@ pub mod fixture_census;
 #[cfg(any(test, feature = "testkit"))]
 pub mod test_context;
 
-pub use binding::{alloc_transport_session_id, SessionCleanupGuard, NEXT_TRANSPORT_SESSION_ID};
+pub use binding::SessionCleanupGuard;
 pub use cache_notifications::*;
 pub use context::*;
 #[cfg(any(test, feature = "testkit"))]

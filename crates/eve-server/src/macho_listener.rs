@@ -290,10 +290,6 @@ fn drain_sys_rx_discarding_up_to_seq(
     post_loss
 }
 
-pub use crate::router::NEXT_TRANSPORT_SESSION_ID as NEXT_MACHO_SESSION_ID;
-/// Global monotonic session-ID counter shared across `machoNet`, Python Bridge, and Quasar gRPC (`ORD-9`).
-pub use crate::router::NEXT_TRANSPORT_SESSION_ID as NEXT_SESSION_ID;
-
 const PREAUTH_CONN_TRACKER_SLOT_KEY: &str = "macho_listener_preauth_conn_tracker";
 
 /// Per-repository/per-context tracker counting concurrent pre-authentication TCP connections
@@ -2984,7 +2980,7 @@ pub async fn handle_macho_client_with_tracker(
     ctx: Arc<ServerContext>,
     preauth_tracker: Arc<PreauthConnTracker>,
 ) -> Result<()> {
-    let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+    let session_id = ctx.alloc_transport_session_id();
     let client_id = 1_000_000_000_000_u64.saturating_add(session_id);
     let peer_addr = stream
         .peer_addr()

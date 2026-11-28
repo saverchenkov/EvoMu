@@ -701,13 +701,13 @@ fn compute_item_change_dict_and_mutation_router_v24_parity() {
 #[test]
 fn mutants_cov_notification_seq_flag_module_fx_tombstone_and_target_edges() {
     use crate::router::cache_notifications::{
-        is_corp_hangar_flag, next_notification_seq_id, push_pending_notification_capped,
-        PendingMachoNotification,
+        is_corp_hangar_flag, push_pending_notification_capped, PendingMachoNotification,
     };
 
-    // 1. Monotonic seq IDs > 1
-    let s1 = next_notification_seq_id();
-    let s2 = next_notification_seq_id();
+    // 1. Monotonic seq IDs > 1 scoped per context
+    let seq_ctx = test_ctx();
+    let s1 = seq_ctx.next_notification_seq_id();
+    let s2 = seq_ctx.next_notification_seq_id();
     assert_eq!(s2, s1 + 1);
     assert!(s2 > 1);
 
@@ -733,6 +733,7 @@ fn mutants_cov_notification_seq_flag_module_fx_tombstone_and_target_edges() {
         push_pending_notification_capped(
             &mut queue,
             PendingMachoNotification::new(
+                (i + 1) as u64,
                 1,
                 format!("Ev{i}"),
                 "charid",
@@ -748,6 +749,7 @@ fn mutants_cov_notification_seq_flag_module_fx_tombstone_and_target_edges() {
     push_pending_notification_capped(
         &mut queue,
         PendingMachoNotification::new(
+            (MAX_PENDING_NOTIFICATIONS_PER_CHAR + 1) as u64,
             1,
             "EvOverflow",
             "charid",
@@ -1512,4 +1514,110 @@ fn notify_item_mutation_refreshes_on_multiple_item_change_and_active_industry_mo
     let unmonitored = ctx.drain_notifications_for_char(char_id);
     assert!(unmonitored.iter().any(|n| n.event == "OnMultipleItemChange"));
     assert!(unmonitored.iter().all(|n| n.event != "OnIndustryMaterials"));
+}
+
+#[test]
+fn per_context_transport_session_and_notification_seq_counters_are_isolated() {
+    let ctx_a = ServerContext::new();
+    let ctx_b = ServerContext::new();
+
+    assert_eq!(ctx_a.alloc_transport_session_id(), 10_000);
+    assert_eq!(ctx_a.alloc_transport_session_id(), 10_001);
+    assert_eq!(ctx_b.alloc_transport_session_id(), 10_000);
+    assert_eq!(ctx_b.alloc_transport_session_id(), 10_001);
+    assert_eq!(ctx_a.alloc_transport_session_id(), 10_002);
+
+    assert_eq!(ctx_a.next_notification_seq_id(), 1);
+    assert_eq!(ctx_a.next_notification_seq_id(), 2);
+    assert_eq!(ctx_b.next_notification_seq_id(), 1);
+    assert_eq!(ctx_b.next_notification_seq_id(), 2);
+    assert_eq!(ctx_a.next_notification_seq_id(), 3);
+}
+
+#[test]
+fn dbless_zero_seq_notifications_receive_monotonic_ids_on_enqueue_and_survive_restore() {
+    use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
+    use std::collections::HashMap;
+
+    let char_id = 90_000_001_i64;
+    let pend: RankedRwLock<HashMap<i64, Vec<PendingMachoNotification>>, RANK_LEAF> =
+        RankedRwLock::new(HashMap::new());
+    let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+
+    let (pkt1, raw1) =
+        ServerContext::build_macho_notification_packet(char_id, Some(1), "EvFirst", "charid", vec![]);
+    let n1 = PendingMachoNotification::new(0, char_id, "EvFirst", "charid", vec![], pkt1, raw1, 100);
+    let n2 = assemble_pending_notification(0, char_id, Some(1), "EvSecond", "charid", vec![], 200);
+
+    push_or_stage_pending_notification(Some(&pend), Some(&tx), n1, None);
+    push_or_stage_pending_notification(Some(&pend), Some(&tx), n2, None);
+
+    let drained = pend
+        .write()
+        .unwrap()
+        .remove(&char_id)
+        .expect("two DB-less notifications enqueued");
+    assert_eq!(drained.len(), 2);
+    assert_eq!(drained[0].seq_id, 1);
+    assert_eq!(drained[1].seq_id, 2);
+
+    let rx1 = rx.try_recv().expect("broadcast 1");
+    let rx2 = rx.try_recv().expect("broadcast 2");
+    assert_eq!((rx1.1.seq_id, rx2.1.seq_id), (1, 2));
+
+    let ctx = test_ctx();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.restore_pending_notifications(drained.clone());
+    let restored = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(restored.len(), 2);
+    assert_eq!((restored[0].seq_id, restored[1].seq_id), (1, 2));
+
+    // Re-restoring already-sequenced notifications still deduplicates by seq_id, while
+    // raw seq_id == 0 entries receive fresh monotonic IDs without colliding.
+    ctx.restore_pending_notifications(restored.clone());
+    ctx.restore_pending_notifications(restored);
+    assert_eq!(ctx.latest_notification_seq_for_char(char_id), 2);
+    let raw_a = assemble_pending_notification(0, char_id, Some(1), "EvRawA", "charid", vec![], 300);
+    let raw_b = assemble_pending_notification(0, char_id, Some(1), "EvRawB", "charid", vec![], 400);
+    ctx.restore_pending_notifications(vec![raw_a, raw_b]);
+    let after = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(after.len(), 4);
+    assert_eq!(
+        after.iter().map(|n| n.seq_id).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+
+    // DB-less cycle notification enqueue path (`flush_target_lost_notifications`, `db_opt = None`)
+    // also assigns strictly increasing non-zero seq_ids.
+    let mut bp = eve_destiny::Ballpark::new(30_000_142);
+    bp.ball_slim_meta.insert(
+        100_000_001,
+        eve_destiny::SlimItemMeta {
+            char_id: Some(char_id),
+            ..Default::default()
+        },
+    );
+    bp.ball_slim_meta.insert(
+        100_000_002,
+        eve_destiny::SlimItemMeta {
+            char_id: Some(0),
+            ..Default::default()
+        },
+    );
+    let cycle_pend: std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>> =
+        std::sync::RwLock::new(HashMap::new());
+    crate::system_actor::flush_target_lost_notifications(
+        &bp,
+        &[eve_destiny::DestinyEvent::OnTarget {
+            mode: "lost".into(),
+            source_id: 100_000_001,
+            target_id: 100_000_002,
+        }],
+        None,
+        Some(&cycle_pend),
+        None,
+    );
+    let cycle_q = &cycle_pend.read().unwrap()[&char_id];
+    assert_eq!(cycle_q.len(), 2);
+    assert_eq!((cycle_q[0].seq_id, cycle_q[1].seq_id), (1, 2));
 }

@@ -63,6 +63,7 @@ pub struct ServerContext {
     pub(crate) next_bound_id: Arc<AtomicU64>,
     pub(crate) next_fighter_res_id: Arc<AtomicI64>,
     pub(crate) next_stargate_spawn_token: Arc<AtomicU64>,
+    pub next_transport_session_id: Arc<AtomicU64>,
     pub(crate) transition_grace_store: Arc<
         RankedRwLock<
             crate::router::binding_transition_policy::ContextGraceStore,
@@ -163,6 +164,7 @@ pub(crate) struct ServerContextWeak {
     next_bound_id: std::sync::Weak<AtomicU64>,
     next_fighter_res_id: std::sync::Weak<AtomicI64>,
     next_stargate_spawn_token: std::sync::Weak<AtomicU64>,
+    next_transport_session_id: std::sync::Weak<AtomicU64>,
     transition_grace_store: std::sync::Weak<
         RankedRwLock<
             crate::router::binding_transition_policy::ContextGraceStore,
@@ -246,6 +248,7 @@ impl ServerContextWeak {
             next_bound_id: self.next_bound_id.upgrade()?,
             next_fighter_res_id: self.next_fighter_res_id.upgrade()?,
             next_stargate_spawn_token: self.next_stargate_spawn_token.upgrade()?,
+            next_transport_session_id: self.next_transport_session_id.upgrade()?,
             transition_grace_store: self.transition_grace_store.upgrade()?,
             object_cache: self.object_cache.upgrade()?,
             object_cache_timestamps: self.object_cache_timestamps.upgrade()?,
@@ -422,6 +425,20 @@ impl ServerContext {
             .fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Allocates a per-context monotonic transport `session_id` across all client listeners (`#852`, `#1583`).
+    #[inline]
+    pub fn alloc_transport_session_id(&self) -> u64 {
+        self.next_transport_session_id
+            .fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Returns a monotonically increasing sequence ID for [`crate::router::PendingMachoNotification`]
+    /// scoped to `self.db` (`#1583`).
+    #[inline]
+    pub fn next_notification_seq_id(&self) -> u64 {
+        self.db.next_notification_seq_id()
+    }
+
     /// Creates a non-owning weak handle referencing all shared runtime state on this `ServerContext`
     /// (`RFC-1 E-4`, `#839`, `#919`).
     pub(crate) fn downgrade(&self) -> ServerContextWeak {
@@ -440,6 +457,7 @@ impl ServerContext {
             next_bound_id: Arc::downgrade(&self.next_bound_id),
             next_fighter_res_id: Arc::downgrade(&self.next_fighter_res_id),
             next_stargate_spawn_token: Arc::downgrade(&self.next_stargate_spawn_token),
+            next_transport_session_id: Arc::downgrade(&self.next_transport_session_id),
             transition_grace_store: Arc::downgrade(&self.transition_grace_store),
             object_cache: Arc::downgrade(&self.object_cache),
             object_cache_timestamps: Arc::downgrade(&self.object_cache_timestamps),
@@ -624,6 +642,7 @@ impl ServerContext {
             next_bound_id: Arc::new(AtomicU64::new(10_000)),
             next_fighter_res_id: Arc::new(AtomicI64::new(-300_000)),
             next_stargate_spawn_token: Arc::new(AtomicU64::new(1)),
+            next_transport_session_id: Arc::new(AtomicU64::new(10_000)),
             transition_grace_store: Arc::new(RankedRwLock::new(
                 crate::router::binding_transition_policy::ContextGraceStore::default(),
             )),

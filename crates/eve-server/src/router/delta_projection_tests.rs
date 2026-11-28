@@ -902,7 +902,11 @@ fn recipient_resolution_filters_offline_sessions_and_materializes_macho_packets(
     assert_eq!(resolved[0].event, "OnAccountChange");
     assert_eq!(resolved[0].id_type, "corpid");
 
-    let pending = materialize_pending_notifications(resolved, unix_to_filetime(1_700_000_000));
+    let pending = materialize_pending_notifications(
+        resolved,
+        unix_to_filetime(1_700_000_000),
+        || db.next_notification_seq_id(),
+    );
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].packet.packet_type, MachoPacketType::Notification);
     assert!(!pending[0].marshaled_packet.is_empty());
@@ -929,6 +933,7 @@ fn recipient_resolution_filters_offline_sessions_and_materializes_macho_packets(
             ],
         }],
         unix_to_filetime(1_700_000_000),
+        || db.next_notification_seq_id(),
     );
     assert_eq!(item_pending.len(), 1);
     assert_eq!(item_pending[0].args.len(), 2);
@@ -1631,5 +1636,6 @@ fn materialize_pending_notifications_panics_on_wrong_arity_registered_event() {
             args: vec![PyRep::String("cash".into())],
         }],
         unix_to_filetime(1_700_000_000),
+        || 1,
     );
 }

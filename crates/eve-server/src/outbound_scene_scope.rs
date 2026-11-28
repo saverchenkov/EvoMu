@@ -645,6 +645,7 @@ fn resolve_ballpark_scope<N: TypedEvent>(
 /// Scene-scoped variant of [`build_pending_typed_notification`] attaching a required
 /// [`BallparkScene`] (`#1190` RB3).
 pub fn build_pending_typed_notification_in_ballpark<N: TypedEvent>(
+    seq_id: u64,
     recipient_char_id: i64,
     user_id_opt: Option<u64>,
     id_type: &str,
@@ -653,7 +654,7 @@ pub fn build_pending_typed_notification_in_ballpark<N: TypedEvent>(
     notif: N,
 ) -> PendingMachoNotification {
     let scope = resolve_ballpark_scope(scene, &notif);
-    build_pending_typed_notification(recipient_char_id, user_id_opt, id_type, created_filetime, notif)
+    build_pending_typed_notification(seq_id, recipient_char_id, user_id_opt, id_type, created_filetime, notif)
         .with_scene_scope(Some(scope))
 }
 

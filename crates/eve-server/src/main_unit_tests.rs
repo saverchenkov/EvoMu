@@ -237,7 +237,10 @@ async fn handle_bridge_client_handles_errors_notifications_ticks_and_kick() -> R
 
     // 3. Full bridge loop: non-request envelope ignored, login + select char, notify_tx filtering,
     //    sys_rx TickBroadcast (pyrep & events fallback), and disconnect_session GPSTransportClosed.
-    let sid_before = NEXT_SESSION_ID.load(Ordering::Relaxed);
+    let sid_before = ctx
+        .next_transport_session_id
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(sid_before, 10_002);
     let listener3 = TcpListener::bind("127.0.0.1:0").await?;
     let addr3 = listener3.local_addr()?;
     let ctx3 = Arc::clone(&ctx);

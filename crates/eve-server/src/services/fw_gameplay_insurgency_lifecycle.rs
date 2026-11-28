@@ -526,6 +526,7 @@ pub fn emit_campaign_resolution_effects_core(
         for cid in system_chars {
             if let Some(ref campaign_snapshot) = snapshot_opt {
                 crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+                    db.next_notification_seq_id(),
                     pending_notifications,
                     notify_tx,
                     cid,
@@ -543,6 +544,7 @@ pub fn emit_campaign_resolution_effects_core(
                     .map(|&s| eve_proto::PyRep::Integer(i64::from(s)))
                     .collect();
                 crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+                    db.next_notification_seq_id(),
                     pending_notifications,
                     notify_tx,
                     cid,
@@ -559,6 +561,7 @@ pub fn emit_campaign_resolution_effects_core(
                 );
             }
             crate::router::notify_registry::emit_typed_target_to_char_with_id_type(
+                db.next_notification_seq_id(),
                 pending_notifications,
                 notify_tx,
                 cid,

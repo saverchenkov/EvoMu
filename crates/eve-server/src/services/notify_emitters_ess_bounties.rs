@@ -31,6 +31,7 @@ pub(crate) fn push_char_notification_with_db(
     };
     let uid_opt = db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id));
     let Some(notif) = build_pending_registered_notification(
+        db.next_notification_seq_id(),
         char_id,
         uid_opt,
         event,

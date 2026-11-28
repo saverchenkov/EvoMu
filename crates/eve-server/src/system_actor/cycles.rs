@@ -2166,6 +2166,7 @@ fn enqueue_target_lost_typed<N: TypedNotification>(
         return;
     };
     let pending_notif = build_pending_typed_notification_in_ballpark(
+        db_opt.map_or(0, |db| db.next_notification_seq_id()),
         cid,
         uid,
         id_type,
@@ -2494,12 +2495,14 @@ fn enqueue_cycle_char_notification_with_scope<N: TypedNotification>(
     notif: N,
 ) {
     let uid = db_opt.and_then(|db| db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.user_id)));
-    let notif = match scene_opt {
+    let seq_id = db_opt.map_or(0, |db| db.next_notification_seq_id());
+    let mut notif = match scene_opt {
         Some(scene) => {
             let Some(bound_scene) = resolve_bound_ballpark_scene(db_opt, cid, uid, scene) else {
                 return;
             };
             build_pending_typed_notification_in_ballpark(
+                seq_id,
                 cid,
                 uid,
                 N::DEFAULT_ID_TYPE,
@@ -2513,6 +2516,7 @@ fn enqueue_cycle_char_notification_with_scope<N: TypedNotification>(
                 return;
             }
             crate::router::notify_registry::build_pending_typed_notification(
+                seq_id,
                 cid,
                 uid,
                 N::DEFAULT_ID_TYPE,
@@ -2524,6 +2528,7 @@ fn enqueue_cycle_char_notification_with_scope<N: TypedNotification>(
     {
         let mut q_guard = pending.write().unwrap_or_else(|e| e.into_inner());
         let q = q_guard.entry(cid).or_default();
+        crate::router::cache_notifications::assign_fallback_seq_id_if_zero(q, &mut notif);
         if let Some(key) = capacitor_telemetry_key(&notif) {
             // Keep only the latest unread capacitor telemetry per ship so passive regen ticks
             // do not fill the character queue and evict discrete state notifications (#1156).
