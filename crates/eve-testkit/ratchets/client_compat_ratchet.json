@@ -8,13 +8,11 @@
       "crates/eve-server/src/router/client_compat.rs": 5
     },
     "notify_arms": {
-      "crates/eve-server/src/router/client_compat.rs": 29
+      "crates/eve-server/src/router/client_compat.rs": 28
     },
-    "destiny_rewrites": {
-      "crates/eve-server/src/router/client_compat.rs": 4
-    },
+    "destiny_rewrites": {},
     "production_lines": {
-      "crates/eve-server/src/router/client_compat.rs": 1335
+      "crates/eve-server/src/router/client_compat.rs": 1174
     },
     "sequencer_set_state_rewrites": {
       "crates/eve-server/src/outbound_sequencer.rs": 18
@@ -39,7 +37,6 @@
       "crates/eve-server/src/services/market_price_history_tests.rs": 1,
       "crates/eve-server/src/services/r6_t4_econ_security_tests.rs": 4,
       "crates/eve-server/src/services/w4_gh758_804_mutant_killers_unit_tests.rs": 2,
-      "crates/eve-server/tests/it/navigation_warp_tunnel_immobility.rs": 1,
       "crates/eve-server/tests/it/quasar_grpc_protobuf_edge_coverage.rs": 7,
       "crates/eve-server/tests/it/rpc_client_contracts.rs": 1
     },
@@ -48,13 +45,6 @@
   },
   "max_transport_differing_replies": 22,
   "known_rules": [
-    "destiny:payload:CloakBall",
-    "destiny:payload:OnSlimItemChange",
-    "destiny:payload:OnSpecialFX",
-    "destiny:payload:PackagedAction",
-    "destiny:payload:SetBallInteractive",
-    "destiny:payload:effects.Cloak",
-    "notify:DoDestinyUpdate",
     "notify:DoDestinyUpdates",
     "notify:OnChannelJoined",
     "notify:OnChannelLeft",

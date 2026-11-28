@@ -926,6 +926,83 @@ fn build_tick_broadcast_evicts_dead_queues_and_matches_direct_encode() {
 }
 
 #[test]
+fn build_tick_broadcast_normal_tick_applies_canonical_omission_rules() {
+    let mut bp = Ballpark::new(30_000_142);
+    bp.current_tick = 88;
+    let added_ball = Ball {
+        id: 304,
+        type_id: 587,
+        position: DVec3::new(30_400.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 3.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    for id in [301_i64, 302, 303] {
+        bp.add_ball(Ball {
+            id,
+            ..added_ball.clone()
+        });
+    }
+    bp.add_ball(added_ball.clone());
+    bp.drain_all_observer_events();
+
+    let mixed_evs = vec![
+        DestinyEvent::TargetLockFailed {
+            source_id: 301,
+            target_id: 303,
+        },
+        DestinyEvent::AddBalls2 {
+            balls: vec![added_ball],
+        },
+        DestinyEvent::OnSlimItemChange { ball_id: 304 },
+        DestinyEvent::OnSlimItemChange { ball_id: 303 },
+    ];
+    let lock_only_evs = vec![DestinyEvent::TargetLockFailed {
+        source_id: 302,
+        target_id: 303,
+    }];
+
+    // Observers 301 & 303 share identical filtered batches (`batch_cache` miss + hit);
+    // 302 receives only `TargetLockFailed`, which must encode to an empty `PyRep::List`.
+    bp.observer_events.insert(301, mixed_evs.clone());
+    bp.observer_events.insert(303, mixed_evs.clone());
+    bp.observer_events.insert(302, lock_only_evs.clone());
+
+    let expected_mixed = eve_destiny::wire::encode_destiny_updates(88, &mixed_evs, Some(&bp));
+    let expected_lock_only =
+        eve_destiny::wire::encode_destiny_updates(88, &lock_only_evs, Some(&bp));
+
+    let bcast = build_tick_broadcast(30_000_142, &mut bp, Vec::new());
+    let mixed_updates = bcast
+        .observer_updates_pyrep
+        .get(&301)
+        .expect("observer 301 batch");
+    assert_eq!(mixed_updates, &expected_mixed);
+    assert_eq!(bcast.observer_updates_pyrep.get(&303), Some(&expected_mixed));
+    if let PyRep::List(items) = mixed_updates {
+        assert_eq!(
+            items.len(),
+            2,
+            "must keep AddBalls2 and unrelated OnSlimItemChange(303)"
+        );
+    } else {
+        panic!("expected PyRep::List, got {mixed_updates:?}");
+    }
+    assert_eq!(
+        bcast.observer_updates_pyrep.get(&302),
+        Some(&expected_lock_only)
+    );
+    assert_eq!(
+        bcast.observer_updates_pyrep.get(&302),
+        Some(&PyRep::List(Vec::new()))
+    );
+}
+
+#[test]
 fn jita_to_perimeter_gate_points_toward_perimeter_within_one_degree() {
     let ctx = crate::router::ServerContext::new();
     let jita_id = 30_000_142_u32;

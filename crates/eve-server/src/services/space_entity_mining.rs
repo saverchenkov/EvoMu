@@ -16,7 +16,7 @@ use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_sde::TypeId;
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, ClientError, PyRep};
+use eve_proto::{BridgeRpcError, ClientError, DBRowDescriptor, DbColumnType, PyRep};
 use glam::DVec3;
 
 const BEYONCE_SVC: &str = "beyonce";
@@ -2450,18 +2450,90 @@ pub async fn handle(
                     quotes
                 })
             };
-            Some(Ok(
-                crate::router::client_compat::build_v24_reprocessing_quotes_tuple(
-                    PyRep::Real(station_tax_rate),
-                    PyRep::Real(station_base_yield),
-                    quotes,
-                ),
-            ))
+            Some(Ok(build_v24_reprocessing_quotes_tuple(
+                PyRep::Real(station_tax_rate),
+                PyRep::Real(station_base_yield),
+                quotes,
+            )))
         }
 
 
         _ => None,
     }
+}
+
+/// Builds the canonical V24.01 `reprocessingSvc.GetQuotes` 3-tuple
+/// `(stationTax, stationEfficiencyDict, {itemID: utillib.KeyVal(...)})` (`reprocessing/ui/quotes.pyj:14-19`).
+pub(crate) fn build_v24_reprocessing_quotes_tuple(
+    tax: PyRep,
+    base_yield: PyRep,
+    quotes: Vec<PyRep>,
+) -> PyRep {
+    let mut eff_entries = vec![
+        (PyRep::None, base_yield.clone()),
+        (PyRep::Integer(25), base_yield.clone()),
+    ];
+    let mut seen_eff_types = std::collections::HashSet::new();
+    let recoverable_desc = DBRowDescriptor::new([
+        ("typeID", DbColumnType::I4),
+        ("client", DbColumnType::I8),
+        ("unrecoverable", DbColumnType::I8),
+        ("station", DbColumnType::I8),
+        ("iskCost", DbColumnType::R8),
+    ]);
+    let mut quote_entries = Vec::with_capacity(quotes.len());
+    for q in quotes {
+        let item_id = q.dict_get("itemID").cloned().unwrap_or(PyRep::Integer(0));
+        let quote_type_id = q.dict_get("typeID").cloned().unwrap_or(PyRep::Integer(0));
+        if let Some(tid) = quote_type_id.as_i64() {
+            if seen_eff_types.insert(tid) {
+                let eff_val = q
+                    .dict_get("stationBaseYield")
+                    .cloned()
+                    .unwrap_or_else(|| base_yield.clone());
+                eff_entries.push((PyRep::Integer(tid), eff_val));
+            }
+        }
+        let recoverable_rows = match q.dict_get("outputs") {
+            Some(PyRep::List(outs)) => outs
+                .iter()
+                .map(|o| {
+                    let tid = o.dict_get("typeID").cloned().unwrap_or(PyRep::Integer(0));
+                    let qty = o.dict_get("quantity").cloned().unwrap_or(PyRep::Integer(0));
+                    let unrec = o
+                        .dict_get("unrecoverable")
+                        .cloned()
+                        .unwrap_or(PyRep::Integer(0));
+                    let station = o.dict_get("station").cloned().unwrap_or(PyRep::Integer(0));
+                    let isk_cost = o.dict_get("iskCost").cloned().unwrap_or(PyRep::Real(0.0));
+                    vec![tid, qty, unrec, station, isk_cost]
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let recoverables = recoverable_desc.build_crowset(recoverable_rows);
+        let qty_to_process = q
+            .dict_get("quantityToProcess")
+            .cloned()
+            .unwrap_or(PyRep::Integer(0));
+        let left_overs = q.dict_get("leftOvers").cloned().unwrap_or(PyRep::Integer(0));
+        let isk_cost = q.dict_get("iskCost").cloned().unwrap_or(PyRep::Real(0.0));
+        let total_isk_cost = q
+            .dict_get("totalISKCost")
+            .cloned()
+            .unwrap_or(PyRep::Real(0.0));
+        let entry = PyRep::keyval([
+            ("typeID", quote_type_id),
+            ("quantityToProcess", qty_to_process),
+            ("leftOvers", left_overs),
+            ("iskCost", isk_cost),
+            ("totalISKCost", total_isk_cost),
+            ("recoverables", recoverables),
+        ]);
+        quote_entries.push((item_id, entry));
+    }
+    let eff_dict = PyRep::Dict(eff_entries);
+    PyRep::Tuple(vec![tax, eff_dict, PyRep::Dict(quote_entries)])
 }
 
 use crate::router::rpc_registry::{rpc_entry, RpcBoxFuture, RpcDispatchHandler, RpcEntry};

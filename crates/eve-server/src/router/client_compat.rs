@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 
 fn kv_int(entries: &HashMap<String, PyRep>, key: &str, default: i64) -> i64 {
     match entries.get(key) {
@@ -444,158 +444,6 @@ fn normalize_damage_state_tuple(rep: PyRep) -> PyRep {
     PyRep::Tuple(state)
 }
 
-fn destiny_entry_func_name(item: &PyRep) -> Option<&str> {
-    let PyRep::Tuple(outer) = item else {
-        return None;
-    };
-    if outer.len() == 2 {
-        if let PyRep::Tuple(inner) = &outer[1] {
-            return inner.first().and_then(|f| f.as_str());
-        }
-        return outer.first().and_then(|f| f.as_str());
-    }
-    None
-}
-
-fn normalize_destiny_payload_arg(rep: PyRep) -> PyRep {
-    match rep {
-        PyRep::List(items) => {
-            let has_set_state = items
-                .iter()
-                .any(|it| destiny_entry_func_name(it) == Some("SetState"));
-            let has_ball_add = has_set_state
-                || items.iter().any(|it| {
-                    matches!(destiny_entry_func_name(it), Some("AddBalls" | "AddBalls2"))
-                });
-            PyRep::List(
-                items
-                    .into_iter()
-                    .filter(|it| {
-                        let fname = destiny_entry_func_name(it);
-                        !(has_ball_add && fname == Some("OnSlimItemChange"))
-                            && !(has_set_state
-                                && matches!(
-                                    fname,
-                                    Some("SetBallInteractive" | "PackagedAction")
-                                ))
-                    })
-                    .map(normalize_destiny_payload_arg)
-                    .collect(),
-            )
-        }
-        PyRep::Tuple(mut items) => {
-            if items.len() == 2 {
-                if let (Some(name), Some(PyRep::Tuple(ev_args))) =
-                    (items[0].as_str(), items.get(1))
-                {
-                    if name == "CloakBall" && ev_args.len() >= 2 {
-                        let is_uncloak = match &ev_args[1] {
-                            PyRep::Bool(b) => !*b,
-                            PyRep::Integer(v) => *v == 0,
-                            _ => false,
-                        };
-                        if is_uncloak {
-                            return PyRep::Tuple(vec![
-                                PyRep::String("UncloakBall".into()),
-                                PyRep::Tuple(vec![ev_args[0].clone()]),
-                            ]);
-                        }
-                    } else if name == "OnSpecialFX" && ev_args.len() >= 11 {
-                        let guid = ev_args[5].as_str();
-                        let is_stop = matches!(ev_args[7], PyRep::Bool(false) | PyRep::Integer(0));
-                        if guid == Some("effects.Cloak") && is_stop {
-                            let mut fx = ev_args.clone();
-                            fx[5] = PyRep::String("effects.Uncloak".into());
-                            fx[7] = PyRep::Integer(1);
-                            fx[8] = PyRep::Integer(0);
-                            fx[9] = PyRep::Integer(6000);
-                            fx[10] = PyRep::Integer(1);
-                            items[1] = PyRep::Tuple(fx);
-                            return PyRep::Tuple(items);
-                        }
-                    }
-                }
-            }
-            PyRep::Tuple(items.into_iter().map(normalize_destiny_payload_arg).collect())
-        }
-        other => other,
-    }
-}
-
-/// Builds the canonical V24.01 `reprocessingSvc.GetQuotes` 3-tuple
-/// `(stationTax, stationEfficiencyDict, {itemID: utillib.KeyVal(...)})` (`reprocessing/ui/quotes.pyj:14-19`).
-pub(crate) fn build_v24_reprocessing_quotes_tuple(
-    tax: PyRep,
-    base_yield: PyRep,
-    quotes: Vec<PyRep>,
-) -> PyRep {
-    let mut eff_entries = vec![
-        (PyRep::None, base_yield.clone()),
-        (PyRep::Integer(25), base_yield.clone()),
-    ];
-    let mut seen_eff_types = std::collections::HashSet::new();
-    let recoverable_desc = DBRowDescriptor::new([
-        ("typeID", DbColumnType::I4),
-        ("client", DbColumnType::I8),
-        ("unrecoverable", DbColumnType::I8),
-        ("station", DbColumnType::I8),
-        ("iskCost", DbColumnType::R8),
-    ]);
-    let mut quote_entries = Vec::with_capacity(quotes.len());
-    for q in quotes {
-        let item_id = q.dict_get("itemID").cloned().unwrap_or(PyRep::Integer(0));
-        let quote_type_id = q.dict_get("typeID").cloned().unwrap_or(PyRep::Integer(0));
-        if let Some(tid) = quote_type_id.as_i64() {
-            if seen_eff_types.insert(tid) {
-                let eff_val = q
-                    .dict_get("stationBaseYield")
-                    .cloned()
-                    .unwrap_or_else(|| base_yield.clone());
-                eff_entries.push((PyRep::Integer(tid), eff_val));
-            }
-        }
-        let recoverable_rows = match q.dict_get("outputs") {
-            Some(PyRep::List(outs)) => outs
-                .iter()
-                .map(|o| {
-                    let tid = o.dict_get("typeID").cloned().unwrap_or(PyRep::Integer(0));
-                    let qty = o.dict_get("quantity").cloned().unwrap_or(PyRep::Integer(0));
-                    let unrec = o
-                        .dict_get("unrecoverable")
-                        .cloned()
-                        .unwrap_or(PyRep::Integer(0));
-                    let station = o.dict_get("station").cloned().unwrap_or(PyRep::Integer(0));
-                    let isk_cost = o.dict_get("iskCost").cloned().unwrap_or(PyRep::Real(0.0));
-                    vec![tid, qty, unrec, station, isk_cost]
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        let recoverables = recoverable_desc.build_crowset(recoverable_rows);
-        let qty_to_process = q
-            .dict_get("quantityToProcess")
-            .cloned()
-            .unwrap_or(PyRep::Integer(0));
-        let left_overs = q.dict_get("leftOvers").cloned().unwrap_or(PyRep::Integer(0));
-        let isk_cost = q.dict_get("iskCost").cloned().unwrap_or(PyRep::Real(0.0));
-        let total_isk_cost = q
-            .dict_get("totalISKCost")
-            .cloned()
-            .unwrap_or(PyRep::Real(0.0));
-        let entry = PyRep::keyval([
-            ("typeID", quote_type_id),
-            ("quantityToProcess", qty_to_process),
-            ("leftOvers", left_overs),
-            ("iskCost", isk_cost),
-            ("totalISKCost", total_isk_cost),
-            ("recoverables", recoverables),
-        ]);
-        quote_entries.push((item_id, entry));
-    }
-    let eff_dict = PyRep::Dict(eff_entries);
-    PyRep::Tuple(vec![tax, eff_dict, PyRep::Dict(quote_entries)])
-}
-
 /// Returns `true` when a server notification uses an internal test-only tuple shape that
 /// has no bound MachoNet moniker on the live TCP client wire.
 pub fn should_suppress_macho_notification(event: &str, args: &[PyRep]) -> bool {
@@ -624,7 +472,7 @@ pub fn should_suppress_macho_notification(event: &str, args: &[PyRep]) -> bool {
     }
     if event == "DoDestinyUpdate" {
         if let Some(first) = args.first() {
-            if matches!(normalize_destiny_payload_arg(first.clone()), PyRep::List(items) if items.is_empty()) {
+            if matches!(first, PyRep::List(items) if items.is_empty()) {
                 return true;
             }
         }
@@ -642,10 +490,6 @@ pub fn should_suppress_macho_notification(event: &str, args: &[PyRep]) -> bool {
         return true;
     }
     false
-}
-
-fn normalize_destiny_update_arg(rep: PyRep) -> PyRep {
-    rep
 }
 
 /// Normalizes MachoNet broadcast notifications for live EVE V24.01 clients.
@@ -846,15 +690,10 @@ pub fn normalize_macho_notification_with_sde(
             }
             args
         }
-        "DoDestinyUpdate" => args
-            .into_iter()
-            .map(normalize_destiny_update_arg)
-            .map(normalize_destiny_payload_arg)
-            .collect(),
         "DoDestinyUpdates" => args
             .into_iter()
             .map(|arg| match arg {
-                PyRep::List(entries) => normalize_destiny_payload_arg(PyRep::List(
+                PyRep::List(entries) => PyRep::List(
                     entries
                         .into_iter()
                         .map(|entry| match &entry {
@@ -868,8 +707,8 @@ pub fn normalize_macho_notification_with_sde(
                             _ => PyRep::Tuple(vec![PyRep::List(vec![entry]), PyRep::Bool(false)]),
                         })
                         .collect(),
-                )),
-                other => normalize_destiny_payload_arg(other),
+                ),
+                other => other,
             })
             .collect(),
         "OnSpecialFX" => normalize_on_special_fx(args),

@@ -504,10 +504,10 @@ async fn test_cloak_ball_on_cloak_and_decloak() {
     assert!(park.deactivate_cloak(SHIP_A));
     assert!(!park.combat_states[&SHIP_A].is_cloaked);
     let a_actions = wire_for(&mut park, SHIP_A);
-    assert_eq!(args_of(&a_actions, "CloakBall")[0], &[PyRep::Integer(SHIP_A), PyRep::Bool(false)]);
+    assert_eq!(args_of(&a_actions, "UncloakBall")[0], &[PyRep::Integer(SHIP_A)]);
     let b_actions = wire_for(&mut park, SHIP_B);
-    assert_eq!(names(&b_actions), vec!["CloakBall", "AddBalls2"]);
-    assert_eq!(args_of(&b_actions, "CloakBall")[0], &[PyRep::Integer(SHIP_A), PyRep::Bool(false)]);
+    assert_eq!(names(&b_actions), vec!["UncloakBall", "AddBalls2"]);
+    assert_eq!(args_of(&b_actions, "UncloakBall")[0], &[PyRep::Integer(SHIP_A)]);
     // A second decloak is not a state change and emits nothing.
     assert!(!park.deactivate_cloak(SHIP_A));
     assert!(wire_for(&mut park, SHIP_B).is_empty());

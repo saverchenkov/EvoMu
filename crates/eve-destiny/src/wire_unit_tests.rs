@@ -515,11 +515,110 @@ fn encode_destiny_events_and_hoist_set_state_in_updates() {
         DestinyEvent::SetState { observer_ball_id: 1 },
     ];
 
+    let standalone_batch = encode_destiny_updates(
+        99,
+        &[
+            DestinyEvent::OnSlimItemChange { ball_id: 1 },
+            DestinyEvent::OnSlimItemChange { ball_id: 999_999 },
+            DestinyEvent::SetBallInteractive { ball_id: 1, is_interactive: true },
+            DestinyEvent::SetBallInteractive { ball_id: 1, is_interactive: false },
+            DestinyEvent::PackagedAction { actions_bytes: vec![1, 2, 3] },
+        ],
+        Some(&park),
+    );
+    let PyRep::List(standalone_items) = standalone_batch else {
+        panic!("expected PyRep::List for standalone batch");
+    };
+    let standalone_names: Vec<&str> = standalone_items
+        .iter()
+        .map(|entry| {
+            let PyRep::Tuple(pair) = entry else { panic!("expected stamped tuple") };
+            let PyRep::Tuple(action) = &pair[1] else { panic!("expected action tuple") };
+            action[0].as_str().expect("action name")
+        })
+        .collect();
+    assert_eq!(
+        standalone_names,
+        vec![
+            "OnSlimItemChange",
+            "OnSlimItemChange",
+            "SetBallInteractive",
+            "SetBallInteractive",
+            "PackagedAction",
+        ]
+    );
+
+    let add_balls2_batch = encode_destiny_updates(
+        99,
+        &[
+            DestinyEvent::AddBalls2 { balls: vec![b2.clone()] },
+            DestinyEvent::OnSlimItemChange { ball_id: b2.id },
+            DestinyEvent::OnSlimItemChange { ball_id: b1.id },
+            DestinyEvent::SetBallInteractive { ball_id: 1, is_interactive: false },
+            DestinyEvent::PackagedAction { actions_bytes: vec![1, 2, 3] },
+        ],
+        Some(&park),
+    );
+    let PyRep::List(ab2_items) = add_balls2_batch else {
+        panic!("expected PyRep::List for AddBalls2 batch");
+    };
+    let ab2_names: Vec<&str> = ab2_items
+        .iter()
+        .map(|entry| {
+            let PyRep::Tuple(pair) = entry else { panic!("expected stamped tuple") };
+            let PyRep::Tuple(action) = &pair[1] else { panic!("expected action tuple") };
+            action[0].as_str().expect("action name")
+        })
+        .collect();
+    assert_eq!(
+        ab2_names,
+        vec![
+            "AddBalls2",
+            "OnSlimItemChange",
+            "SetBallInteractive",
+            "PackagedAction",
+        ]
+    );
+    let PyRep::Tuple(slim_outer) = &ab2_items[1] else { panic!("expected OnSlimItemChange tuple") };
+    let PyRep::Tuple(slim_action) = &slim_outer[1] else { panic!("expected action") };
+    let PyRep::Tuple(slim_args) = &slim_action[1] else { panic!("expected args") };
+    assert_eq!(slim_args[0], PyRep::Integer(b1.id));
+
+    let set_state_only_batch = encode_destiny_updates(
+        99,
+        &[
+            DestinyEvent::OnSlimItemChange { ball_id: b1.id },
+            DestinyEvent::SetBallInteractive { ball_id: b1.id, is_interactive: false },
+            DestinyEvent::PackagedAction { actions_bytes: vec![1, 2, 3] },
+            DestinyEvent::SetState { observer_ball_id: b1.id },
+        ],
+        Some(&park),
+    );
+    let PyRep::List(ss_items) = set_state_only_batch else {
+        panic!("expected PyRep::List for SetState batch");
+    };
+    assert_eq!(ss_items.len(), 1);
+    let PyRep::Tuple(ss_pair) = &ss_items[0] else { panic!("expected stamped tuple") };
+    let PyRep::Tuple(ss_action) = &ss_pair[1] else { panic!("expected action tuple") };
+    assert_eq!(ss_action[0], PyRep::String("SetState".into()));
+
     let updates = encode_destiny_updates(100, &events, Some(&park));
     let PyRep::List(items) = updates else {
         panic!("expected PyRep::List");
     };
-    assert_eq!(items.len(), events.len());
+    // SetState + AddBalls/AddBalls2 omits OnSlimItemChange (2), SetBallInteractive (2), and PackagedAction (1).
+    assert_eq!(items.len(), events.len() - 5);
+    let emitted_names: Vec<&str> = items
+        .iter()
+        .map(|entry| {
+            let PyRep::Tuple(pair) = entry else { panic!("expected stamped tuple") };
+            let PyRep::Tuple(action) = &pair[1] else { panic!("expected action tuple") };
+            action[0].as_str().expect("action name")
+        })
+        .collect();
+    assert!(!emitted_names.contains(&"OnSlimItemChange"));
+    assert!(!emitted_names.contains(&"SetBallInteractive"));
+    assert!(!emitted_names.contains(&"PackagedAction"));
     if let PyRep::Tuple(pair) = &items[0] {
         assert_eq!(pair[0], PyRep::Integer(100));
         if let PyRep::Tuple(action) = &pair[1] {
@@ -1031,14 +1130,63 @@ fn slim_item_meta_boundaries_wire_type_remapping_and_remaining_events() {
         },
         None,
     );
-    if let PyRep::Tuple(outer) = uncloak {
-        if let PyRep::Tuple(call) = &outer[1] {
-            assert_eq!(
-                call[1],
-                PyRep::Tuple(vec![PyRep::Integer(1003), PyRep::Bool(false)])
-            );
-        }
-    }
+    assert_eq!(
+        uncloak,
+        PyRep::Tuple(vec![
+            PyRep::Integer(5),
+            PyRep::Tuple(vec![
+                PyRep::String("UncloakBall".into()),
+                PyRep::Tuple(vec![PyRep::Integer(1003)]),
+            ]),
+        ])
+    );
+
+    park.special_fx_meta.insert(
+        (1003, Some(55), "effects.Cloak".into()),
+        crate::SpecialFxWireMeta {
+            module_type_id: Some(11578),
+            target_id: Some(2004),
+            other_type_id: Some(587),
+            is_offensive: false,
+            duration_ms: Some(30_000.0),
+            repeat: Some(0),
+        },
+    );
+    let fx_uncloak = encode_destiny_event(
+        5,
+        &DestinyEvent::OnSpecialFX {
+            ball_id: 1003,
+            module_id: Some(55),
+            guid: "effects.Cloak".into(),
+            is_active: false,
+        },
+        Some(&park),
+    );
+    assert_eq!(
+        fx_uncloak,
+        PyRep::Tuple(vec![
+            PyRep::Integer(5),
+            PyRep::Tuple(vec![
+                PyRep::String("OnSpecialFX".into()),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1003),
+                    PyRep::Integer(55),
+                    PyRep::Integer(11578),
+                    PyRep::Integer(2004),
+                    PyRep::Integer(587),
+                    PyRep::String("effects.Uncloak".into()),
+                    PyRep::Bool(false),
+                    PyRep::Integer(1),
+                    PyRep::Integer(0),
+                    PyRep::Integer(6000),
+                    PyRep::Integer(1),
+                    PyRep::None,
+                    PyRep::Integer(0),
+                    PyRep::None,
+                ]),
+            ]),
+        ])
+    );
 
     let dot_empty = encode_destiny_event(
         5,

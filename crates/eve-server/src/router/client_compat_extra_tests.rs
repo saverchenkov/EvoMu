@@ -103,78 +103,12 @@ fn destiny_and_notification_normalizers_and_suppression_branches() {
         PyRep::Tuple(vec![PyRep::Real(0.75), PyRep::Real(1.0), PyRep::Real(1.0)])
     );
 
-    // destiny_entry_func_name + normalize_destiny_payload_arg
-    assert_eq!(destiny_entry_func_name(&PyRep::Integer(0)), None);
-    assert_eq!(
-        destiny_entry_func_name(&PyRep::Tuple(vec![
-            PyRep::String("DirectFunc".into()),
-            PyRep::Integer(1),
-        ])),
-        Some("DirectFunc")
-    );
-
     let mk_ev = |name: &str| {
         PyRep::Tuple(vec![
             PyRep::Integer(1),
             PyRep::Tuple(vec![PyRep::String(name.into()), PyRep::Tuple(vec![])]),
         ])
     };
-    // When SetState is present, OnSlimItemChange / SetBallInteractive / PackagedAction are filtered out (#992),
-    // while OnDockingAccepted, OnClientControllerEvent, and OnDroneActivityChange pass through (#1188).
-    let norm_with_add = normalize_destiny_payload_arg(PyRep::List(vec![
-        mk_ev("SetState"),
-        mk_ev("OnSlimItemChange"),
-        mk_ev("SetBallInteractive"),
-        mk_ev("PackagedAction"),
-        mk_ev("OnDockingAccepted"),
-        mk_ev("OnClientControllerEvent"),
-        mk_ev("OnDroneActivityChange"),
-        mk_ev("Orbit"),
-    ]));
-    assert_eq!(
-        norm_with_add,
-        PyRep::List(vec![
-            mk_ev("SetState"),
-            mk_ev("OnDockingAccepted"),
-            mk_ev("OnClientControllerEvent"),
-            mk_ev("OnDroneActivityChange"),
-            mk_ev("Orbit"),
-        ])
-    );
-
-    // Without SetState (including alongside AddBalls2), SetBallInteractive and PackagedAction are preserved,
-    // while OnSlimItemChange is only filtered when AddBalls/AddBalls2/SetState is present.
-    let norm_add_balls2 = normalize_destiny_payload_arg(PyRep::List(vec![
-        mk_ev("AddBalls2"),
-        mk_ev("OnSlimItemChange"),
-        mk_ev("SetBallInteractive"),
-        mk_ev("PackagedAction"),
-    ]));
-    assert_eq!(
-        norm_add_balls2,
-        PyRep::List(vec![
-            mk_ev("AddBalls2"),
-            mk_ev("SetBallInteractive"),
-            mk_ev("PackagedAction"),
-        ])
-    );
-
-    // Without SetState/AddBalls/AddBalls2, OnSlimItemChange, SetBallInteractive, PackagedAction, and OnDockingAccepted are preserved.
-    let norm_no_add = normalize_destiny_payload_arg(PyRep::Tuple(vec![PyRep::List(vec![
-        mk_ev("OnSlimItemChange"),
-        mk_ev("SetBallInteractive"),
-        mk_ev("PackagedAction"),
-        mk_ev("OnDockingAccepted"),
-    ])]));
-    assert_eq!(
-        norm_no_add,
-        PyRep::Tuple(vec![PyRep::List(vec![
-            mk_ev("OnSlimItemChange"),
-            mk_ev("SetBallInteractive"),
-            mk_ev("PackagedAction"),
-            mk_ev("OnDockingAccepted"),
-        ])])
-    );
 
     // should_suppress_macho_notification
     assert!(should_suppress_macho_notification("OnDamageStateChange", &[]));
@@ -623,19 +557,6 @@ fn wave2_wave4_normalizer_and_effect_id_helper_edges() {
         assert_eq!(padded[13], PyRep::None);
     }
 
-    // 5. normalize_destiny_update_arg: D01 removed (#1188); passes entries through unchanged.
-    let dock_ev_in = PyRep::List(vec![
-        PyRep::Tuple(vec![
-            PyRep::String("OnDockingAccepted".into()),
-            PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(60_003_760)]),
-        ]),
-        PyRep::Tuple(vec![
-            PyRep::String("OnDockingAccepted".into()),
-            PyRep::Tuple(vec![PyRep::Integer(60_003_760)]),
-        ]),
-    ]);
-    assert_eq!(normalize_destiny_update_arg(dock_ev_in.clone()), dock_ev_in);
-
     // 6. normalize_agent_do_action_rep: passthroughs, state/missionState branches, integer dialogue entry
     let tuple2 = PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)]);
     assert_eq!(normalize_agent_do_action_rep(tuple2.clone()), tuple2);
@@ -685,7 +606,7 @@ fn wave2_wave4_normalizer_and_effect_id_helper_edges() {
     }
 
     // 7. build_v24_reprocessing_quotes_tuple: stationBaseYield override, duplicate typeID deduplication, outputs -> CRowset
-    let quotes = build_v24_reprocessing_quotes_tuple(
+    let quotes = crate::services::space_entity_mining::build_v24_reprocessing_quotes_tuple(
         PyRep::Real(0.03),
         PyRep::Real(0.55),
         vec![
