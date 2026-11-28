@@ -14,6 +14,41 @@ use super::{execute_cosmic_wormhole_jump, AU_IN_METERS};
 
 const BEYONCE_SVC: &str = "beyonce";
 
+async fn wake_jump_destination_system(
+    ctx: &ServerContext,
+    dest_sys_id: SolarSystemId,
+) -> Result<crate::system_actor::SystemHandle, BridgeRpcError> {
+    ctx.systems
+        .wake_for_session_arrival_async(
+            dest_sys_id,
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        )
+        .await
+        .map_err(|wake_err| {
+            let msg = format!(
+                "Failed to activate destination solar system {dest_sys_id}: {wake_err}"
+            );
+            BridgeRpcError::with_client_error(
+                "SystemTransitionFailed",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            )
+        })
+}
+
+fn apply_remaining_jump_capacitor(
+    prev_cs: Option<eve_destiny::CombatState>,
+    rem_cap: Option<f64>,
+) -> Option<eve_destiny::CombatState> {
+    match (prev_cs, rem_cap) {
+        (Some(mut cs), Some(cap)) => {
+            cs.capacitor = cap;
+            Some(cs)
+        }
+        (cs, _) => cs,
+    }
+}
+
 pub(crate) async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -689,6 +724,8 @@ async fn handle_random_jump_filament(
         }
     }
 
+    let new_handle = wake_jump_destination_system(ctx, dest_sys_id).await?;
+
     let mut taken_jumpers = Vec::with_capacity(jumpers.len());
     for (p_char, p_ship, _) in jumpers {
         if let Some(taken) = old_handle.take_ball(p_ship).await {
@@ -799,7 +836,6 @@ async fn handle_random_jump_filament(
         crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, p_char, p_ship);
     }
     let (old_const, old_reg) = ctx.sde.solar_systems.get(&old_sys).map(|s| (s.constellation_id, s.region_id)).unwrap_or((0, 0));
-    let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
     let pvp_until = now_unix.saturating_add(crate::sp6_lifecycle::PVP_TIMER_SECS);
     for (j_idx, (p_char, p_ship, taken)) in jumpers.into_iter().enumerate() {
         let prev_cs = taken.combat_state;
@@ -1106,7 +1142,11 @@ async fn handle_cmd_jump_to_structure_beacon(
 
     nav::check_jump_activation(ctx, char_id)?;
     let cap_ship_type = if nav::type_attr(ctx, db_type_id, "jumpDriveCapacitorNeed").is_some() { db_type_id } else { current_ball.type_id };
-    let updated_cap_cs = nav::validate_and_prepare_jump_capacitor(ctx, char_id, ship_id, cur_sys_id, cap_ship_type).await?;
+    let rem_cap = nav::validate_and_prepare_jump_capacitor(ctx, char_id, ship_id, cur_sys_id, cap_ship_type)
+        .await?
+        .map(|cs| cs.capacitor);
+    nav::check_jump_fuel(ctx, ship_id, &plan)?;
+    let dest_handle = wake_jump_destination_system(ctx, target_sys_id).await?;
     let Some(taken) = cur_sys_handle.take_ball(ship_id).await else {
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
@@ -1139,7 +1179,7 @@ async fn handle_cmd_jump_to_structure_beacon(
             });
         }
     };
-    let effective_prev_cs = updated_cap_cs.or(prev_cs);
+    let effective_prev_cs = apply_remaining_jump_capacitor(prev_cs, rem_cap);
     ctx.db.with_mut_snapshot(|snap| {
         crate::sp6_lifecycle::leave_space_in_snap(
             snap,
@@ -1150,7 +1190,6 @@ async fn handle_cmd_jump_to_structure_beacon(
         );
     });
     let target_pos = DVec3::from_array(target_struct.position) + DVec3::new(5_000.0, 0.0, 0.0);
-    let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
     let ball = Ball {
         id: ship_id,
         type_id: taken.ball.type_id,
@@ -1651,7 +1690,11 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     }
 
     nav::check_jump_activation(ctx, char_id)?;
-    let updated_cap_cs = nav::validate_and_prepare_jump_capacitor(ctx, char_id, ship_id, cur_sys_id, db_type_id).await?;
+    let rem_cap = nav::validate_and_prepare_jump_capacitor(ctx, char_id, ship_id, cur_sys_id, db_type_id)
+        .await?
+        .map(|cs| cs.capacitor);
+    nav::check_jump_fuel(ctx, ship_id, &plan)?;
+    let dest_handle = wake_jump_destination_system(ctx, target_sys_id).await?;
     let Some(taken) = cur_sys_handle.take_ball(ship_id).await else {
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
@@ -1669,7 +1712,7 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-    let effective_prev_cs = updated_cap_cs.or(prev_cs);
+    let effective_prev_cs = apply_remaining_jump_capacitor(prev_cs, rem_cap);
     if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
         crate::router::apply_character_transition_in_snap(
             snap,
@@ -1701,7 +1744,6 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
 
     let _ = (dest_const_id, dest_reg_id);
     let target_pos = beacon.position + DVec3::new(2_500.0, 0.0, 0.0);
-    let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
     let ball = Ball {
         id: ship_id, type_id: taken.ball.type_id, position: target_pos, velocity: DVec3::ZERO,
         max_velocity: taken.ball.max_velocity, inertia: taken.ball.inertia, mass: taken.ball.mass,

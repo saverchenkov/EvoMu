@@ -912,3 +912,591 @@ async fn each_action_breaks_cyno_protection_once_while_other_pilot_keeps_protect
         let _ = dest_handle.remove_ball(ship_b).await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relocate_ship_wakes_cold_dest_with_jump_reason_and_rolls_back_on_wake_failure() {
+    struct FailCynoDestWakeProvider {
+        target_sys: u32,
+    }
+    impl crate::system_actor::SystemContentProvider for FailCynoDestWakeProvider {
+        fn name(&self) -> &'static str {
+            "test_cyno_fail_dest_wake"
+        }
+
+        fn seed(
+            &self,
+            seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+        ) -> Result<(), String> {
+            if seed_ctx.solar_system_id == self.target_sys {
+                return Err(format!("injected cyno wake failure for {}", self.target_sys));
+            }
+            Ok(())
+        }
+    }
+
+    let origin_sys = 30_002_505_u32;
+    let dest_sys = 30_002_506_u32;
+    let char_id = 95_421_001_i64;
+    let ship_id = 1_000_542_001_i64;
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.solar_systems.insert(
+            origin_sys,
+            custom_system(sde, origin_sys, 10_000_001, -0.5, [0.0, 0.0, 0.0]),
+        );
+        sde.solar_systems.insert(
+            dest_sys,
+            custom_system(sde, dest_sys, 10_000_001, -0.5, [2.0, 0.0, 0.0]),
+        );
+    });
+    ensure_char(&ctx, char_id, 98_000_020, origin_sys, ship_id, None);
+    insert_item(
+        &ctx,
+        ship_id,
+        587,
+        char_id,
+        i64::from(origin_sys),
+        InventoryFlag::None,
+        1,
+        true,
+    );
+    spawn_ship(&ctx, origin_sys, ship_id, 587, char_id, DVec3::ZERO, 0.0, 1_000.0).await;
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+
+    let (cd_min, fat_min) = relocate_ship(
+        &ctx,
+        char_id,
+        ship_id,
+        origin_sys,
+        dest_sys,
+        DVec3::new(10_000.0, 0.0, 0.0),
+        2.0,
+        0.5,
+    )
+    .await
+    .expect("relocate_ship wakes cold dest");
+    assert!(cd_min > 0.0 && fat_min > 0.0);
+    assert_eq!(
+        ctx.systems.last_wake_reason(dest_sys),
+        Some(crate::system_actor::SystemWakeReason::SessionArrival(
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        ))
+    );
+
+    // Wake failure leaves origin ball & DB intact and destination Cold.
+    let ctx_fail = test_ctx_with_custom(|sde| {
+        sde.solar_systems.insert(
+            origin_sys,
+            custom_system(sde, origin_sys, 10_000_001, -0.5, [0.0, 0.0, 0.0]),
+        );
+        sde.solar_systems.insert(
+            dest_sys,
+            custom_system(sde, dest_sys, 10_000_001, -0.5, [2.0, 0.0, 0.0]),
+        );
+    });
+    ctx_fail
+        .systems
+        .register_content_provider(Arc::new(FailCynoDestWakeProvider { target_sys: dest_sys }))
+        .expect("register fail provider");
+    ensure_char(&ctx_fail, char_id, 98_000_020, origin_sys, ship_id, None);
+    insert_item(
+        &ctx_fail,
+        ship_id,
+        587,
+        char_id,
+        i64::from(origin_sys),
+        InventoryFlag::None,
+        1,
+        true,
+    );
+    spawn_ship(&ctx_fail, origin_sys, ship_id, 587, char_id, DVec3::ZERO, 0.0, 1_000.0).await;
+
+    let err = relocate_ship(
+        &ctx_fail,
+        char_id,
+        ship_id,
+        origin_sys,
+        dest_sys,
+        DVec3::new(10_000.0, 0.0, 0.0),
+        2.0,
+        0.5,
+    )
+    .await
+    .expect_err("wake failure must fail relocate_ship with SystemTransitionFailed");
+    assert_eq!(err.code, "SystemTransitionFailed");
+    assert!(ctx_fail.systems.get_handle(dest_sys).is_none());
+    assert!(ctx_fail
+        .systems
+        .get_handle(origin_sys)
+        .unwrap()
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        ctx_fail.db.with_snapshot(|s| s.characters[&char_id].solar_system_id),
+        origin_sys
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rpc_cyno_conduit_and_portal_jumps_atomic_on_wake_failure() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct ToggleDestWakeProvider {
+        target_sys: u32,
+        should_fail: Arc<AtomicBool>,
+    }
+    impl crate::system_actor::SystemContentProvider for ToggleDestWakeProvider {
+        fn name(&self) -> &'static str {
+            "test_rpc_cyno_conduit_fail_wake"
+        }
+
+        fn seed(
+            &self,
+            seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+        ) -> Result<(), String> {
+            if seed_ctx.solar_system_id == self.target_sys && self.should_fail.load(Ordering::Acquire) {
+                return Err(format!("injected destination wake failure for {}", self.target_sys));
+            }
+            Ok(())
+        }
+    }
+
+    let origin_sys = 30_002_505_u32;
+    let dest_sys = 30_002_506_u32;
+    let anchor_id = 95_542_001_i64;
+    let pass_id = 95_542_002_i64;
+    let cyno_pilot_id = 95_542_003_i64;
+    let fleet_id = 700_542_i64;
+
+    let anchor_ship = 1_000_542_101_i64;
+    let pass_ship = 1_000_542_102_i64;
+    let cyno_ship = 1_000_542_103_i64;
+    let anchor_fuel = 1_000_542_110_i64;
+    let portal_mod_id = 1_000_542_111_i64;
+    let portal_mod_type = 999_321_u32;
+    let beacon_id = 1_000_542_120_i64;
+    let ship_tid = 999_320_u32;
+
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.solar_systems.insert(
+            origin_sys,
+            custom_system(sde, origin_sys, 10_000_001, -0.5, [0.0, 0.0, 0.0]),
+        );
+        sde.solar_systems.insert(
+            dest_sys,
+            custom_system(sde, dest_sys, 10_000_001, -0.5, [2.0, 0.0, 0.0]),
+        );
+        sde.type_lists.insert(
+            99_317,
+            eve_sde::TypeListInfo {
+                type_list_id: 99_317,
+                name: "Standard Cyno Beacons".into(),
+                included_type_ids: vec![21096, 57425],
+                ..Default::default()
+            },
+        );
+        sde.types.insert(
+            ship_tid,
+            custom_inv_type(
+                sde,
+                ship_tid,
+                547,
+                6,
+                800.0,
+                "Test Conduit Carrier",
+                &[
+                    (861, 1.0),
+                    (866, 17888.0),
+                    (867, 6.0),
+                    (868, 1_000.0),
+                    (898, 0.25),
+                    (3131, 500.0),
+                    (3317, 99_317.0),
+                    (eve_sde::attr_ids::SHIELD_CAPACITY, 5_000.0),
+                    (eve_sde::attr_ids::ARMOR_HP, 4_000.0),
+                    (eve_sde::attr_ids::HP_STRUCT, 3_000.0),
+                    (eve_sde::attr_ids::CAPACITOR_CAPACITY, 20_000.0),
+                ],
+            ),
+        );
+        sde.types.insert(
+            portal_mod_type,
+            custom_inv_type(
+                sde,
+                portal_mod_type,
+                707,
+                7,
+                10.0,
+                "Test Jump Portal Generator",
+                &[(1001, 0.000_001), (3318, 0.0)],
+            ),
+        );
+        if let Some(rifter) = sde.types.get_mut(&587) {
+            rifter.default_attributes.insert(1252, 1.0);
+        }
+        if let Some(portal_t) = sde.types.get_mut(&portal_mod_type) {
+            portal_t.default_attributes.insert(3318, 1252.0);
+        }
+    });
+
+    let should_fail = Arc::new(AtomicBool::new(true));
+    ctx.systems
+        .register_content_provider(Arc::new(ToggleDestWakeProvider {
+            target_sys: dest_sys,
+            should_fail: Arc::clone(&should_fail),
+        }))
+        .expect("register toggle fail provider");
+
+    ensure_char(&ctx, anchor_id, 98_000_542, origin_sys, anchor_ship, Some(fleet_id));
+    ensure_char(&ctx, pass_id, 98_000_542, origin_sys, pass_ship, Some(fleet_id));
+    ensure_char(&ctx, cyno_pilot_id, 98_000_542, dest_sys, cyno_ship, Some(fleet_id));
+    grant_skill(&ctx, anchor_id, 21611, 5);
+    grant_skill(&ctx, anchor_id, 21610, 4);
+    grant_skill(&ctx, anchor_id, 3456, 4);
+    grant_skill(&ctx, anchor_id, 83094, 5);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut fleet = FleetRecord {
+            fleet_id,
+            boss_id: anchor_id,
+            members: vec![anchor_id, pass_id, cyno_pilot_id],
+            ..Default::default()
+        };
+        fleet.member_details.insert(
+            pass_id,
+            eve_db::FleetMemberRecord {
+                character_id: pass_id,
+                role: eve_db::FleetRole::SquadMember,
+                wing_id: None,
+                squad_id: None,
+                takes_fleet_warp: false,
+                accepts_regroup: true,
+                accepts_conduit_jumps: true,
+                job: 0,
+                role_name: String::new(),
+                join_time_unix: 0,
+            },
+        );
+        snap.fleets.insert(fleet_id, fleet);
+    });
+
+    insert_item(&ctx, anchor_ship, ship_tid, anchor_id, i64::from(origin_sys), InventoryFlag::None, 1, true);
+    insert_item(&ctx, pass_ship, 587, pass_id, i64::from(origin_sys), InventoryFlag::None, 1, true);
+    insert_item(&ctx, anchor_fuel, 17888, anchor_id, anchor_ship, InventoryFlag::Cargo, 10_000, false);
+
+    spawn_ship(&ctx, origin_sys, anchor_ship, ship_tid, anchor_id, DVec3::ZERO, 0.0, 20_000.0).await;
+    spawn_ship(&ctx, origin_sys, pass_ship, 587, pass_id, DVec3::new(1_000.0, 0.0, 0.0), 0.0, 1_000.0).await;
+
+    let beacon = FleetModuleBeacon {
+        beacon_id,
+        char_id: cyno_pilot_id,
+        ship_id: cyno_ship,
+        beacon_type_id: 57425,
+        solar_system_id: dest_sys,
+        position: DVec3::new(10_000.0, 0.0, 0.0),
+        expires_at_unix: ctx.now_unix_secs() + 600,
+    };
+    cyno_state(&ctx)
+        .state
+        .write()
+        .unwrap()
+        .beacons
+        .insert(cyno_ship, beacon.clone());
+
+    let mut anchor_sess = SessionState {
+        user_id: Some(anchor_id as u64),
+        character_id: Some(anchor_id),
+        corporation_id: Some(98_000_542),
+        solar_system_id: Some(origin_sys),
+        ship_id: Some(anchor_ship),
+        ..Default::default()
+    };
+    let mut pass_sess = SessionState {
+        user_id: Some(pass_id as u64),
+        character_id: Some(pass_id),
+        corporation_id: Some(98_000_542),
+        solar_system_id: Some(origin_sys),
+        ship_id: Some(pass_ship),
+        ..Default::default()
+    };
+    let _ = ctx.drain_notifications_for_char(anchor_id);
+    let _ = ctx.drain_notifications_for_char(pass_id);
+    let origin_h = ctx.systems.get_handle(origin_sys).expect("origin live");
+
+    // 1. CmdJumpToFleetModuleBeacon wake failure preserves isotopes, capacitor, ship ball, and Cold dest.
+    let err_single = handle_cyno_portal(
+        &ctx,
+        &mut anchor_sess,
+        "beyonce",
+        "CmdJumpToFleetModuleBeacon",
+        &[PyRep::Integer(cyno_pilot_id), PyRep::Integer(i64::from(dest_sys)), PyRep::Integer(beacon_id)],
+    )
+    .await
+    .expect("handled")
+    .expect_err("CmdJumpToFleetModuleBeacon must fail closed when destination wake fails");
+    assert_eq!(err_single.code, "SystemTransitionFailed");
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&anchor_fuel].quantity), 10_000);
+    let cap_after_single = origin_h.get_combat_state(anchor_ship).await.unwrap().unwrap().capacitor;
+    assert!((cap_after_single - 20_000.0).abs() < 1e-6);
+    assert_eq!(anchor_sess.solar_system_id, Some(origin_sys));
+    assert!(origin_h.get_ball_snapshot(anchor_ship).await.unwrap().is_some());
+
+    // 2. CmdGroupJumpToFleetModuleBeacon wake failure skips passenger jumps, preserves fuel/cap, and emits no GroupJump notifications.
+    let err_group = handle_cyno_portal(
+        &ctx,
+        &mut anchor_sess,
+        "beyonce",
+        "CmdGroupJumpToFleetModuleBeacon",
+        &[PyRep::Integer(cyno_pilot_id), PyRep::Integer(i64::from(dest_sys)), PyRep::Integer(beacon_id)],
+    )
+    .await
+    .expect("handled")
+    .expect_err("CmdGroupJumpToFleetModuleBeacon must fail closed when destination wake fails");
+    assert_eq!(err_group.code, "SystemTransitionFailed");
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&anchor_fuel].quantity), 10_000);
+    let cap_after_group = origin_h.get_combat_state(anchor_ship).await.unwrap().unwrap().capacitor;
+    assert!((cap_after_group - 20_000.0).abs() < 1e-6);
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&pass_id].solar_system_id), origin_sys);
+    assert!(origin_h.get_ball_snapshot(pass_ship).await.unwrap().is_some());
+    assert!(
+        ctx.drain_notifications_for_char(anchor_id)
+            .iter()
+            .all(|n| n.event != "OnGroupJumpAnchorActivated")
+    );
+    assert!(
+        ctx.drain_notifications_for_char(pass_id)
+            .iter()
+            .all(|n| n.event != "OnGroupJumpedPassenger")
+    );
+
+    // 3. CmdJumpThroughFleet wake failure preserves bridger fuel, passenger origin state, and Cold dest.
+    cyno_state(&ctx).state.write().unwrap().bridges.insert(
+        anchor_ship,
+        ActiveJumpBridge {
+            bridger_char_id: anchor_id,
+            bridger_ship_id: anchor_ship,
+            portal_module_id: portal_mod_id,
+            portal_module_type_id: portal_mod_type,
+            origin_system_id: origin_sys,
+            beacon: beacon.clone(),
+            distance_ly: 2.0,
+            expires_at_unix: ctx.now_unix_secs() + 600,
+            portal_ball_id: anchor_ship,
+        },
+    );
+    let err_portal = handle_cyno_portal(
+        &ctx,
+        &mut pass_sess,
+        "beyonce",
+        "CmdJumpThroughFleet",
+        &[PyRep::Integer(anchor_id), PyRep::Integer(anchor_ship)],
+    )
+    .await
+    .expect("handled")
+    .expect_err("CmdJumpThroughFleet must fail closed when destination wake fails");
+    assert_eq!(err_portal.code, "SystemTransitionFailed");
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&anchor_fuel].quantity), 10_000);
+    assert_eq!(pass_sess.solar_system_id, Some(origin_sys));
+    assert!(origin_h.get_ball_snapshot(pass_ship).await.unwrap().is_some());
+
+    // 4. Clearing wake failure allows RPC jump to wake dest_sys cleanly.
+    should_fail.store(false, Ordering::Release);
+    handle_cyno_portal(
+        &ctx,
+        &mut pass_sess,
+        "beyonce",
+        "CmdJumpThroughFleet",
+        &[PyRep::Integer(anchor_id), PyRep::Integer(anchor_ship)],
+    )
+    .await
+    .expect("handled")
+    .expect("CmdJumpThroughFleet succeeds once dest wake succeeds");
+    assert_eq!(pass_sess.solar_system_id, Some(dest_sys));
+    assert_eq!(
+        ctx.systems.last_wake_reason(dest_sys),
+        Some(crate::system_actor::SystemWakeReason::SessionArrival(
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        ))
+    );
+
+    // 5. CmdJumpToFleetModuleBeacon wakes Cold dest_sys and preserves non-capacitor CombatState (shield/armor/hull damage).
+    cyno_state(&ctx).state.write().unwrap().bridges.remove(&anchor_ship);
+    assert!(ctx.systems.stop_system(dest_sys).await);
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+    let mut damaged_cs = ctx.build_ship_combat_state(anchor_id, anchor_ship, ship_tid);
+    assert!(damaged_cs.max_shield_hp > 0.0 && damaged_cs.max_armor_hp > 0.0 && damaged_cs.max_structure_hp > 0.0);
+    let expected_shield_frac = 0.25_f64;
+    let expected_armor = damaged_cs.max_armor_hp * 0.50;
+    let expected_struct = damaged_cs.max_structure_hp * 0.75;
+    damaged_cs.shield_hp = damaged_cs.max_shield_hp * expected_shield_frac;
+    damaged_cs.armor_hp = expected_armor;
+    damaged_cs.structure_hp = expected_struct;
+    damaged_cs.capacitor = 20_000.0;
+    damaged_cs.max_capacitor = 20_000.0;
+    origin_h
+        .set_combat_state(anchor_ship, damaged_cs)
+        .await
+        .expect("set damaged combat state");
+
+    handle_cyno_portal(
+        &ctx,
+        &mut anchor_sess,
+        "beyonce",
+        "CmdJumpToFleetModuleBeacon",
+        &[
+            PyRep::Integer(cyno_pilot_id),
+            PyRep::Integer(i64::from(dest_sys)),
+            PyRep::Integer(beacon_id),
+        ],
+    )
+    .await
+    .expect("handled")
+    .expect("CmdJumpToFleetModuleBeacon wakes dest_sys cleanly");
+    assert_eq!(anchor_sess.solar_system_id, Some(dest_sys));
+    assert_eq!(
+        ctx.systems.last_wake_reason(dest_sys),
+        Some(crate::system_actor::SystemWakeReason::SessionArrival(
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        ))
+    );
+    let dest_h = ctx.systems.get_handle(dest_sys).expect("dest live after jump");
+    let after_cs = dest_h
+        .get_combat_state(anchor_ship)
+        .await
+        .unwrap()
+        .expect("anchor ship combat state in dest");
+    assert!((after_cs.shield_hp / after_cs.max_shield_hp - expected_shield_frac).abs() < 0.01);
+    assert!((after_cs.armor_hp - expected_armor).abs() < 1e-6);
+    assert!((after_cs.structure_hp - expected_struct).abs() < 1e-6);
+    assert!(after_cs.capacitor < 20_000.0);
+
+    // 6. Low-capacitor and missing-fuel rejections leave Cold dest_sys Cold across beacon, conduit, and bridge paths (T4A-R3-01).
+    let _ = dest_h.remove_ball(anchor_ship).await;
+    let _ = dest_h.remove_ball(pass_ship).await;
+    assert!(ctx.systems.stop_system(dest_sys).await);
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid) in [(anchor_id, anchor_ship), (pass_id, pass_ship)] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.solar_system_id = origin_sys;
+                ch.jump_cooldown_until_unix = 0;
+                ch.jump_fatigue_until_unix = 0;
+            }
+            if let Some(it) = snap.items.get_mut(&sid) {
+                it.location_id = i64::from(origin_sys);
+            }
+            snap.sp6_lifecycle.session_change_timers.remove(&cid);
+        }
+        if let Some(fuel_it) = snap.items.get_mut(&anchor_fuel) {
+            fuel_it.quantity = 10_000;
+        }
+    });
+    spawn_ship(&ctx, origin_sys, anchor_ship, ship_tid, anchor_id, DVec3::ZERO, 0.0, 20_000.0).await;
+    spawn_ship(&ctx, origin_sys, pass_ship, 587, pass_id, DVec3::new(1_000.0, 0.0, 0.0), 0.0, 1_000.0).await;
+    anchor_sess.solar_system_id = Some(origin_sys);
+    pass_sess.solar_system_id = Some(origin_sys);
+
+    let mut low_cap_cs = origin_h
+        .get_combat_state(anchor_ship)
+        .await
+        .unwrap()
+        .expect("anchor combat state");
+    low_cap_cs.capacitor = 1.0;
+    low_cap_cs.max_capacitor = 20_000.0;
+    origin_h.set_combat_state(anchor_ship, low_cap_cs).await.unwrap();
+    let err_cap = handle_cyno_portal(
+        &ctx,
+        &mut anchor_sess,
+        "beyonce",
+        "CmdJumpToFleetModuleBeacon",
+        &[
+            PyRep::Integer(cyno_pilot_id),
+            PyRep::Integer(i64::from(dest_sys)),
+            PyRep::Integer(beacon_id),
+        ],
+    )
+    .await
+    .expect("handled")
+    .expect_err("low capacitor must reject before waking dest_sys");
+    assert_eq!(err_cap.code, "NotEnoughCapacitor");
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+
+    let mut full_cap_cs = origin_h
+        .get_combat_state(anchor_ship)
+        .await
+        .unwrap()
+        .expect("anchor combat state");
+    full_cap_cs.capacitor = 20_000.0;
+    full_cap_cs.max_capacitor = 20_000.0;
+    origin_h.set_combat_state(anchor_ship, full_cap_cs).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(fuel_it) = snap.items.get_mut(&anchor_fuel) {
+            fuel_it.quantity = 0;
+        }
+    });
+
+    let err_single_fuel = handle_cyno_portal(
+        &ctx,
+        &mut anchor_sess,
+        "beyonce",
+        "CmdJumpToFleetModuleBeacon",
+        &[
+            PyRep::Integer(cyno_pilot_id),
+            PyRep::Integer(i64::from(dest_sys)),
+            PyRep::Integer(beacon_id),
+        ],
+    )
+    .await
+    .expect("handled")
+    .expect_err("missing fuel must reject solo jump without waking dest_sys");
+    assert_eq!(err_single_fuel.code, "NotEnoughFuel");
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+
+    let err_group_fuel = handle_cyno_portal(
+        &ctx,
+        &mut anchor_sess,
+        "beyonce",
+        "CmdGroupJumpToFleetModuleBeacon",
+        &[
+            PyRep::Integer(cyno_pilot_id),
+            PyRep::Integer(i64::from(dest_sys)),
+            PyRep::Integer(beacon_id),
+        ],
+    )
+    .await
+    .expect("handled")
+    .expect_err("missing fuel must reject conduit jump without waking dest_sys");
+    assert_eq!(err_group_fuel.code, "NotEnoughFuel");
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+
+    cyno_state(&ctx).state.write().unwrap().bridges.insert(
+        anchor_ship,
+        ActiveJumpBridge {
+            bridger_char_id: anchor_id,
+            bridger_ship_id: anchor_ship,
+            portal_module_id: portal_mod_id,
+            portal_module_type_id: portal_mod_type,
+            origin_system_id: origin_sys,
+            beacon,
+            distance_ly: 2.0,
+            expires_at_unix: ctx.now_unix_secs() + 600,
+            portal_ball_id: anchor_ship,
+        },
+    );
+    let err_bridge_fuel = handle_cyno_portal(
+        &ctx,
+        &mut pass_sess,
+        "beyonce",
+        "CmdJumpThroughFleet",
+        &[PyRep::Integer(anchor_id), PyRep::Integer(anchor_ship)],
+    )
+    .await
+    .expect("handled")
+    .expect_err("missing fuel must reject bridge passenger jump without waking dest_sys");
+    assert_eq!(err_bridge_fuel.code, "NotEnoughFuel");
+    assert!(ctx.systems.get_handle(dest_sys).is_none());
+}

@@ -372,3 +372,97 @@ async fn evacuate_downtime_with_traces_drones_highsec_suspect_and_void_space_in_
 #[cfg(test)]
 #[path = "pve_abyssal_lifecycle_extra_unit_tests.rs"]
 mod pve_abyssal_lifecycle_extra_unit_tests;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evacuation_paths_wake_cold_origin_with_cluster_tick_scheduled_work() {
+    let ctx = build_ctx();
+    let origin_sys: SolarSystemId = 30_000_142;
+    let char1: i64 = 90_200_901;
+    let ship1: i64 = 1_100_901;
+    let char2: i64 = 90_200_902;
+    let ship2: i64 = 1_100_902;
+    let now = ctx.now_unix();
+
+    seed_pilot_and_ship(&ctx, char1, ship1, VOID_SPACE_SYSTEM_ID);
+    seed_pilot_and_ship(&ctx, char2, ship2, 32_000_012);
+    assert!(ctx.systems.get_handle(origin_sys).is_none());
+
+    let vs = VoidSpaceSessionRecord {
+        char_id: char1,
+        ship_id: ship1,
+        origin_solar_system_id: origin_sys,
+        origin_position: [5_000.0, 0.0, 0.0],
+        target_id: 77_901,
+        entered_unix: now.saturating_sub(1_000),
+        expires_at_sec: now.saturating_sub(1),
+        ..Default::default()
+    };
+    assert_eq!(evacuate_void_space_session_sync(&ctx, char1, &vs, now), origin_sys);
+    assert_eq!(
+        ctx.systems.last_wake_reason(origin_sys),
+        Some(crate::system_actor::SystemWakeReason::ClusterTick(
+            crate::system_actor::ClusterTickWakeReason::ScheduledWork,
+        ))
+    );
+    assert!(ctx
+        .systems
+        .get_handle(origin_sys)
+        .expect("origin live after void evacuation")
+        .get_ball_snapshot(ship1)
+        .await
+        .unwrap()
+        .is_some());
+
+    // Stop origin_sys back to Cold, then verify abyssal downtime evacuation wakes with ClusterTick(ScheduledWork).
+    assert!(ctx.systems.stop_system(origin_sys).await);
+    assert!(ctx.systems.get_handle(origin_sys).is_none());
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
+            char2,
+            AbyssalPocketSession {
+                pocket_id: 7902,
+                character_id: char2,
+                ship_id: ship2,
+                origin_solar_system_id: origin_sys,
+                abyssal_solar_system_id: 32_000_012,
+                origin_position: [10_000.0, 0.0, 0.0],
+                grid_offset: [0.0; 3],
+                filament_type_id: 56131,
+                tier: 1,
+                weather: AbyssalWeatherKind::Electrical,
+                weather_penalty_pct: 30.0,
+                weather_bonus_pct: 50.0,
+                npc_difficulty_mult: 1.0,
+                current_room: 1,
+                rooms: [
+                    sample_room(1, vec![]),
+                    sample_room(2, vec![]),
+                    sample_room(3, vec![]),
+                ],
+                started_at_sec: now,
+                collapse_at_sec: now + 1_200,
+                completed: false,
+                collapsed_destroyed: false,
+                trace_ball_id: 0,
+                fleet_ship_ids: vec![ship2],
+                ship_room: HashMap::from([(ship2, 1)]),
+                max_ships: 1,
+            },
+        );
+    });
+    assert_eq!(evacuate_abyssal_pockets_for_downtime(&ctx), 1);
+    assert_eq!(
+        ctx.systems.last_wake_reason(origin_sys),
+        Some(crate::system_actor::SystemWakeReason::ClusterTick(
+            crate::system_actor::ClusterTickWakeReason::ScheduledWork,
+        ))
+    );
+    assert!(ctx
+        .systems
+        .get_handle(origin_sys)
+        .expect("origin live after downtime evacuation")
+        .get_ball_snapshot(ship2)
+        .await
+        .unwrap()
+        .is_some());
+}

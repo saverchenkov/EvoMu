@@ -7877,3 +7877,122 @@ async fn stargate_spawn_tokens_and_hooks_are_isolated_per_server_context() {
     assert_eq!(hits_b_pre.load(Ordering::SeqCst), 1);
     assert_eq!(hits_b_post.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stargate_jump_records_session_arrival_jump_wake_reason_and_rolls_back_on_wake_failure() {
+    struct FailDestWakeProvider {
+        target_sys: u32,
+    }
+    impl crate::system_actor::SystemContentProvider for FailDestWakeProvider {
+        fn name(&self) -> &'static str {
+            "test_stargate_fail_dest_wake"
+        }
+
+        fn seed(
+            &self,
+            seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+        ) -> Result<(), String> {
+            if seed_ctx.solar_system_id == self.target_sys {
+                return Err(format!("injected wake failure for {}", self.target_sys));
+            }
+            Ok(())
+        }
+    }
+
+    let ctx = test_ctx();
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .filter(|j| {
+            j.from_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && j.to_solar_system_id != SOLAR_SYSTEM_ZARZAKH
+                && j.from_solar_system_id != j.to_solar_system_id
+                && ctx.sde.jumps.contains_key(&j.destination_stargate_id)
+        })
+        .min_by_key(|j| j.stargate_id)
+        .cloned()
+        .expect("non-Zarzakh stargate");
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_901_i64;
+    spawn_ship_in_space(&ctx, char_id, ship_id, 587, gate.from_solar_system_id, gate.position);
+    assert!(ctx.systems.get_handle(gate.to_solar_system_id).is_none());
+
+    let mut sess = SessionState::new(70_901);
+    mark_char_online(&ctx, &mut sess, char_id);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(gate.from_solar_system_id);
+
+    let args = [
+        PyRep::Integer(gate.stargate_id),
+        PyRep::Integer(gate.destination_stargate_id),
+        PyRep::Integer(ship_id),
+    ];
+    let ok = handle(&ctx, &mut sess, None, "beyonce", "CmdStargateJump", &args, &HashMap::new())
+        .await
+        .expect("handled")
+        .expect("stargate jump succeeds");
+    assert_ne!(ok, PyRep::None);
+    assert_eq!(sess.solar_system_id, Some(gate.to_solar_system_id));
+    assert_eq!(
+        ctx.systems.last_wake_reason(gate.to_solar_system_id),
+        Some(crate::system_actor::SystemWakeReason::SessionArrival(
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        ))
+    );
+
+    // Wake failure on cold destination rolls back DB transition and restores ship ball in origin.
+    let ctx_fail = test_ctx();
+    ctx_fail
+        .systems
+        .register_content_provider(Arc::new(FailDestWakeProvider {
+            target_sys: gate.to_solar_system_id,
+        }))
+        .expect("register fail provider");
+    let ship_fail_id = 895_902_i64;
+    spawn_ship_in_space(
+        &ctx_fail,
+        char_id,
+        ship_fail_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position,
+    );
+    let old_h = ctx_fail
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("origin handle live");
+    let mut fail_sess = SessionState::new(70_902);
+    mark_char_online(&ctx_fail, &mut fail_sess, char_id);
+    fail_sess.character_id = Some(char_id);
+    fail_sess.ship_id = Some(ship_fail_id);
+    fail_sess.solar_system_id = Some(gate.from_solar_system_id);
+    let fail_args = [
+        PyRep::Integer(gate.stargate_id),
+        PyRep::Integer(gate.destination_stargate_id),
+        PyRep::Integer(ship_fail_id),
+    ];
+    let err = handle(
+        &ctx_fail,
+        &mut fail_sess,
+        None,
+        "beyonce",
+        "CmdStargateJump",
+        &fail_args,
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect_err("destination wake failure must roll back stargate jump");
+    assert_eq!(err.code, "SystemTransitionFailed");
+    assert_eq!(fail_sess.solar_system_id, Some(gate.from_solar_system_id));
+    assert_eq!(
+        ctx_fail
+            .db
+            .with_snapshot(|s| s.characters[&char_id].solar_system_id),
+        gate.from_solar_system_id
+    );
+    assert!(old_h.get_ball_snapshot(ship_fail_id).await.unwrap().is_some());
+    assert!(ctx_fail.systems.get_handle(gate.to_solar_system_id).is_none());
+}

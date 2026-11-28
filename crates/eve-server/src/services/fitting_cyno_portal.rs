@@ -554,6 +554,23 @@ fn ship_fuel_stacks_and_available(
     (stacks, available)
 }
 
+fn not_enough_fuel_err(have: i64, msg: impl FnOnce(i64) -> String) -> BridgeRpcError {
+    err("NotEnoughFuel", msg(have))
+}
+
+/// Verifies read-only that `ship_id` holds at least `qty` units of `type_id` before waking cold systems.
+pub(super) fn check_ship_fuel_or_err(
+    ctx: &ServerContext,
+    ship_id: i64,
+    type_id: TypeId,
+    qty: i64,
+    msg: impl FnOnce(i64) -> String,
+) -> Result<(), BridgeRpcError> {
+    ctx.db
+        .with_snapshot(|snap| has_ship_fuel(snap, ship_id, type_id, qty))
+        .map_err(|have| not_enough_fuel_err(have, msg))
+}
+
 fn has_ship_fuel(
     snap: &eve_db::WorldStateSnapshot,
     ship_id: i64,
@@ -601,7 +618,7 @@ fn consume_from_ship(
     Ok(consumed)
 }
 
-fn refund_ship_fuel_items(
+pub(super) fn refund_ship_fuel_items(
     ctx: &ServerContext,
     char_id: i64,
     consumed: &[(eve_db::InventoryItemRecord, i32)],
@@ -610,7 +627,7 @@ fn refund_ship_fuel_items(
     ctx.rollback_consumed_items_tx(char_id, consumed, reserve_guard);
 }
 
-type ReservedFuelConsumedWithDiffs = (
+pub(super) type ReservedFuelConsumedWithDiffs = (
     Vec<(eve_db::InventoryItemRecord, i32)>,
     Vec<(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)>,
     crate::services::tactical_modules::ActiveFuelReserveGuard,
@@ -649,10 +666,10 @@ fn consume_or_err_impl(
                 (consumed, item_diffs, Some(guard))
             })
         })
-        .map_err(|have| err("NotEnoughFuel", msg(have)))
+        .map_err(|have| not_enough_fuel_err(have, msg))
 }
 
-fn consume_or_err_with_guard(
+pub(super) fn consume_or_err_with_guard(
     ctx: &ServerContext,
     ship_id: i64,
     type_id: TypeId,
@@ -1154,6 +1171,28 @@ pub(crate) struct JumpOutcome {
     pub beyonce_bound_id: u64,
 }
 
+pub(super) async fn wake_jump_destination_system(
+    ctx: &ServerContext,
+    to_sys: u32,
+) -> Result<crate::system_actor::SystemHandle, BridgeRpcError> {
+    ctx.systems
+        .wake_for_session_arrival_async(
+            to_sys,
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        )
+        .await
+        .map_err(|wake_err| {
+            let msg = format!(
+                "Failed to activate destination solar system {to_sys}: {wake_err}"
+            );
+            BridgeRpcError::with_client_error(
+                "SystemTransitionFailed",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            )
+        })
+}
+
 /// Moves a ship and character to `to_sys` at `pos`, pushing clear of any overlapping obstacle.
 // parity: feat:ships.jump-drive-fatigue-accumulation, feat:navigation.jump-arrival-placement
 pub async fn relocate_ship(
@@ -1189,6 +1228,7 @@ pub async fn relocate_ship(
     );
     let cd_secs = ((cd_min * 60.0).round() as u64).max(1);
     let fat_secs = ((fat_min * 60.0).round() as u64).max(cd_secs + 1);
+    let dest_handle = wake_jump_destination_system(ctx, to_sys).await?;
     let from_opt = ctx.systems.get_handle(from_sys);
     let taken_opt = match from_opt.as_ref() {
         Some(from) => from.take_ball(ship_id).await,
@@ -1262,7 +1302,6 @@ pub async fn relocate_ship(
         ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0)
     });
     let t = ctx.sde.types.get(&type_id);
-    let dest_handle = ctx.systems.get_or_spawn(to_sys);
     let mut arrival_pos = pos;
     let mut arrival_vel = DVec3::ZERO;
     let ship_radius = old.as_ref().map(|b| b.radius).or(t.map(|t| t.radius)).unwrap_or(50.0);
@@ -1854,32 +1893,60 @@ pub(super) async fn jump_to_fleet_beacon(
     let fuel_type = type_attr(ctx, ship_type, ATTR_JUMP_DRIVE_CONSUMPTION_TYPE) as TypeId;
     let effective_consumption = effective_jump_drive_consumption_per_ly(ctx, char_id, ship_id, ship_type);
     let fuel_qty = (effective_consumption * dist).ceil() as i64;
-    let updated_cap_cs = crate::services::space_destiny::space_nav_travel::validate_and_prepare_jump_capacitor(
+    if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, ctx.now_unix(), None).is_some() {
+        return Err(err("SessionChangeTimerActive", "Session change timer is active"));
+    }
+    let rem_cap = crate::services::space_destiny::space_nav_travel::validate_and_prepare_jump_capacitor(
         ctx,
         char_id,
         ship_id,
         sys_id,
         ship_type_id,
     )
-    .await?;
-    if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, ctx.now_unix(), None).is_some() {
-        return Err(err("SessionChangeTimerActive", "Session change timer is active"));
-    }
-    consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
-        format!("Jump requires {fuel_qty} x type {fuel_type}, ship holds {have}")
-    })?;
-    if let Some(cap_cs) = updated_cap_cs {
-        if let Some(sys) = ctx.systems.get_handle(sys_id) {
-            let _ = sys.set_combat_state(ship_id, cap_cs).await;
-        }
-    }
+    .await?
+    .map(|cs| cs.capacitor);
+    let fuel_msg = |have: i64| format!("Jump requires {fuel_qty} x type {fuel_type}, ship holds {have}");
+    check_ship_fuel_or_err(ctx, ship_id, fuel_type, fuel_qty, fuel_msg)?;
+    let _ = wake_jump_destination_system(ctx, beacon.solar_system_id).await?;
+    let (reserved_fuel, _reserved_diffs, fuel_guard) =
+        consume_or_err_with_guard(ctx, ship_id, fuel_type, fuel_qty, fuel_msg)?;
     let pos = if landed_at_star {
         star_arrival_position(ctx, beacon.solar_system_id)
     } else {
         random_arrival_position(ctx, beacon.position)
     };
-    let (cooldown_min, fatigue_min, bound) =
-        relocate_caller(ctx, session, char_id, ship_id, sys_id, beacon.solar_system_id, pos, dist, vals[1]).await?;
+    let (cooldown_min, fatigue_min, bound) = match relocate_caller(
+        ctx,
+        session,
+        char_id,
+        ship_id,
+        sys_id,
+        beacon.solar_system_id,
+        pos,
+        dist,
+        vals[1],
+    )
+    .await
+    {
+        Ok(res) => {
+            drop(fuel_guard);
+            if let Some(rem_cap) = rem_cap {
+                if let Some(dest_sys) = ctx.systems.get_handle(beacon.solar_system_id) {
+                    if let Ok(Some(dcs)) = dest_sys.get_combat_state(ship_id).await {
+                        let _ = dest_sys
+                            .set_capacitor(ship_id, rem_cap.clamp(0.0, dcs.max_capacitor.max(0.0)))
+                            .await;
+                    }
+                }
+            }
+            res
+        }
+        Err(e) => {
+            refund_ship_fuel_items(ctx, char_id, &reserved_fuel, Some(&fuel_guard));
+            drop(fuel_guard);
+            return Err(e);
+        }
+    };
     Ok(JumpOutcome {
         dist_ly: dist,
         fuel_type,

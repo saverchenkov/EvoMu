@@ -89,6 +89,7 @@ async fn deep_hull_capacity_filament_validation_and_in_pocket_rpc_restrictions()
         );
         snap.item_positions.insert(frig_ship_id, far_pos.to_array());
     });
+    let _ = ctx.systems.get_or_spawn(origin_sys);
     assert_eq!(
         validate_and_consume_abyssal_filaments(&ctx, char_id, frig_ship_id, origin_sys, fil_item_id)
             .await

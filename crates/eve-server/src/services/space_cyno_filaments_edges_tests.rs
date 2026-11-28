@@ -438,3 +438,531 @@ async fn cyno_beacon_validation_group_jump_same_system_and_cone_scan_inhibitor_e
     assert!(!seen_ids.contains(&inhibited_id), "inhibited target within 30km must be hidden");
     assert!(!seen_ids.contains(&cloaked_id), "cloaked target must be hidden");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cyno_and_filament_jumps_record_session_arrival_jump_and_rollback_on_wake_failure() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    struct FailTargetWakeProvider {
+        target_sys: Option<u32>,
+        except_sys: Option<u32>,
+        should_fail: Arc<AtomicBool>,
+    }
+    impl crate::system_actor::SystemContentProvider for FailTargetWakeProvider {
+        fn name(&self) -> &'static str {
+            "test_cyno_filament_fail_wake"
+        }
+
+        fn seed(
+            &self,
+            seed_ctx: &mut crate::system_actor::SystemContentSeedContext<'_>,
+        ) -> Result<(), String> {
+            if !self.should_fail.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let hit = self.target_sys == Some(seed_ctx.solar_system_id)
+                || self
+                    .except_sys
+                    .is_some_and(|allowed| seed_ctx.solar_system_id != allowed);
+            if hit {
+                return Err(format!("injected wake failure for {}", seed_ctx.solar_system_id));
+            }
+            Ok(())
+        }
+    }
+
+    let kw = HashMap::new();
+
+    // 1. Random jump filament wakes cold dest with SessionArrival(Jump) and rolls back on wake failure.
+    let needlejack_tid = 53_947_u32;
+    let wh_sys = 31_000_001_u32;
+    let fil_char = 90_000_001_i64;
+    let fil_ship = 100_000_901_i64;
+    let fil_item = 930_901_i64;
+    let pos = DVec3::new(1.5e13, -2.1e13, 0.9e13);
+
+    {
+        let mut ctx = test_ctx();
+        clone_type_with(
+            &mut ctx.sde,
+            needlejack_tid,
+            needlejack_tid,
+            4041,
+            66,
+            1.0,
+            0.0,
+            &[(3025, 0.0), (2832, 5.0)],
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&fil_char) {
+                ch.solar_system_id = wh_sys;
+                ch.active_ship_id = fil_ship;
+                ch.station_id = None;
+                ch.structure_id = None;
+            }
+            put_item(snap, fil_ship, 587, fil_char, i64::from(wh_sys), InventoryFlag::None, 1, true);
+            put_item(snap, fil_item, needlejack_tid, fil_char, fil_ship, InventoryFlag::Cargo, 2, false);
+            snap.fleets.insert(
+                90_901,
+                eve_db::types::FleetRecord {
+                    fleet_id: 90_901,
+                    boss_id: fil_char,
+                    members: vec![fil_char],
+                    ..Default::default()
+                },
+            );
+        });
+        let wh_h = ctx.systems.get_or_spawn(wh_sys);
+        spawn_ship(&wh_h, fil_ship, 587, 25, 6, pos, DVec3::ZERO, false).await;
+        let mut sess = make_session(fil_char, 98_000_001, Some(wh_sys), Some(fil_ship));
+        sess.user_id = Some(1);
+        handle(
+            &ctx,
+            &mut sess,
+            None,
+            "randomJumpMgr",
+            "ActivateRandomJumpFilament",
+            &[PyRep::Integer(fil_item)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("random jump filament succeeds");
+        let dest_sys = sess.solar_system_id.unwrap();
+        assert_ne!(dest_sys, wh_sys);
+        assert_eq!(
+            ctx.systems.last_wake_reason(dest_sys),
+            Some(crate::system_actor::SystemWakeReason::SessionArrival(
+                crate::system_actor::SessionArrivalWakeReason::Jump,
+            ))
+        );
+    }
+
+    {
+        let mut ctx_fail = test_ctx();
+        clone_type_with(
+            &mut ctx_fail.sde,
+            needlejack_tid,
+            needlejack_tid,
+            4041,
+            66,
+            1.0,
+            0.0,
+            &[(3025, 0.0), (2832, 5.0)],
+        );
+        ctx_fail
+            .systems
+            .register_content_provider(Arc::new(FailTargetWakeProvider {
+                target_sys: None,
+                except_sys: Some(wh_sys),
+                should_fail: Arc::new(AtomicBool::new(true)),
+            }))
+            .expect("register fail provider");
+        ctx_fail.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&fil_char) {
+                ch.solar_system_id = wh_sys;
+                ch.active_ship_id = fil_ship;
+                ch.station_id = None;
+                ch.structure_id = None;
+            }
+            put_item(snap, fil_ship, 587, fil_char, i64::from(wh_sys), InventoryFlag::None, 1, true);
+            put_item(snap, fil_item, needlejack_tid, fil_char, fil_ship, InventoryFlag::Cargo, 2, false);
+            snap.fleets.insert(
+                90_901,
+                eve_db::types::FleetRecord {
+                    fleet_id: 90_901,
+                    boss_id: fil_char,
+                    members: vec![fil_char],
+                    ..Default::default()
+                },
+            );
+        });
+        let fil_mod_id = 930_999_i64;
+        ctx_fail.db.with_mut_snapshot(|snap| {
+            put_item(snap, fil_mod_id, 439, fil_char, fil_ship, InventoryFlag::MedSlot0, 1, true);
+            snap.module_active_states.insert(fil_mod_id);
+        });
+        let wh_h = ctx_fail.systems.get_or_spawn(wh_sys);
+        spawn_ship(&wh_h, fil_ship, 587, 25, 6, pos, DVec3::ZERO, false).await;
+        wh_h.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id: fil_ship,
+            module_id: fil_mod_id,
+            module_type_id: 439,
+            effect_name: "afterburner".into(),
+            repeat: 1,
+            duration_s: 10.0,
+            ..Default::default()
+        })
+        .await
+        .expect("seed active module cycle");
+        let mut sess = make_session(fil_char, 98_000_001, Some(wh_sys), Some(fil_ship));
+        sess.user_id = Some(1);
+        let err = handle(
+            &ctx_fail,
+            &mut sess,
+            None,
+            "randomJumpMgr",
+            "ActivateRandomJumpFilament",
+            &[PyRep::Integer(fil_item)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect_err("wake failure must roll back random jump filament");
+        assert_eq!(err.code, "SystemTransitionFailed");
+        assert!(wh_h.get_ball_snapshot(fil_ship).await.unwrap().is_some());
+        assert!(wh_h.has_module_cycle(fil_ship, fil_mod_id).await);
+        assert!(ctx_fail.db.with_snapshot(|s| s.module_active_states.contains(&fil_mod_id)));
+        assert_eq!(
+            ctx_fail.db.with_snapshot(|s| s.items[&fil_item].quantity),
+            2
+        );
+        assert_eq!(
+            ctx_fail.db.with_snapshot(|s| s.characters[&fil_char].solar_system_id),
+            wh_sys
+        );
+    }
+
+    // 2. Structure beacon & fleet beacon jumps wake cold dst_sys with SessionArrival(Jump) and roll back on Err.
+    let mut ctx = test_ctx();
+    let mut low_systems: Vec<u32> = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| {
+            s.security_status < 0.45
+                && s.solar_system_id < 31_000_000
+                && s.region_id != 10_000_070
+                && s.solar_system_id != 30_100_000
+        })
+        .map(|s| s.solar_system_id)
+        .collect();
+    low_systems.sort_unstable();
+    let cur_sys = low_systems[0];
+    let dst_sys = low_systems
+        .iter()
+        .copied()
+        .find(|&sid| {
+            sid != cur_sys && super::super::space_nav_travel::distance_ly(&ctx, cur_sys, sid) <= 5.0
+        })
+        .expect("nearby low/null system within 5 LY");
+
+    let jump_ship_tid = 99_620_u32;
+    let iso_tid = 17_887_u32;
+    let can_jump = super::super::space_nav_travel::attr_id_by_name(&ctx, "canJump").unwrap_or(861);
+    let jd_range = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveRange").unwrap_or(867);
+    let jd_amount = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveConsumptionAmount").unwrap_or(868);
+    let jd_type = super::super::space_nav_travel::attr_id_by_name(&ctx, "jumpDriveConsumptionType").unwrap_or(866);
+    {
+        let sde_mut = Arc::make_mut(&mut ctx.sde);
+        sde_mut.type_lists.insert(
+            99_318,
+            eve_sde::TypeListInfo {
+                type_list_id: 99_318,
+                name: "All Test Cyno Beacons".into(),
+                included_type_ids: vec![21096, 57425, 35840],
+                ..Default::default()
+            },
+        );
+    }
+    clone_type_with(
+        &mut ctx.sde,
+        23757,
+        jump_ship_tid,
+        547,
+        6,
+        15_000.0,
+        500.0,
+        &[
+            (can_jump, 1.0),
+            (jd_range, 8.0),
+            (jd_amount, 10.0),
+            (jd_type, f64::from(iso_tid)),
+            (1971, 1.0),
+            (1972, 1.0),
+            (3317, 99_318.0),
+            (898, 0.25),
+        ],
+    );
+    clone_type_with(&mut ctx.sde, 34, iso_tid, 423, 4, 0.05, 0.0, &[]);
+
+    let corp_id = 98_910_001_i64;
+    let struct_pilot = 98_910_101_i64;
+    let fleet_pilot = 98_910_102_i64;
+    let cyno_pilot = 98_910_103_i64;
+    let struct_ship = 1_040_910_101_i64;
+    let fleet_ship = 1_040_910_102_i64;
+    let cyno_ship = 1_040_910_103_i64;
+    let pharolux_id = 1_040_910_901_i64;
+    let fleet_beacon_id = 1_040_910_902_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base = snap.characters.values().next().cloned().expect("demo char");
+        for (cid, sid, sys) in [
+            (struct_pilot, struct_ship, cur_sys),
+            (fleet_pilot, fleet_ship, cur_sys),
+            (cyno_pilot, cyno_ship, dst_sys),
+        ] {
+            let mut ch = base.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = sys;
+            ch.active_ship_id = sid;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.jump_cooldown_until_unix = 0;
+            ch.jump_fatigue_until_unix = 0;
+            snap.characters.insert(cid, ch);
+        }
+        put_item(snap, struct_ship, jump_ship_tid, struct_pilot, i64::from(cur_sys), InventoryFlag::None, 1, true);
+        put_item(snap, fleet_ship, jump_ship_tid, fleet_pilot, i64::from(cur_sys), InventoryFlag::None, 1, true);
+        put_item(snap, 77_901, iso_tid, struct_pilot, struct_ship, InventoryFlag::SpecializedFuelBay, 5_000, false);
+        put_item(snap, 77_902, iso_tid, fleet_pilot, fleet_ship, InventoryFlag::SpecializedFuelBay, 5_000, false);
+        snap.structures.insert(pharolux_id, online_pharolux(pharolux_id, dst_sys, corp_id));
+        snap.fleets.insert(
+            7_910,
+            FleetRecord {
+                fleet_id: 7_910,
+                boss_id: cyno_pilot,
+                members: vec![cyno_pilot, fleet_pilot],
+                free_move: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let should_fail_dst = Arc::new(AtomicBool::new(false));
+    ctx.systems
+        .register_content_provider(Arc::new(FailTargetWakeProvider {
+            target_sys: Some(dst_sys),
+            except_sys: None,
+            should_fail: Arc::clone(&should_fail_dst),
+        }))
+        .expect("register fail provider");
+
+    let cur_h = ctx.systems.get_or_spawn(cur_sys);
+    spawn_ship(&cur_h, struct_ship, jump_ship_tid, 547, 6, DVec3::ZERO, DVec3::ZERO, false).await;
+    spawn_ship(&cur_h, fleet_ship, jump_ship_tid, 547, 6, DVec3::new(2_000.0, 0.0, 0.0), DVec3::ZERO, false).await;
+    for sid in [struct_ship, fleet_ship] {
+        let mut cs = cur_h.get_combat_state(sid).await.unwrap().unwrap();
+        cs.capacitor = 10_000.0;
+        cs.max_capacitor = 10_000.0;
+        cur_h.set_combat_state(sid, cs).await.unwrap();
+    }
+
+    crate::services::inventory_fitting::fitting_cyno_portal::cyno_state(&ctx)
+        .state
+        .write()
+        .unwrap()
+        .beacons
+        .insert(
+            cyno_ship,
+            crate::services::inventory_fitting::fitting_cyno_portal::FleetModuleBeacon {
+                beacon_id: fleet_beacon_id,
+                char_id: cyno_pilot,
+                ship_id: cyno_ship,
+                beacon_type_id: 57_425,
+                solar_system_id: dst_sys,
+                position: DVec3::new(1_000_000.0, 2_000_000.0, 3_000_000.0),
+                expires_at_unix: ctx.now_unix_secs() + 600,
+            },
+        );
+
+    let mut struct_sess = make_session(struct_pilot, corp_id, Some(cur_sys), Some(struct_ship));
+    let mut fleet_sess = make_session(fleet_pilot, corp_id, Some(cur_sys), Some(fleet_ship));
+
+    // Cold dst_sys wakes via SessionArrival(Jump) on structure beacon jump.
+    assert!(ctx.systems.get_handle(dst_sys).is_none());
+    handle(
+        &ctx,
+        &mut struct_sess,
+        None,
+        "structureCynoBeaconMgr",
+        "CmdJumpToStructureBeacon",
+        &[PyRep::Integer(pharolux_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("structure beacon jump wakes cold dst_sys");
+    assert_eq!(
+        ctx.systems.last_wake_reason(dst_sys),
+        Some(crate::system_actor::SystemWakeReason::SessionArrival(
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        ))
+    );
+
+    // Stop dst_sys to Cold, then verify fleet beacon jump wakes dst_sys via SessionArrival(Jump).
+    assert!(ctx.systems.stop_system(dst_sys).await);
+    assert!(ctx.systems.get_handle(dst_sys).is_none());
+    handle_cmd_beacon_jump_fleet(
+        &ctx,
+        &mut fleet_sess,
+        &[PyRep::Integer(cyno_pilot), PyRep::Integer(cyno_ship), PyRep::Integer(i64::from(dst_sys))],
+    )
+    .await
+    .expect("fleet beacon jump wakes cold dst_sys");
+    assert_eq!(
+        ctx.systems.last_wake_reason(dst_sys),
+        Some(crate::system_actor::SystemWakeReason::SessionArrival(
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        ))
+    );
+
+    // Stop dst_sys again, move pilots back to cur_sys, enable wake failure, and verify rollback on both paths.
+    assert!(ctx.systems.stop_system(dst_sys).await);
+    assert!(ctx.systems.get_handle(dst_sys).is_none());
+    should_fail_dst.store(true, Ordering::Release);
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid, fuel_iid) in [(struct_pilot, struct_ship, 77_901), (fleet_pilot, fleet_ship, 77_902)] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.solar_system_id = cur_sys;
+                ch.jump_cooldown_until_unix = 0;
+                ch.jump_fatigue_until_unix = 0;
+            }
+            if let Some(it) = snap.items.get_mut(&fuel_iid) {
+                it.quantity = 5_000;
+            }
+            snap.sp6_lifecycle.session_change_timers.remove(&cid);
+            let _ = sid;
+        }
+    });
+    spawn_ship(&cur_h, struct_ship, jump_ship_tid, 547, 6, DVec3::ZERO, DVec3::ZERO, false).await;
+    spawn_ship(&cur_h, fleet_ship, jump_ship_tid, 547, 6, DVec3::new(2_000.0, 0.0, 0.0), DVec3::ZERO, false).await;
+    for sid in [struct_ship, fleet_ship] {
+        let mut cs = cur_h.get_combat_state(sid).await.unwrap().unwrap();
+        cs.capacitor = 10_000.0;
+        cs.max_capacitor = 10_000.0;
+        cur_h.set_combat_state(sid, cs).await.unwrap();
+    }
+    let struct_mod_id = 77_991_i64;
+    let fleet_mod_id = 77_992_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        put_item(snap, struct_mod_id, 439, struct_pilot, struct_ship, InventoryFlag::MedSlot0, 1, true);
+        put_item(snap, fleet_mod_id, 439, fleet_pilot, fleet_ship, InventoryFlag::MedSlot0, 1, true);
+        snap.module_active_states.insert(struct_mod_id);
+        snap.module_active_states.insert(fleet_mod_id);
+    });
+    for (sid, mid) in [(struct_ship, struct_mod_id), (fleet_ship, fleet_mod_id)] {
+        cur_h
+            .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                ship_id: sid,
+                module_id: mid,
+                module_type_id: 439,
+                effect_name: "afterburner".into(),
+                repeat: 1,
+                duration_s: 10.0,
+                ..Default::default()
+            })
+            .await
+            .expect("seed active module cycle");
+    }
+    struct_sess.solar_system_id = Some(cur_sys);
+    fleet_sess.solar_system_id = Some(cur_sys);
+
+    let err_struct = handle(
+        &ctx,
+        &mut struct_sess,
+        None,
+        "structureCynoBeaconMgr",
+        "CmdJumpToStructureBeacon",
+        &[PyRep::Integer(pharolux_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("structure beacon jump wake failure must fail");
+    assert_eq!(err_struct.code, "SystemTransitionFailed");
+    assert!(cur_h.get_ball_snapshot(struct_ship).await.unwrap().is_some());
+    assert!(cur_h.has_module_cycle(struct_ship, struct_mod_id).await);
+    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&struct_mod_id)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&77_901].quantity), 5_000);
+    assert!(ctx.systems.get_handle(dst_sys).is_none());
+
+    let err_fleet = handle_cmd_beacon_jump_fleet(
+        &ctx,
+        &mut fleet_sess,
+        &[PyRep::Integer(cyno_pilot), PyRep::Integer(cyno_ship), PyRep::Integer(i64::from(dst_sys))],
+    )
+    .await
+    .expect_err("fleet beacon jump wake failure must fail");
+    assert_eq!(err_fleet.code, "SystemTransitionFailed");
+    assert!(cur_h.get_ball_snapshot(fleet_ship).await.unwrap().is_some());
+    assert!(cur_h.has_module_cycle(fleet_ship, fleet_mod_id).await);
+    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&fleet_mod_id)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&77_902].quantity), 5_000);
+    assert!(ctx.systems.get_handle(dst_sys).is_none());
+
+    // Read-only capacitor & fuel rejections must never wake Cold dst_sys (T4A-R3-01).
+    should_fail_dst.store(false, Ordering::Release);
+    for sid in [struct_ship, fleet_ship] {
+        let mut cs = cur_h.get_combat_state(sid).await.unwrap().unwrap();
+        cs.capacitor = 1.0;
+        cs.max_capacitor = 10_000.0;
+        cur_h.set_combat_state(sid, cs).await.unwrap();
+    }
+    let err_struct_cap = handle(
+        &ctx,
+        &mut struct_sess,
+        None,
+        "structureCynoBeaconMgr",
+        "CmdJumpToStructureBeacon",
+        &[PyRep::Integer(pharolux_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("low capacitor must reject structure jump without waking dst_sys");
+    assert_eq!(err_struct_cap.code, "NotEnoughCapacitor");
+    assert!(ctx.systems.get_handle(dst_sys).is_none());
+
+    let err_fleet_cap = handle_cmd_beacon_jump_fleet(
+        &ctx,
+        &mut fleet_sess,
+        &[PyRep::Integer(cyno_pilot), PyRep::Integer(cyno_ship), PyRep::Integer(i64::from(dst_sys))],
+    )
+    .await
+    .expect_err("low capacitor must reject fleet jump without waking dst_sys");
+    assert_eq!(err_fleet_cap.code, "NotEnoughCapacitor");
+    assert!(ctx.systems.get_handle(dst_sys).is_none());
+
+    for sid in [struct_ship, fleet_ship] {
+        let mut cs = cur_h.get_combat_state(sid).await.unwrap().unwrap();
+        cs.capacitor = 10_000.0;
+        cs.max_capacitor = 10_000.0;
+        cur_h.set_combat_state(sid, cs).await.unwrap();
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        for fuel_iid in [77_901_i64, 77_902_i64] {
+            if let Some(it) = snap.items.get_mut(&fuel_iid) {
+                it.quantity = 0;
+            }
+        }
+    });
+    let err_struct_fuel = handle(
+        &ctx,
+        &mut struct_sess,
+        None,
+        "structureCynoBeaconMgr",
+        "CmdJumpToStructureBeacon",
+        &[PyRep::Integer(pharolux_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("missing fuel must reject structure jump without waking dst_sys");
+    assert_eq!(err_struct_fuel.code, "InsufficientFuel");
+    assert!(ctx.systems.get_handle(dst_sys).is_none());
+
+    let err_fleet_fuel = handle_cmd_beacon_jump_fleet(
+        &ctx,
+        &mut fleet_sess,
+        &[PyRep::Integer(cyno_pilot), PyRep::Integer(cyno_ship), PyRep::Integer(i64::from(dst_sys))],
+    )
+    .await
+    .expect_err("missing fuel must reject fleet jump without waking dst_sys");
+    assert_eq!(err_fleet_fuel.code, "InsufficientFuel");
+    assert!(ctx.systems.get_handle(dst_sys).is_none());
+}

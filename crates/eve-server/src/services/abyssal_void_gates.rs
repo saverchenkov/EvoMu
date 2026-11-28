@@ -49,6 +49,28 @@ fn gate_not_found_error() -> BridgeRpcError {
     }
 }
 
+async fn wake_jump_destination_system(
+    ctx: &ServerContext,
+    dest_sys_id: u32,
+) -> Result<crate::system_actor::SystemHandle, BridgeRpcError> {
+    ctx.systems
+        .wake_for_session_arrival_async(
+            dest_sys_id,
+            crate::system_actor::SessionArrivalWakeReason::Jump,
+        )
+        .await
+        .map_err(|wake_err| {
+            let msg = format!(
+                "Failed to activate destination solar system {dest_sys_id}: {wake_err}"
+            );
+            BridgeRpcError::with_client_error(
+                "SystemTransitionFailed",
+                msg.clone(),
+                eve_proto::ClientError::CustomInfo(msg),
+            )
+        })
+}
+
 enum GateInspect {
     Expired { ship_id: i64, abyss_sys: u32, now: u64 },
     Err(BridgeRpcError),
@@ -483,6 +505,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         });
     }
 
+    let origin_sys_handle = wake_jump_destination_system(ctx, origin_sys).await?;
     let Some(taken) = abyss_handle.take_ball(ship_id).await else {
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
@@ -605,7 +628,6 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
 
     ctx.invalidate_ship_fitting(ship_id);
 
-    let origin_sys_handle = ctx.systems.get_or_spawn(origin_sys);
     for tid in despawned_trace_ids {
         origin_sys_handle.try_remove_ball(tid);
     }
@@ -828,20 +850,20 @@ pub(crate) async fn handle_void_space_player_jump(
     )
     .await?;
 
-    let origin_and_taken = match origin_handle_opt {
-        Some(origin_handle) => origin_handle
-            .take_ball(ship_id)
-            .await
-            .map(|taken| (origin_handle, taken)),
-        None => None,
+    let ship_not_in_origin_err = || BridgeRpcError {
+        code: "SystemTransitionFailed".into(),
+        message: format!("Ship {ship_id} is no longer in solar system {cur_sys}"),
+        client_error: None,
     };
-    let Some((origin_handle, taken)) = origin_and_taken else {
-        return Err(BridgeRpcError {
-            code: "SystemTransitionFailed".into(),
-            message: format!("Ship {ship_id} is no longer in solar system {cur_sys}"),
-            client_error: None,
-        });
-    };
+    let origin_handle = origin_handle_opt.ok_or_else(ship_not_in_origin_err)?;
+    if ball_pos_opt.is_none() {
+        return Err(ship_not_in_origin_err());
+    }
+    let void_handle = wake_jump_destination_system(ctx, VOID_SPACE_SYSTEM_ID).await?;
+    let taken = origin_handle
+        .take_ball(ship_id)
+        .await
+        .ok_or_else(ship_not_in_origin_err)?;
     let taken_void_cs = taken.combat_state.clone();
 
     // Server-validated target ID (filament or gate) is used as effective_content_id;
@@ -964,7 +986,6 @@ pub(crate) async fn handle_void_space_player_jump(
         now_unix,
     );
 
-    let void_handle = ctx.systems.get_or_spawn(VOID_SPACE_SYSTEM_ID);
     for exit_gid in [888_001_i64, 888_002_i64] {
         if void_handle.get_ball_snapshot(exit_gid).await.ok().flatten().is_none() {
             let _ = void_handle
@@ -1148,27 +1169,33 @@ pub(crate) async fn handle_void_space_end_gate_activation(
             client_error: None,
         });
     }
-    if let Some((_, sb)) = void_handle.get_ball_snapshot(ship_id).await.ok().flatten() {
-        let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
-        if surface_dist > 2_500.0 {
-            return Err(BridgeRpcError {
-                code: "GateOutOfRange".into(),
-                message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
-                client_error: None,
-            });
-        }
-    }
-
-    let Some(taken) = void_handle.take_ball(ship_id).await else {
+    let ship_not_in_void_err = || BridgeRpcError {
+        code: "SystemTransitionFailed".into(),
+        message: format!("Ship {ship_id} is no longer in solar system {cur_sys}"),
+        client_error: None,
+    };
+    let (_, sb) = void_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(ship_not_in_void_err)?;
+    let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
+    if surface_dist > 2_500.0 {
         return Err(BridgeRpcError {
-            code: "SystemTransitionFailed".into(),
-            message: format!("Ship {ship_id} is no longer in solar system {cur_sys}"),
+            code: "GateOutOfRange".into(),
+            message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
             client_error: None,
         });
-    };
-    let taken_exit_cs = taken.combat_state.clone();
+    }
 
     let origin_sys = vs.origin_solar_system_id;
+    let origin_handle = wake_jump_destination_system(ctx, origin_sys).await?;
+    let taken = void_handle
+        .take_ball(ship_id)
+        .await
+        .ok_or_else(ship_not_in_void_err)?;
+    let taken_exit_cs = taken.combat_state.clone();
     let exit_pos = [
         vs.origin_position[0] + 1_000.0,
         vs.origin_position[1] + 1_000.0,
@@ -1217,7 +1244,6 @@ pub(crate) async fn handle_void_space_end_gate_activation(
     });
     crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
 
-    let origin_handle = ctx.systems.get_or_spawn(origin_sys);
     let ship_type = ctx
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));

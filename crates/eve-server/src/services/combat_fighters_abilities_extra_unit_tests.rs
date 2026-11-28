@@ -89,6 +89,7 @@ async fn activate_and_deactivate_validation_errors_and_lowsec_restriction() {
     }
 
     // 5. Abandoned fighter -> FighterNotOwned
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let f_ball = 500_001i64;
     fighter_test_helpers::insert_active_fighter(
         &ctx,
@@ -115,7 +116,6 @@ async fn activate_and_deactivate_validation_errors_and_lowsec_restriction() {
         "FighterNotInSystem"
     );
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     sys_handle.spawn_ball(make_ball(f_ball, 999_101, DVec3::ZERO, 20.0)).await.unwrap();
 
     // 6. Fighter type has no fighter_abilities_by_type -> InvalidFighterAbilitySlot
