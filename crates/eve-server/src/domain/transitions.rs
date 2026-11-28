@@ -120,7 +120,7 @@ impl LeaveSpaceCleanupPolicy {
             abandon_drones: true,
             abort_self_destruct: true,
             deactivate_modules: true,
-            leave_space_in_snap: LeaveSpaceSnapMode::OnlyIfTakenBall,
+            leave_space_in_snap: LeaveSpaceSnapMode::Always,
             stop_and_flush_warp_on_cross_system: true,
         }
     }
@@ -542,12 +542,24 @@ where
             };
         let hook_out = pre_spawn_hook();
         let (dest_tick, ship_type_id, persisted_pos) = if effective_ship_id > 0 {
-            if dest_handle
-                .get_ball_snapshot(effective_ship_id)
-                .await
-                .ok()
-                .flatten()
-                .is_some()
+            let needs_space_entry = !same_system_in_space
+                || ctx.db.with_snapshot(|snap| {
+                    snap.sp6_lifecycle
+                        .ship_combat_hp
+                        .get(&(-effective_ship_id))
+                        .is_some_and(|m| {
+                            m.armor_hp < 0.0
+                                || (m.armor_hp > 0.0
+                                    && (m.armor_hp.round() as u32) != req.dest_sys_id)
+                        })
+                });
+            if !needs_space_entry
+                && dest_handle
+                    .get_ball_snapshot(effective_ship_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
             {
                 if !stopped_mid_warp {
                     let _ = dest_handle.force_stop_warp(effective_ship_id);
@@ -557,6 +569,16 @@ where
                 }
                 (0, lookup_ship_type_id(ctx, effective_ship_id), req.arrival_position)
             } else {
+                // Record space entry before `spawn_arrival_ship_ball` so `-ship_id` clears docked
+                // (`-1.0`) / stale-system markers and `record_spawned_ball_checkpoint_baseline`
+                // caches the matching `space_entry_epoch` (`T2E-R4-01`).
+                ctx.db.with_mut_snapshot(|snap| {
+                    crate::sp6_lifecycle::enter_space_in_snap(
+                        snap,
+                        effective_ship_id,
+                        req.dest_sys_id,
+                    );
+                });
                 let spawn_pos = req.arrival_position.unwrap_or(req.fallback_arrival_position);
                 let (tick, tid) = match spawn_arrival_ship_ball(
                     ctx,
@@ -1880,5 +1902,233 @@ mod tests {
                 .expect("ship_combat_hp updated by destination checkpoint");
             assert!((hp.shield_hp - 135.0).abs() < 1e-3);
         });
+    }
+
+    fn build_gm_teleport_test_request(
+        char_id: i64,
+        ship_id: i64,
+        old_sys_id: u32,
+        old_dock: Option<(i64, bool)>,
+        dest_sys_id: u32,
+        was_in_space: bool,
+        arrival_pos: DVec3,
+    ) -> RelocateInSpaceRequest {
+        RelocateInSpaceRequest {
+            char_id,
+            ship_id,
+            old_sys_id,
+            old_dock,
+            dest_sys_id,
+            was_in_space,
+            arrival_position: Some(arrival_pos),
+            fallback_arrival_position: arrival_pos,
+            arrival_velocity: DVec3::ZERO,
+            require_take_ball: false,
+            take_ball_missing_code: "TeleportFailed",
+            db_transition_failed_code: "TeleportFailed",
+            destination_wake: DestinationWakePolicy::GmCommand("/tr".to_string()),
+            transition_kind: SpaceTransitionKind::Teleport,
+            transition_reason: "slash_teleport",
+            combat_state_preservation: CombatStatePreservation::Fresh,
+            gate_cloak_invuln: GateCloakInvulnPolicy::none(),
+            cleanup: LeaveSpaceCleanupPolicy::gm_teleport(),
+            sync_local_chat: true,
+            persist_item_position: true,
+            record_session_change_timer: false,
+            record_solar_system_jump: false,
+            bind_beyonce: false,
+            push_set_state: false,
+        }
+    }
+
+    async fn assert_dest_checkpoint_persists_after_gm_teleport(
+        ctx: &ServerContext,
+        dest_handle: &SystemHandle,
+        ship_id: i64,
+        dest_sys_id: u32,
+        expected_epoch: u64,
+    ) {
+        assert_eq!(
+            crate::sp6_lifecycle::current_ship_space_entry_epoch(&ctx.db, ship_id),
+            expected_epoch,
+            "destination space_entry_epoch must advance synchronously (`T2E-R4-01`)"
+        );
+        ctx.db.with_snapshot(|snap| {
+            let meta = snap
+                .sp6_lifecycle
+                .ship_combat_hp
+                .get(&(-ship_id))
+                .expect("ship meta combat hp entry");
+            assert_eq!(
+                meta.armor_hp, dest_sys_id as f64,
+                "ship meta armor_hp must record destination solar system (`T2E-R4-01`)"
+            );
+        });
+        let arrived_cs = dest_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .expect("arrived combat state");
+        assert!(
+            arrived_cs.shield_hp >= 20.0,
+            "expected positive starting shield_hp, got {}",
+            arrived_cs.shield_hp
+        );
+        let moved_pos = DVec3::new(33_000.0, -500.0, 250.0);
+        assert!(dest_handle.set_ball_position(ship_id, moved_pos).await);
+        dest_handle
+            .apply_true_damage(ship_id, 15.0)
+            .await
+            .expect("apply_true_damage");
+        let written = dest_handle
+            .flush_condition_checkpoint()
+            .await
+            .expect("flush_condition_checkpoint");
+        assert_eq!(
+            written, 1,
+            "post-relocation ConditionCheckpoint must not be dropped as stale (`T2E-R4-01`)"
+        );
+        ctx.db.with_snapshot(|snap| {
+            let persisted_pos = snap
+                .item_positions
+                .get(&ship_id)
+                .copied()
+                .expect("item_positions updated by destination checkpoint");
+            assert!((DVec3::from_array(persisted_pos) - moved_pos).length() < 1e-3);
+            let hp = snap
+                .sp6_lifecycle
+                .ship_combat_hp
+                .get(&ship_id)
+                .expect("ship_combat_hp updated by destination checkpoint");
+            assert!(
+                (hp.shield_hp - (arrived_cs.shield_hp - 15.0)).abs() < 1e-3,
+                "expected persisted shield_hp {}, got {}",
+                arrived_cs.shield_hp - 15.0,
+                hp.shield_hp
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn docked_cross_system_gm_teleport_clears_dock_marker_and_persists_dest_checkpoints() {
+        let ctx = ServerContext::new();
+        let cid = 90_996_001_i64;
+        let ship_id = 91_996_001_i64;
+        let station_id = 60_003_760_i64;
+        seed_test_pilot(&ctx, cid, ship_id, JITA);
+        let pre_epoch = ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&cid).unwrap();
+            ch.station_id = Some(station_id);
+            let ship = snap.items.get_mut(&ship_id).unwrap();
+            ship.location_id = station_id;
+            ship.flag = InventoryFlag::Hangar;
+            crate::sp6_lifecycle::leave_space_in_snap(snap, ship_id, None, None, None)
+        });
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.sp6_lifecycle.ship_combat_hp[&(-ship_id)].armor_hp, -1.0);
+        });
+
+        let mut sess = make_session(cid, 1_000_167, JITA);
+        let req = build_gm_teleport_test_request(
+            cid,
+            ship_id,
+            JITA,
+            Some((station_id, false)),
+            PERIMETER,
+            false,
+            DVec3::new(12_000.0, 0.0, 0.0),
+        );
+        let outcome = relocate_character_in_space(&ctx, Some(&mut sess), req)
+            .await
+            .expect("docked cross-system /tr succeeds");
+        assert!(ctx.systems.get_handle(JITA).is_none());
+        assert_dest_checkpoint_persists_after_gm_teleport(
+            &ctx,
+            &outcome.dest_handle,
+            ship_id,
+            PERIMETER,
+            pre_epoch + 1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn docked_same_system_gm_teleport_clears_dock_marker_and_persists_dest_checkpoints() {
+        let ctx = ServerContext::new();
+        let cid = 90_996_002_i64;
+        let ship_id = 91_996_002_i64;
+        let station_id = 60_003_760_i64;
+        seed_test_pilot(&ctx, cid, ship_id, JITA);
+        let pre_epoch = ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&cid).unwrap();
+            ch.station_id = Some(station_id);
+            let ship = snap.items.get_mut(&ship_id).unwrap();
+            ship.location_id = station_id;
+            ship.flag = InventoryFlag::Hangar;
+            crate::sp6_lifecycle::leave_space_in_snap(snap, ship_id, None, None, None)
+        });
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.sp6_lifecycle.ship_combat_hp[&(-ship_id)].armor_hp, -1.0);
+        });
+
+        let mut sess = make_session(cid, 1_000_167, JITA);
+        let req = build_gm_teleport_test_request(
+            cid,
+            ship_id,
+            JITA,
+            Some((station_id, false)),
+            JITA,
+            false,
+            DVec3::new(15_000.0, 500.0, -200.0),
+        );
+        let outcome = relocate_character_in_space(&ctx, Some(&mut sess), req)
+            .await
+            .expect("docked same-system /tr succeeds");
+        assert_dest_checkpoint_persists_after_gm_teleport(
+            &ctx,
+            &outcome.dest_handle,
+            ship_id,
+            JITA,
+            pre_epoch + 1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cold_origin_in_space_gm_teleport_updates_dest_system_epoch_and_persists_checkpoints() {
+        let ctx = ServerContext::new();
+        let cid = 90_996_003_i64;
+        let ship_id = 91_996_003_i64;
+        seed_test_pilot(&ctx, cid, ship_id, MAURASI);
+        let pre_epoch = ctx.db.with_mut_snapshot(|snap| {
+            crate::sp6_lifecycle::leave_space_in_snap(snap, ship_id, None, Some(MAURASI), None)
+        });
+        assert!(ctx.systems.get_handle(MAURASI).is_none());
+
+        let mut sess = make_session(cid, 1_000_167, MAURASI);
+        let req = build_gm_teleport_test_request(
+            cid,
+            ship_id,
+            MAURASI,
+            None,
+            PERIMETER,
+            true,
+            DVec3::new(8_000.0, 1_000.0, 0.0),
+        );
+        let outcome = relocate_character_in_space(&ctx, Some(&mut sess), req)
+            .await
+            .expect("cold-origin in-space /tr succeeds");
+        assert!(
+            ctx.systems.get_handle(MAURASI).is_none(),
+            "cold origin solar system must stay unspawned (`#1542`)"
+        );
+        assert_dest_checkpoint_persists_after_gm_teleport(
+            &ctx,
+            &outcome.dest_handle,
+            ship_id,
+            PERIMETER,
+            pre_epoch + 1,
+        )
+        .await;
     }
 }
