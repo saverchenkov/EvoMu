@@ -1527,34 +1527,43 @@ fn apply_weapon_charge_volatility_and_base_damage(
             let crystal_hp = charge_attr(9, 1.0).max(0.0001);
             if ctx.mechanic_rng.roll(vol_chance) {
                 let (prev_dmg, next_dmg, shatter_diff) = ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(ci) = snap.items.get_mut(&charge_item_id) {
-                        let cur = ci.dynamic_attributes.get(&3).copied().unwrap_or(0.0);
-                        let next_dmg = cur + vol_dmg;
-                        crystal_damage_after = (next_dmg / crystal_hp).min(1.0);
-                        if next_dmg + 1e-9 >= crystal_hp {
-                            crystal_shattered = true;
-                            let pre_rec = ci.clone();
-                            let post_rec = if ci.quantity > 1 {
-                                ci.quantity -= 1;
-                                ci.version += 1;
-                                ci.dynamic_attributes.remove(&3);
-                                Some(ci.clone())
-                            } else {
-                                snap.items.remove(&charge_item_id);
-                                snap.module_active_charges.remove(&module_id);
-                                None
-                            };
-                            (cur, 0.0, Some((Some(pre_rec), post_rec)))
-                        } else {
-                            ci.dynamic_attributes.insert(3, next_dmg);
-                            if ci.quantity == 1 {
-                                ci.singleton = true;
-                            }
+                    let Some((cur, next_dmg, will_shatter)) =
+                        snap.items.get(&charge_item_id).map(|ci| {
+                            let cur = ci.dynamic_attributes.get(&3).copied().unwrap_or(0.0);
+                            let next_dmg = cur + vol_dmg;
+                            (cur, next_dmg, next_dmg + 1e-9 >= crystal_hp)
+                        })
+                    else {
+                        return (0.0, 0.0, None);
+                    };
+                    crystal_damage_after = (next_dmg / crystal_hp).min(1.0);
+                    if will_shatter {
+                        crystal_shattered = true;
+                        let Some(ci) = snap.items.get_mut(&charge_item_id) else {
+                            return (0.0, 0.0, None);
+                        };
+                        let pre_rec = ci.clone();
+                        let post_rec = if ci.quantity > 1 {
+                            ci.quantity -= 1;
                             ci.version += 1;
-                            (cur, next_dmg, None)
-                        }
+                            ci.dynamic_attributes.remove(&3);
+                            Some(ci.clone())
+                        } else {
+                            snap.items.remove(&charge_item_id);
+                            snap.module_active_charges.remove(&module_id);
+                            None
+                        };
+                        (cur, 0.0, Some((Some(pre_rec), post_rec)))
                     } else {
-                        (0.0, 0.0, None)
+                        let _ = crate::domain::items::set_item_dynamic_attribute_in_snap(
+                            snap,
+                            Some(&ctx.sde),
+                            charge_item_id,
+                            3,
+                            next_dmg,
+                            true,
+                        );
+                        (cur, next_dmg, None)
                     }
                 });
                 emit_weapon_charge_diff(ctx, char_id, ship_id, shatter_diff);

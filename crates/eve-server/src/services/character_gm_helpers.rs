@@ -60,29 +60,6 @@ pub(crate) fn resolve_item_or_char_active_ship(
     }
 }
 
-pub(crate) fn resolve_gm_char_prefix<'a>(
-    ctx: &ServerContext,
-    cid: i64,
-    tokens: &'a [String],
-    require_min_remaining: usize,
-) -> (i64, &'a [String]) {
-    if tokens.len() <= require_min_remaining {
-        return (cid, tokens);
-    }
-    let first = &tokens[0];
-    if is_me_or_myship(first) || first.eq_ignore_ascii_case("self") {
-        return (cid, &tokens[1..]);
-    }
-    if let Ok(parsed) = first.parse::<i64>() {
-        if parsed > 0
-            && (parsed == cid || ctx.db.with_snapshot(|s| s.characters.contains_key(&parsed)))
-        {
-            return (parsed, &tokens[1..]);
-        }
-    }
-    (cid, tokens)
-}
-
 /// Executes a pre-parsed `/heal` command via [`crate::domain::combat_ops::restore_ship_vital_state`].
 pub(crate) async fn execute_gm_heal_parsed(
     ctx: &ServerContext,
@@ -181,18 +158,6 @@ pub(crate) async fn execute_gm_heal(
         .unwrap_or_else(|| cmd.trim());
     let parsed = crate::router::slash_registry::parse_heal_slash_args(rest)?;
     execute_gm_heal_parsed(ctx, session, cid, cmd, parsed).await
-}
-
-/// Clears runtime NPC AI and combat state for `entity_id` in `sys_id`.
-pub(crate) fn remove_npc_runtime_state(ctx: &ServerContext, sys_id: u32, entity_id: i64) {
-    if let Ok(mut map) = ctx.npc_spawns.write() {
-        if let Some(mgr) = map.get_mut(&sys_id) {
-            mgr.entities.remove(&entity_id);
-        }
-    }
-    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.npc_entities.remove(&entity_id);
-    });
 }
 
 #[cfg(test)]

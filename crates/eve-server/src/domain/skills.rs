@@ -13,9 +13,9 @@ use crate::services::jump_clone_names::{
     emit_server_skills_changed, emit_server_skills_removed, skill_queue_entry_duration_with_attrs,
     skill_queue_rowset,
 };
-use eve_db::{SkillHistoryEntry, TrainedSkillRecord, WorldStateSnapshot};
+use eve_db::{SkillHistoryEntry, TrainedSkillRecord, WorldRepository, WorldStateSnapshot};
 use eve_sde::{attr_ids, TypeId};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// Snapshot skill update request passed to [`apply_character_skill_update_in_snap`].
 #[derive(Clone, Copy, Debug)]
@@ -498,6 +498,118 @@ pub fn apply_free_skill_points_to_skill(
     }
     emit_server_skills_changed(ctx, char_id, &[skill_type_id], None);
     ctx.push_brain_update(char_id);
+/// Result metadata returned by [`reset_character_skills_to_race_starter`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResetSkillsToStarterOutcome {
+    pub char_id: i64,
+    pub race_id: u32,
+    pub active_ship_id: i64,
+    pub starter_skill_count: usize,
+    pub removed_skill_count: usize,
+    pub total_skill_points: f64,
+    pub free_skill_points: f64,
+    pub changed_skill_type_ids: Vec<TypeId>,
+}
+
+/// Resets `char_id`'s trained skills, active/paused skill queues, skill history, and SP totals
+/// back to the character's SDE racial starter profile via [`WorldRepository::starter_skills_for_race`]
+/// inside one durable DB transaction, emitting skill/queue/free-SP/brain/fit notifications (`#1193`).
+pub fn reset_character_skills_to_race_starter(
+    ctx: &ServerContext,
+    char_id: i64,
+) -> Result<ResetSkillsToStarterOutcome, DomainError> {
+    const SKILL_EVENT_CHAR_CREATION: i64 = 33;
+
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let outcome = ctx.db.tx("reset_character_skills_to_race_starter", |wtx| {
+        let Some(ch) = wtx.snap.characters.get_mut(&char_id) else {
+            return Err(DomainError::not_found(
+                "CharacterNotFound",
+                format!("Character {char_id} not found"),
+            ));
+        };
+        let race_id = ch.race_id;
+        let active_ship_id = ch.active_ship_id;
+        let old_skill_ids: Vec<TypeId> = wtx
+            .snap
+            .skills
+            .get(&char_id)
+            .map(|m| m.keys().copied().collect())
+            .unwrap_or_default();
+
+        let (starter_skills_map, total_sp) =
+            WorldRepository::starter_skills_for_race(race_id, &ctx.sde);
+
+        let mut sorted_starter: Vec<TrainedSkillRecord> =
+            starter_skills_map.values().cloned().collect();
+        sorted_starter.sort_by_key(|s| s.type_id);
+        let starter_history: Vec<SkillHistoryEntry> = sorted_starter
+            .into_iter()
+            .map(|s| SkillHistoryEntry {
+                log_date_ft: now_ft,
+                event_type_id: SKILL_EVENT_CHAR_CREATION,
+                skill_type_id: s.type_id,
+                skill_level: s.level,
+                absolute_points: s.skill_points,
+            })
+            .collect();
+
+        let mut changed_tids: BTreeSet<TypeId> = old_skill_ids.iter().copied().collect();
+        changed_tids.extend(starter_skills_map.keys().copied());
+        let removed_count = old_skill_ids
+            .iter()
+            .filter(|tid| !starter_skills_map.contains_key(tid))
+            .count();
+        let starter_count = starter_skills_map.len();
+
+        ch.skill_points = total_sp;
+        ch.free_skill_points = 0.0;
+        if starter_skills_map.is_empty() {
+            wtx.snap.skills.remove(&char_id);
+        } else {
+            wtx.snap.skills.insert(char_id, starter_skills_map);
+        }
+        wtx.snap.skill_queues.remove(&char_id);
+        wtx.snap.paused_skill_queues.remove(&char_id);
+        if starter_history.is_empty() {
+            wtx.snap.skill_history.remove(&char_id);
+        } else {
+            wtx.snap.skill_history.insert(char_id, starter_history);
+        }
+
+        Ok(ResetSkillsToStarterOutcome {
+            char_id,
+            race_id,
+            active_ship_id,
+            starter_skill_count: starter_count,
+            removed_skill_count: removed_count,
+            total_skill_points: total_sp,
+            free_skill_points: 0.0,
+            changed_skill_type_ids: changed_tids.into_iter().collect(),
+        })
+    })?;
+
+    emit_server_skills_changed(
+        ctx,
+        char_id,
+        &outcome.changed_skill_type_ids,
+        Some("SkillReset"),
+    );
+    let _ = ctx.notify_new_skill_queue_saved(char_id, skill_queue_rowset(ctx, char_id));
+    ctx.emit_typed(
+        NotificationTarget::Character(char_id),
+        crate::router::notify_registry::OnFreeSkillPointsChanged {
+            new_free_skill_points: 0.0,
+        },
+    );
+    ctx.push_brain_update(char_id);
+    if outcome.active_ship_id > 0 {
+        ctx.invalidate_and_push_fit(outcome.active_ship_id);
+    }
+
+    Ok(outcome)
+}
+
     ctx.emit_typed(
         NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnFreeSkillPointsChanged {
@@ -509,4 +621,90 @@ pub fn apply_free_skill_points_to_skill(
         new_skill_sp,
         remaining_free_sp: outcome.remaining_free_skill_points,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_character_skills_to_race_starter_restores_starter_profile_and_clears_queues() {
+        let ctx = ServerContext::new();
+        let cid = 90_000_001_i64;
+        let extra_skill_id = ctx
+            .sde
+            .types
+            .values()
+            .find(|t| t.category_id == 16 && t.published && t.type_id != 3402)
+            .map(|t| t.type_id)
+            .unwrap_or(3300);
+
+        let race_id = ctx.db.with_snapshot(|snap| snap.characters[&cid].race_id);
+        let (expected_starter, expected_sp) =
+            WorldRepository::starter_skills_for_race(race_id, &ctx.sde);
+        assert!(
+            !expected_starter.is_empty(),
+            "demo race must have SDE starter skills"
+        );
+
+        ctx.db.with_mut_snapshot(|snap| {
+            let skills = snap.skills.entry(cid).or_default();
+            skills.insert(
+                extra_skill_id,
+                TrainedSkillRecord {
+                    type_id: extra_skill_id,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+            snap.skill_queues.insert(
+                cid,
+                vec![eve_db::SkillQueueEntry {
+                    type_id: extra_skill_id,
+                    target_level: 5,
+                    start_sp: 0.0,
+                    end_sp: 256_000.0,
+                    duration_seconds: 1_200.0,
+                    started_at_unix: Some(1_000),
+                }],
+            );
+            snap.paused_skill_queues.insert(cid, Vec::new());
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.free_skill_points = 50_000.0;
+            }
+        });
+        let _ = ctx.drain_notifications_for_char(cid);
+
+        let out = reset_character_skills_to_race_starter(&ctx, cid)
+            .expect("reset_character_skills_to_race_starter ok");
+        assert_eq!(out.char_id, cid);
+        assert_eq!(out.race_id, race_id);
+        assert_eq!(out.starter_skill_count, expected_starter.len());
+        assert_eq!(out.free_skill_points, 0.0);
+        assert!((out.total_skill_points - expected_sp).abs() < 1e-6);
+
+        ctx.db.with_snapshot(|snap| {
+            let trained = snap.skills.get(&cid).expect("starter skills present");
+            assert_eq!(trained.len(), expected_starter.len());
+            for (tid, exp_rec) in &expected_starter {
+                let got = trained.get(tid).expect("starter skill retained");
+                assert_eq!(got.level, exp_rec.level);
+            }
+            assert!(!snap.skill_queues.contains_key(&cid));
+            assert!(!snap.paused_skill_queues.contains_key(&cid));
+            assert_eq!(snap.characters[&cid].free_skill_points, 0.0);
+        });
+
+        let notes = ctx.drain_notifications_for_char(cid);
+        assert!(notes.iter().any(|n| n.event == "OnServerSkillsChanged"));
+        assert!(notes.iter().any(|n| n.event == "OnFreeSkillPointsChanged"));
+    }
+
+    #[test]
+    fn reset_character_skills_to_race_starter_rejects_missing_character() {
+        let ctx = ServerContext::new();
+        let err = reset_character_skills_to_race_starter(&ctx, 999_888_777)
+            .expect_err("missing character must fail");
+        assert_eq!(err.code, "CharacterNotFound");
+    }
 }

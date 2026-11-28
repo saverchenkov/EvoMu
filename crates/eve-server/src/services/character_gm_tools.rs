@@ -667,8 +667,8 @@ pub fn handle_char_unbound(
 }
 
 pub(crate) use crate::services::character_gm_helpers::{
-    execute_gm_heal_parsed, is_me_or_myship, parse_slash_tokens, remove_npc_runtime_state,
-    resolve_gm_char_prefix, resolve_item_or_char_active_ship,
+    execute_gm_heal_parsed, is_me_or_myship, parse_slash_tokens,
+    resolve_item_or_char_active_ship,
 };
 
 /// Rolls back partially spawned `/spawn` DB, runtime NPC, and ballpark records when an actor spawn fails.
@@ -679,18 +679,18 @@ async fn rollback_spawned_entities(
     failed_id: i64,
     prior_ids: &[i64],
 ) {
-    ctx.db.with_mut_snapshot(|snap| {
-        for &id in std::iter::once(&failed_id).chain(prior_ids.iter()) {
-            snap.items.remove(&id);
-            snap.asteroids.remove(&id);
-        }
-    });
-    for &id in std::iter::once(&failed_id).chain(prior_ids.iter()) {
-        remove_npc_runtime_state(ctx, sys_id, id);
-    }
-    for &id in prior_ids {
-        let _ = handle.remove_ball(id).await;
-    }
+    let mut all_ids = Vec::with_capacity(1 + prior_ids.len());
+    all_ids.push(failed_id);
+    all_ids.extend_from_slice(prior_ids);
+    let _ = crate::domain::combat_ops::despawn_entities_in_ballpark(
+        ctx,
+        Some(handle),
+        &all_ids,
+        true,
+        false,
+        Some(sys_id),
+    )
+    .await;
 }
 
 fn parse_optional_target_char_and_value<'a>(
@@ -724,36 +724,67 @@ pub(crate) fn dispatch_spawn_slash<'a>(
         }
         let (_, cid) = ServerContext::require_character(session)?;
         let cmd = inv.raw;
-        let tokens = parse_slash_tokens(inv.rest);
-        let (target_cid, arg_tokens) = resolve_gm_char_prefix(ctx, cid, &tokens, 1);
-        let Some(type_id) = arg_tokens.first().and_then(|s| s.parse::<u32>().ok()) else {
-            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /spawn [char_id] <type_id> [quantity]".into(), client_error: None });
-        };
-        let qty = arg_tokens.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
-        if !(1..=100).contains(&qty) {
-            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Quantity for /spawn must be between 1 and 100".into(), client_error: None });
-        }
+        let parsed = crate::router::slash_registry::parse_spawn_slash_args(inv.rest)?;
+        let resolved = parsed.resolve(cid, |char_id| {
+            ctx.db
+                .with_snapshot(|snap| snap.characters.contains_key(&char_id))
+        })?;
+        let target_cid = resolved.target_char_id;
+        let type_id = resolved.type_id;
+        let qty = resolved.quantity;
         let Some(inv_type) = ctx.sde.types.get(&type_id).cloned() else {
-            return Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Type ID {type_id} not found in SDE"), client_error: None });
+            return Err(BridgeRpcError {
+                code: "TypeNotFound".into(),
+                message: format!("Type ID {type_id} not found in SDE"),
+                client_error: None,
+            });
         };
         let (db_sys_id, db_ship_id) = ctx
             .db
-            .with_snapshot(|snap| snap.characters.get(&target_cid).map(|c| (c.solar_system_id, c.active_ship_id)))
+            .with_snapshot(|snap| {
+                snap.characters
+                    .get(&target_cid)
+                    .map(|c| (c.solar_system_id, c.active_ship_id))
+            })
             .unwrap_or((0, 0));
         let sys_id = if target_cid != cid {
             db_sys_id
         } else {
-            session.solar_system_id.filter(|&s| s > 0).unwrap_or(db_sys_id)
+            session
+                .solar_system_id
+                .filter(|&s| s > 0)
+                .unwrap_or(db_sys_id)
         };
         let ship_id = if target_cid != cid {
             db_ship_id
         } else {
             session.ship_id.filter(|&id| id > 0).unwrap_or(db_ship_id)
         };
+        if sys_id == 0 {
+            return Err(BridgeRpcError {
+                code: "NoSolarSystem".into(),
+                message: "Target is not in a solar system for /spawn".into(),
+                client_error: None,
+            });
+        }
 
-        let handle = ctx.systems.get_or_spawn(sys_id);
+        let handle = ctx
+            .systems
+            .wake_for_gm_command_async(sys_id, "/spawn")
+            .await
+            .map_err(|err| BridgeRpcError {
+                code: "SpawnFailed".into(),
+                message: format!("Failed to activate solar system {sys_id} for /spawn: {err}"),
+                client_error: None,
+            })?;
         let origin = if ship_id > 0 {
-            handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO)
+            handle
+                .get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.position)
+                .unwrap_or(DVec3::ZERO)
         } else {
             DVec3::ZERO
         };
@@ -769,59 +800,28 @@ pub(crate) fn dispatch_spawn_slash<'a>(
             let is_celestial_or_asteroid = matches!(inv_type.category_id, 2 | 25);
             // Asteroids/celestials belong to ownerSystem (1) with no player corp/char so bracket/standing UI stays neutral.
             let spawn_owner_id = if is_celestial_or_asteroid { 1 } else { target_cid };
-            let entity_id = ctx.db.with_mut_snapshot(|snap| {
-                snap.next_entity_id += 1;
-                let id = snap.next_entity_id;
-                snap.items.insert(
-                    id,
-                    InventoryItemRecord {
-                        item_id: id,
-                        type_id,
-                        owner_id: spawn_owner_id,
-                        location_id: sys_id as i64,
-                        flag: InventoryFlag::None,
-                        quantity: 1,
-                        singleton: true,
-                        version: 1,
-                        dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                        is_blueprint_copy: false,
-                        blueprint_runs_remaining: None,
-                    },
-                );
+            let db_item = InventoryItemRecord {
+                item_id: 0,
+                type_id,
+                owner_id: spawn_owner_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            };
+
+            let (pre_entity_id, ball, payload, npc_entity_opt, mark_non_interactive) =
                 if inv_type.category_id == 25 {
-                    snap.asteroids.insert(
-                        id,
-                        eve_db::AsteroidRecord {
-                            asteroid_id: id,
-                            solar_system_id: sys_id,
-                            belt_id: 0,
-                            type_id,
-                            quantity: 200_000,
-                            initial_quantity: 200_000,
-                            position: (pos.x, pos.y, pos.z),
-                            radius: ball_radius,
-                        },
-                    );
-                }
-                id
-            });
-            let spawn_res = if inv_type.category_id == 25 {
-                handle
-                    .spawn_asteroid(
-                        crate::system_actor::AsteroidState {
-                            asteroid_id: entity_id,
-                            belt_id: 0,
-                            type_id,
-                            initial_units: 200_000,
-                            remaining_units: 200_000,
-                            unit_volume: inv_type.volume.max(0.01),
-                            depleted: false,
-                            respawn_at_tick: None,
-                        },
+                    (
+                        None,
                         Ball {
-                            id: entity_id,
+                            id: 0,
                             type_id,
                             position: pos,
                             velocity: DVec3::ZERO,
@@ -832,140 +832,196 @@ pub(crate) fn dispatch_spawn_slash<'a>(
                             speed_fraction: 0.0,
                             mode: MovementMode::Rigid,
                         },
-                    )
-                    .await
-                    .map(|_| ())
-            } else if inv_type.category_id == 2 {
-                let ball = Ball {
-                    id: entity_id,
-                    type_id,
-                    position: pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 0.0,
-                    mass: inv_type.mass.max(1.0),
-                    radius: ball_radius,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Rigid,
-                };
-                let combat = ctx.build_type_combat_state(type_id);
-                let meta = eve_destiny::SlimItemMeta {
-                    group_id: inv_type.group_id,
-                    category_id: inv_type.category_id,
-                    owner_id: 1,
-                    char_id: None,
-                    corp_id: -1,
-                    alliance_id: -1,
-                    security_status: 0.0,
-                    is_cloaked: false,
-                    name: (!inv_type.name.is_empty()).then(|| inv_type.name.clone()),
-                    ..Default::default()
-                };
-                handle
-                    .spawn_ball_with_meta(ball, combat, meta)
-                    .await
-                    .map(|_| ())
-            } else if inv_type.category_id == 11 {
-                let archetype =
-                    crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(
-                        ctx, type_id,
-                    );
-                let (ball, combat, entity) =
-                    crate::services::wormhole_pve_seeding::build_specialized_npc_components(
-                        ctx,
-                        sys_id,
-                        entity_id,
-                        type_id,
-                        archetype,
-                        0,
-                        pos,
-                    );
-                let fac_owner = if entity.faction_id > 0 {
-                    i64::from(entity.faction_id)
-                } else {
-                    500_010
-                };
-                let meta = eve_destiny::SlimItemMeta {
-                    group_id: inv_type.group_id,
-                    category_id: 11,
-                    owner_id: fac_owner,
-                    char_id: None,
-                    corp_id: crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_faction(
-                        ctx,
-                        fac_owner,
-                    ),
-                    alliance_id: -1,
-                    security_status: -1.0,
-                    is_cloaked: false,
-                    name: (!inv_type.name.is_empty()).then(|| inv_type.name.clone()),
-                    ..Default::default()
-                };
-                let res = handle.spawn_ball_with_meta(ball, combat, meta).await;
-                if res.is_ok() {
-                    let legacy_ent = crate::combat::npc_ai::NpcCombatEntity {
-                        ball_id: entity_id,
-                        type_id,
-                        faction_id: entity.faction_id,
-                        state: crate::combat::npc_ai::NpcAiState::Idle,
-                        spawn_group_id: 0,
-                        spawn_pos: pos,
-                        target_id: None,
-                        bounty_isk: entity.bounty_isk,
-                        optimal_range: entity.optimal_range,
-                        orbit_range: entity.orbit_range,
-                        base_dps: entity.damage_vector.total(),
-                        damage_vector: entity.damage_vector,
-                        last_attack_tick: 0,
-                        has_shield_rep: entity.remote_shield_rep > 0.0,
-                        has_armor_rep: entity.remote_armor_rep > 0.0,
-                    };
-                    if let Ok(mut map) = ctx.npc_spawns.write() {
-                        map.entry(sys_id)
-                            .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new)
-                            .entities
-                            .insert(entity_id, legacy_ent);
-                    }
-                    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                        rt.npc_entities.insert(entity_id, entity);
-                    });
-                }
-                res.map(|_| ())
-            } else {
-                let ball = Ball {
-                    id: entity_id,
-                    type_id,
-                    position: pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 300.0,
-                    inertia: 1.0,
-                    mass: inv_type.mass.max(1.0),
-                    radius: ball_radius,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                };
-                let combat = ctx.build_type_combat_state(type_id);
-                let mut meta = ctx.build_ship_slim_meta(target_cid, type_id);
-                meta.char_id = None;
-                let res = handle.spawn_ball_with_meta(ball, combat, meta).await;
-                if res.is_ok() && inv_type.category_id == 6 {
-                    // Record `isInteractive = false` on the ballpark for unpiloted spawned ship hulls
-                    // so subsequent `SetState` / `AddBalls2` / `SetBallInteractive` frames keep
-                    // `ball.isInteractive == False` until boarded (`#983`).
-                    let _ = handle
-                        .emit_destiny_event(
-                            entity_id,
-                            eve_destiny::DestinyEvent::SetBallInteractive {
-                                ball_id: entity_id,
-                                is_interactive: false,
+                        crate::domain::combat_ops::SpawnBallPayload::Asteroid {
+                            asteroid: crate::system_actor::AsteroidState {
+                                asteroid_id: 0,
+                                belt_id: 0,
+                                type_id,
+                                initial_units: 200_000,
+                                remaining_units: 200_000,
+                                unit_volume: inv_type.volume.max(0.01),
+                                depleted: false,
+                                respawn_at_tick: None,
                             },
-                        )
-                        .await;
+                            record: Some(eve_db::AsteroidRecord {
+                                asteroid_id: 0,
+                                solar_system_id: sys_id,
+                                belt_id: 0,
+                                type_id,
+                                quantity: 200_000,
+                                initial_quantity: 200_000,
+                                position: (pos.x, pos.y, pos.z),
+                                radius: ball_radius,
+                            }),
+                        },
+                        None,
+                        false,
+                    )
+                } else if inv_type.category_id == 2 {
+                    let ball = Ball {
+                        id: 0,
+                        type_id,
+                        position: pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 0.0,
+                        mass: inv_type.mass.max(1.0),
+                        radius: ball_radius,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Rigid,
+                    };
+                    let combat_state = ctx.build_type_combat_state(type_id);
+                    let slim_meta = eve_destiny::SlimItemMeta {
+                        group_id: inv_type.group_id,
+                        category_id: inv_type.category_id,
+                        owner_id: 1,
+                        char_id: None,
+                        corp_id: -1,
+                        alliance_id: -1,
+                        security_status: 0.0,
+                        is_cloaked: false,
+                        name: (!inv_type.name.is_empty()).then(|| inv_type.name.clone()),
+                        ..Default::default()
+                    };
+                    (
+                        None,
+                        ball,
+                        crate::domain::combat_ops::SpawnBallPayload::Meta {
+                            combat_state,
+                            slim_meta,
+                        },
+                        None,
+                        false,
+                    )
+                } else if inv_type.category_id == 11 {
+                    let npc_id = ctx.db.with_mut_snapshot(|snap| snap.alloc_entity_id());
+                    let archetype =
+                        crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(
+                            ctx, type_id,
+                        );
+                    let (ball, combat_state, entity) =
+                        crate::services::wormhole_pve_seeding::build_specialized_npc_components(
+                            ctx,
+                            sys_id,
+                            npc_id,
+                            type_id,
+                            archetype,
+                            0,
+                            pos,
+                        );
+                    let fac_owner = if entity.faction_id > 0 {
+                        i64::from(entity.faction_id)
+                    } else {
+                        500_010
+                    };
+                    let slim_meta = eve_destiny::SlimItemMeta {
+                        group_id: inv_type.group_id,
+                        category_id: 11,
+                        owner_id: fac_owner,
+                        char_id: None,
+                        corp_id: crate::services::combat_crimewatch::combat_npc_ai::resolve_npc_corp_id_for_faction(
+                            ctx,
+                            fac_owner,
+                        ),
+                        alliance_id: -1,
+                        security_status: -1.0,
+                        is_cloaked: false,
+                        name: (!inv_type.name.is_empty()).then(|| inv_type.name.clone()),
+                        ..Default::default()
+                    };
+                    (
+                        Some(npc_id),
+                        ball,
+                        crate::domain::combat_ops::SpawnBallPayload::Meta {
+                            combat_state,
+                            slim_meta,
+                        },
+                        Some(entity),
+                        false,
+                    )
+                } else {
+                    let ball = Ball {
+                        id: 0,
+                        type_id,
+                        position: pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 300.0,
+                        inertia: 1.0,
+                        mass: inv_type.mass.max(1.0),
+                        radius: ball_radius,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    };
+                    let combat_state = ctx.build_type_combat_state(type_id);
+                    let mut slim_meta = ctx.build_ship_slim_meta(target_cid, type_id);
+                    slim_meta.char_id = None;
+                    (
+                        None,
+                        ball,
+                        crate::domain::combat_ops::SpawnBallPayload::Meta {
+                            combat_state,
+                            slim_meta,
+                        },
+                        None,
+                        inv_type.category_id == 6,
+                    )
+                };
+
+            let spawn_res = crate::domain::combat_ops::spawn_entity_in_ballpark(
+                ctx,
+                &handle,
+                crate::domain::combat_ops::SpawnEntityInBallparkRequest {
+                    entity_id: pre_entity_id,
+                    db_item: Some(db_item),
+                    ball,
+                    payload,
+                    mark_non_interactive,
+                },
+            )
+            .await;
+
+            let entity_id = match spawn_res {
+                Ok(id) => id,
+                Err(err) => {
+                    rollback_spawned_entities(
+                        ctx,
+                        &handle,
+                        sys_id,
+                        pre_entity_id.unwrap_or(0),
+                        &spawned_ids,
+                    )
+                    .await;
+                    return Err(crate::services::domain_err_to_rpc(err));
                 }
-                res.map(|_| ())
             };
-            if let Err(err) = spawn_res {
-                rollback_spawned_entities(ctx, &handle, sys_id, entity_id, &spawned_ids).await;
-                return Err(BridgeRpcError { code: "SpawnFailed".into(), message: err, client_error: None });
+
+            if let Some(entity) = npc_entity_opt {
+                let legacy_ent = crate::combat::npc_ai::NpcCombatEntity {
+                    ball_id: entity_id,
+                    type_id,
+                    faction_id: entity.faction_id,
+                    state: crate::combat::npc_ai::NpcAiState::Idle,
+                    spawn_group_id: 0,
+                    spawn_pos: pos,
+                    target_id: None,
+                    bounty_isk: entity.bounty_isk,
+                    optimal_range: entity.optimal_range,
+                    orbit_range: entity.orbit_range,
+                    base_dps: entity.damage_vector.total(),
+                    damage_vector: entity.damage_vector,
+                    last_attack_tick: 0,
+                    has_shield_rep: entity.remote_shield_rep > 0.0,
+                    has_armor_rep: entity.remote_armor_rep > 0.0,
+                };
+                if let Ok(mut map) = ctx.npc_spawns.write() {
+                    map.entry(sys_id)
+                        .or_insert_with(crate::combat::npc_ai::NpcSpawnManager::new)
+                        .entities
+                        .insert(entity_id, legacy_ent);
+                }
+                crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                    rt.npc_entities.insert(entity_id, entity);
+                });
             }
             spawned_ids.push(entity_id);
         }
@@ -995,28 +1051,48 @@ pub(crate) fn dispatch_unspawn_slash<'a>(
             return Err(unknown_slash_error(inv.raw));
         }
         let (_, cid) = ServerContext::require_character(session)?;
-        let tokens = parse_slash_tokens(inv.rest);
-        let Some(target_id) = tokens.first().and_then(|s| s.parse::<i64>().ok()).filter(|&id| id > 0) else {
-            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /unspawn <entity_id>".into(), client_error: None });
-        };
-        let (sys_id, removed_db) = ctx.db.with_mut_snapshot(|snap| {
-            let caller_sys = session.solar_system_id.or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id)).unwrap_or(0);
-            let removed = snap.items.remove(&target_id).is_some()
-                || snap.asteroids.remove(&target_id).is_some();
-            snap.asteroids.remove(&target_id);
-            let children: Vec<i64> = snap.items.values().filter(|i| i.location_id == target_id).map(|i| i.item_id).collect();
-            for child_id in children { snap.items.remove(&child_id); }
-            (caller_sys, removed)
+        let parsed = crate::router::slash_registry::parse_unspawn_slash_args(inv.rest)?;
+        let target_id = parsed.target_id;
+        let sys_id = ctx.db.with_snapshot(|snap| {
+            session
+                .solar_system_id
+                .or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id))
+                .unwrap_or(0)
         });
-        let handle = ctx.systems.get_or_spawn(sys_id);
-        let removed_ball = handle.remove_ball(target_id).await.is_some();
-        remove_npc_runtime_state(ctx, sys_id, target_id);
-        if removed_ball {
-            crate::services::pve_incursion_sites::mark_incursion_boss_destroyed(ctx, sys_id, target_id);
-            crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(&ctx.systems, &ctx.db, sys_id, target_id).await;
+        let handle_opt = (sys_id > 0)
+            .then(|| ctx.systems.get_handle(sys_id))
+            .flatten();
+        let outcome = crate::domain::combat_ops::despawn_entity_in_ballpark(
+            ctx,
+            handle_opt.as_ref(),
+            crate::domain::combat_ops::DespawnEntityInBallparkRequest {
+                entity_id: target_id,
+                remove_from_db: true,
+                remove_warp_bubble: false,
+                clean_npc_runtime_system: (sys_id > 0).then_some(sys_id),
+            },
+        )
+        .await;
+        let removed_db = outcome.removed_from_db;
+        let removed_ball = outcome.removed_ball.is_some();
+        if removed_ball && sys_id > 0 {
+            crate::services::pve_incursion_sites::mark_incursion_boss_destroyed(
+                ctx, sys_id, target_id,
+            );
+            crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(
+                &ctx.systems,
+                &ctx.db,
+                sys_id,
+                target_id,
+            )
+            .await;
         }
         if !removed_db && !removed_ball {
-            return Err(BridgeRpcError { code: "EntityNotFound".into(), message: format!("Entity {target_id} not found in space or inventory"), client_error: None });
+            return Err(BridgeRpcError {
+                code: "EntityNotFound".into(),
+                message: format!("Entity {target_id} not found in space or inventory"),
+                client_error: None,
+            });
         }
         Ok(PyRep::keyval([
             ("command", PyRep::String(inv.raw.to_string())),
@@ -1037,41 +1113,47 @@ pub(crate) fn dispatch_setattr_slash(
         return Err(unknown_slash_error(inv.raw));
     }
     let (_, cid) = ServerContext::require_character(session)?;
-    let tokens = parse_slash_tokens(inv.rest);
-    let Some(item_tok) = tokens.first().map(String::as_str) else {
-        return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /setattr <item_id|me> <attribute_id> <value>".into(), client_error: None });
-    };
-    let Some(attr_id) = tokens.get(1).and_then(|s| s.parse::<u16>().ok()) else {
-        return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /setattr <item_id|me> <attribute_id> <value>".into(), client_error: None });
-    };
-    let Some(val) = tokens
-        .get(2)
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|v| v.is_finite())
-    else {
-        return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Attribute value for /setattr must be a finite number".into(), client_error: None });
+    let parsed = crate::router::slash_registry::parse_setattr_slash_args(inv.rest)?;
+    let Some(item_id) = ctx.db.with_snapshot(|snap| match parsed.target {
+        crate::router::slash_registry::SetAttrTarget::SelfShip => {
+            snap.characters.get(&cid).map(|c| c.active_ship_id)
+        }
+        crate::router::slash_registry::SetAttrTarget::ItemOrCharId(id) => {
+            if snap.items.contains_key(&id) {
+                Some(id)
+            } else if let Some(ch) = snap.characters.get(&id) {
+                Some(ch.active_ship_id)
+            } else {
+                Some(id)
+            }
+        }
+    }) else {
+        return Err(BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {cid} not found"),
+            client_error: None,
+        });
     };
 
-    let (item_id, owner_id, loc_id, old_val) = ctx.db.try_with_mut_snapshot(|snap| {
-        let Some(item_id) = resolve_item_or_char_active_ship(snap, cid, item_tok) else {
-            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: format!("Invalid item_id '{item_tok}' for /setattr"), client_error: None });
-        };
-        let Some(item) = snap.items.get_mut(&item_id) else {
-            return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} not found"), client_error: None });
-        };
-        let default_val = ctx
-            .sde
-            .types
-            .get(&item.type_id)
-            .and_then(|t| t.default_attributes.get(&attr_id).copied())
-            .unwrap_or(0.0);
-        let old_val = item
-            .dynamic_attributes
-            .insert(attr_id, val)
-            .unwrap_or(default_val);
-        item.version += 1;
-        Ok((item_id, item.owner_id, item.location_id, old_val))
+    let outcome = crate::domain::items::set_item_dynamic_attributes_tx(
+        ctx,
+        "gm_setattr",
+        item_id,
+        &[(parsed.attr_id, parsed.value)],
+        false,
+        None,
+    )
+    .map_err(crate::services::domain_err_to_rpc)?
+    .ok_or_else(|| BridgeRpcError {
+        code: "ItemNotFound".into(),
+        message: format!("Item {item_id} not found"),
+        client_error: None,
     })?;
+    let owner_id = outcome.owner_id;
+    let loc_id = outcome.location_id;
+    let old_val = outcome.changes.first().map(|c| c.old_value).unwrap_or(0.0);
+    let val = parsed.value;
+    let attr_id = parsed.attr_id;
     ctx.invalidate_and_push_fit(item_id);
     ctx.invalidate_and_push_fit(loc_id);
     let now_sim = ctx.now_system_sim_filetime_for_char(owner_id);
@@ -1556,14 +1638,21 @@ pub(crate) fn dispatch_location_slash<'a>(
         let Some(ch) = ch_opt else {
             return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found"), client_error: None });
         };
-        let handle = ctx.systems.get_or_spawn(ch.solar_system_id);
-        let pos = handle
-            .get_ball_snapshot(ch.active_ship_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|(_, b)| b.position)
-            .unwrap_or(DVec3::ZERO);
+        let pos = if ch.solar_system_id > 0 && ch.active_ship_id > 0 {
+            if let Some(handle) = ctx.systems.get_handle(ch.solar_system_id) {
+                handle
+                    .get_ball_snapshot(ch.active_ship_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(_, b)| b.position)
+                    .unwrap_or(DVec3::ZERO)
+            } else {
+                DVec3::ZERO
+            }
+        } else {
+            DVec3::ZERO
+        };
 
         Ok(PyRep::keyval([
             ("command", PyRep::String(inv.raw.to_string())),
@@ -1861,18 +1950,12 @@ pub(crate) fn dispatch_spawnwreck_slash<'a>(
 ) -> SlashBoxFuture<'a> {
     Box::pin(async move {
         let (_, cid) = ServerContext::require_character(session)?;
-        let tokens = parse_slash_tokens(inv.rest);
-        let (target_cid, arg_tokens) = resolve_gm_char_prefix(ctx, cid, &tokens, 1);
-        let tail = arg_tokens.join(" ");
-        let forwarded_cmd = if arg_tokens.len() < tokens.len() {
-            if tail.is_empty() {
-                "/spawnwreck".to_string()
-            } else {
-                format!("/spawnwreck {tail}")
-            }
-        } else {
-            inv.raw.to_string()
-        };
+        let parsed = crate::router::slash_registry::parse_spawnwreck_slash_args(inv.rest)?;
+        let resolved = parsed.resolve(cid, |char_id| {
+            ctx.db
+                .with_snapshot(|snap| snap.characters.contains_key(&char_id))
+        })?;
+        let target_cid = resolved.target_char_id;
         let mut target_session = session.clone();
         if target_cid != cid {
             ctx.db.with_snapshot(|snap| {
@@ -1885,11 +1968,13 @@ pub(crate) fn dispatch_spawnwreck_slash<'a>(
                 }
             });
         }
-        crate::services::gm_soak_commands::handle_spawnwreck_cmd(
+        crate::services::gm_soak_commands::handle_spawnwreck_parsed(
             ctx,
             &target_session,
             target_cid,
-            &forwarded_cmd,
+            inv.raw,
+            resolved.source_type_id,
+            resolved.count,
         )
         .await
     })

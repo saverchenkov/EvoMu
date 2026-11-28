@@ -263,6 +263,149 @@ pub fn grant_item_in_snap(
     })
 }
 
+/// Single dynamic attribute mutation recorded by [`set_item_dynamic_attributes_tx`]
+/// or [`set_item_dynamic_attribute_in_snap`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SetItemDynamicAttrChange {
+    pub attr_id: u16,
+    pub old_value: f64,
+    pub new_value: f64,
+}
+
+/// Result metadata returned by [`set_item_dynamic_attributes_in_snap`] and
+/// [`set_item_dynamic_attributes_tx`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetItemDynamicAttributesOutcome {
+    pub item_id: i64,
+    pub owner_id: i64,
+    pub location_id: i64,
+    pub changes: Vec<SetItemDynamicAttrChange>,
+}
+
+/// Atomically updates one or more `dynamic_attributes` entries on `item_id` inside `snap`,
+/// optionally marking `quantity == 1` items as `singleton = true` and bumping `item.version` (`#1193`).
+pub fn set_item_dynamic_attributes_in_snap(
+    snap: &mut WorldStateSnapshot,
+    sde: Option<&SdeRegistry>,
+    item_id: i64,
+    updates: &[(u16, f64)],
+    mark_singleton_if_single: bool,
+) -> Result<SetItemDynamicAttributesOutcome, DomainError> {
+    for &(_, value) in updates {
+        if !value.is_finite() {
+            return Err(DomainError::invalid_input(
+                "InvalidAttributeValue",
+                "Dynamic attribute value must be finite",
+            ));
+        }
+    }
+    if !snap.items.contains_key(&item_id) {
+        return Err(DomainError::not_found(
+            "ItemNotFound",
+            format!("Item {item_id} not found"),
+        ));
+    }
+    let Some(item) = snap.get_any_item_mut(item_id) else {
+        return Err(DomainError::not_found(
+            "ItemNotFound",
+            format!("Item {item_id} not found"),
+        ));
+    };
+    let sde_type = sde.and_then(|reg| reg.types.get(&item.type_id));
+    let mut changes = Vec::with_capacity(updates.len());
+    for &(attr_id, value) in updates {
+        let default_val = sde_type
+            .and_then(|t| t.default_attributes.get(&attr_id).copied())
+            .unwrap_or(0.0);
+        let old_value = item
+            .dynamic_attributes
+            .insert(attr_id, value)
+            .unwrap_or(default_val);
+        changes.push(SetItemDynamicAttrChange {
+            attr_id,
+            old_value,
+            new_value: value,
+        });
+    }
+    if mark_singleton_if_single && item.quantity == 1 {
+        item.singleton = true;
+    }
+    if !updates.is_empty() {
+        item.version += 1;
+    }
+    Ok(SetItemDynamicAttributesOutcome {
+        item_id,
+        owner_id: item.owner_id,
+        location_id: item.location_id,
+        changes,
+    })
+}
+
+/// Atomically updates a single dynamic attribute on `item_id` inside `snap` (`#1193`).
+pub fn set_item_dynamic_attribute_in_snap(
+    snap: &mut WorldStateSnapshot,
+    sde: Option<&SdeRegistry>,
+    item_id: i64,
+    attr_id: u16,
+    value: f64,
+    mark_singleton_if_single: bool,
+) -> Result<SetItemDynamicAttributesOutcome, DomainError> {
+    set_item_dynamic_attributes_in_snap(
+        snap,
+        sde,
+        item_id,
+        &[(attr_id, value)],
+        mark_singleton_if_single,
+    )
+}
+
+/// Atomically updates one or more `dynamic_attributes` entries on `item_id` inside a
+/// `WorldRepository::tx` transaction, with optional in-space ship staleness guard (`#1193`).
+///
+/// When `require_in_space_ship_system` is `Some(sys_id)` and the ship is stale/missing from space
+/// or `snap.items`, returns `Ok(None)` without mutating state.
+pub fn set_item_dynamic_attributes_tx(
+    ctx: &ServerContext,
+    tx_label: &'static str,
+    item_id: i64,
+    updates: &[(u16, f64)],
+    mark_singleton_if_single: bool,
+    require_in_space_ship_system: Option<u32>,
+) -> Result<Option<SetItemDynamicAttributesOutcome>, DomainError> {
+    if updates.is_empty() {
+        return Ok(None);
+    }
+    for &(_, value) in updates {
+        if !value.is_finite() {
+            return Err(DomainError::invalid_input(
+                "InvalidAttributeValue",
+                "Dynamic attribute value must be finite",
+            ));
+        }
+    }
+    ctx.db.tx(tx_label, |wtx| {
+        if let Some(sys_id) = require_in_space_ship_system {
+            if crate::sp6_lifecycle::is_ship_stale_for_in_space_write_in_snap(
+                wtx.snap,
+                item_id,
+                Some(sys_id),
+                None,
+            ) || !wtx.snap.items.contains_key(&item_id)
+            {
+                return Ok(None);
+            }
+        }
+        set_item_dynamic_attributes_in_snap(
+            wtx.snap,
+            Some(&ctx.sde),
+            item_id,
+            updates,
+            mark_singleton_if_single,
+        )
+        .map(Some)
+    })
+}
+
 /// Validates inputs and atomically grants an inventory item to `target_char_id` inside a
 /// `WorldRepository::tx` transaction without touching or waking solar system actors (`#1542`).
 pub fn grant_character_item_tx(
@@ -310,4 +453,82 @@ pub fn grant_character_item_tx(
             },
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_item_dynamic_attributes_validates_bumps_version_and_respects_staleness_guard() {
+        let ctx = ServerContext::new();
+        let cid = 90_000_001_i64;
+        let (ship_id, sys_id) = ctx
+            .db
+            .with_snapshot(|s| (s.characters[&cid].active_ship_id, s.characters[&cid].solar_system_id));
+        let pre_version = ctx.db.with_snapshot(|s| s.items[&ship_id].version);
+
+        // 1. Finite check rejects NaN/Inf before touching snapshot.
+        let nan_err = set_item_dynamic_attributes_tx(
+            &ctx,
+            "test_nan_attr",
+            ship_id,
+            &[(eve_sde::attr_ids::DAMAGE, f64::NAN)],
+            false,
+            None,
+        )
+        .expect_err("NaN attribute must reject");
+        assert_eq!(nan_err.code, "InvalidAttributeValue");
+        assert_eq!(ctx.db.with_snapshot(|s| s.items[&ship_id].version), pre_version);
+
+        // 2. Missing item rejects when require_in_space_ship_system is None.
+        let missing_err = set_item_dynamic_attributes_tx(
+            &ctx,
+            "test_missing_attr",
+            999_888_777_666,
+            &[(eve_sde::attr_ids::DAMAGE, 5.0)],
+            false,
+            None,
+        )
+        .expect_err("missing item must reject");
+        assert_eq!(missing_err.code, "ItemNotFound");
+
+        // 3. Docked character's ship is stale for in-space write guard -> Ok(None) no-op.
+        let stale_out = set_item_dynamic_attributes_tx(
+            &ctx,
+            "test_stale_space",
+            ship_id,
+            &[(18_u16, 42.0)],
+            false,
+            Some(sys_id),
+        )
+        .expect("stale in-space write is a clean no-op");
+        assert!(stale_out.is_none());
+
+        // 4. Direct tx mutation updates dynamic attribute and bumps version.
+        let out = set_item_dynamic_attributes_tx(
+            &ctx,
+            "test_set_attr",
+            ship_id,
+            &[(eve_sde::attr_ids::DAMAGE, 17.5)],
+            true,
+            None,
+        )
+        .expect("set attr ok")
+        .expect("outcome present");
+        assert_eq!(out.item_id, ship_id);
+        assert_eq!(out.changes.len(), 1);
+        assert_eq!(out.changes[0].attr_id, eve_sde::attr_ids::DAMAGE);
+        assert!((out.changes[0].new_value - 17.5).abs() < 1e-6);
+        ctx.db.with_snapshot(|snap| {
+            let item = &snap.items[&ship_id];
+            assert_eq!(
+                item.dynamic_attributes
+                    .get(&eve_sde::attr_ids::DAMAGE)
+                    .copied(),
+                Some(17.5)
+            );
+            assert_eq!(item.version, pre_version + 1);
+        });
+    }
 }

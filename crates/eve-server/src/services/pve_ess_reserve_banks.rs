@@ -642,9 +642,13 @@ pub async fn ensure_ess_intrusion_site_balls(ctx: &ServerContext, sys_id: SolarS
             is_cloaked: false,
             ..Default::default()
         };
-        let _ = sys_handle
-            .spawn_ball_with_meta(
-                Ball {
+        let _ = crate::domain::combat_ops::spawn_entity_in_ballpark(
+            ctx,
+            &sys_handle,
+            crate::domain::combat_ops::SpawnEntityInBallparkRequest {
+                entity_id: Some(ess_id),
+                db_item: None,
+                ball: Ball {
                     id: ess_id,
                     type_id: ESS_BEACON_TYPE_ID,
                     position: pos,
@@ -656,10 +660,14 @@ pub async fn ensure_ess_intrusion_site_balls(ctx: &ServerContext, sys_id: SolarS
                     speed_fraction: 0.0,
                     mode: MovementMode::Rigid,
                 },
-                ctx.build_type_combat_state(ESS_BEACON_TYPE_ID),
-                ess_meta,
-            )
-            .await;
+                payload: crate::domain::combat_ops::SpawnBallPayload::Meta {
+                    combat_state: ctx.build_type_combat_state(ESS_BEACON_TYPE_ID),
+                    slim_meta: ess_meta,
+                },
+                mark_non_interactive: false,
+            },
+        )
+        .await;
         pos
     };
 
@@ -677,9 +685,13 @@ pub async fn ensure_ess_intrusion_site_balls(ctx: &ServerContext, sys_id: SolarS
             is_cloaked: false,
             ..Default::default()
         };
-        let _ = sys_handle
-            .spawn_ball_with_meta(
-                Ball {
+        let _ = crate::domain::combat_ops::spawn_entity_in_ballpark(
+            ctx,
+            &sys_handle,
+            crate::domain::combat_ops::SpawnEntityInBallparkRequest {
+                entity_id: Some(gate_id),
+                db_item: None,
+                ball: Ball {
                     id: gate_id,
                     type_id: ESS_GATE_TYPE_ID,
                     position: gate_pos,
@@ -691,10 +703,14 @@ pub async fn ensure_ess_intrusion_site_balls(ctx: &ServerContext, sys_id: SolarS
                     speed_fraction: 0.0,
                     mode: MovementMode::Rigid,
                 },
-                ctx.build_type_combat_state(ESS_GATE_TYPE_ID),
-                gate_meta,
-            )
-            .await;
+                payload: crate::domain::combat_ops::SpawnBallPayload::Meta {
+                    combat_state: ctx.build_type_combat_state(ESS_GATE_TYPE_ID),
+                    slim_meta: gate_meta,
+                },
+                mark_non_interactive: false,
+            },
+        )
+        .await;
     }
 }
 
