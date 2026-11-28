@@ -319,8 +319,12 @@ pub(crate) async fn handle_bookmark_static_location(
         }) {
             st
         } else if Some(ent_id) == session.ship_id {
-            let handle = ctx.systems.get_or_spawn(sys_id);
-            if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ent_id).await {
+            let ball_opt = if let Some(handle) = ctx.systems.get_handle(sys_id) {
+                handle.get_ball_snapshot(ent_id).await.ok().flatten()
+            } else {
+                None
+            };
+            if let Some((_, ball)) = ball_opt {
                 let ship_type = ctx.db.with_snapshot(|s| {
                     s.items.get(&ent_id).map(|it| it.type_id as i64).unwrap_or(5)
                 });
@@ -378,8 +382,12 @@ pub(crate) async fn handle_bookmark_static_location(
             .unwrap_or((5, (0.0, 0.0, 0.0)));
         (typ, pos)
     } else if let Some(ship_id) = session.ship_id {
-        let handle = ctx.systems.get_or_spawn(sys_id);
-        if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
+        let ball_opt = if let Some(handle) = ctx.systems.get_handle(sys_id) {
+            handle.get_ball_snapshot(ship_id).await.ok().flatten()
+        } else {
+            None
+        };
+        if let Some((_, ball)) = ball_opt {
             let ship_type = ctx.db.with_snapshot(|s| {
                 s.items.get(&ship_id).map(|it| it.type_id as i64).unwrap_or(5)
             });
@@ -1120,7 +1128,7 @@ pub(crate) async fn validate_dynamic_entity_bookmark_coords(
     sys_id: u32,
     ent_id: i64,
 ) -> Result<(f64, f64, f64), BridgeRpcError> {
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    // Reject docked callers before inspecting system actor handle so docked requests retain their UserError.
     let caller_ship_id = if session.station_id.is_some() || session.structure_id.is_some() {
         None
     } else {
@@ -1130,6 +1138,13 @@ pub(crate) async fn validate_dynamic_entity_bookmark_coords(
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "Must be in space on grid to bookmark dynamic in-space entities".into(),
+            client_error: None,
+        });
+    };
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError {
+            code: "UserError".into(),
+            message: "Caller ship not found in ballpark".into(),
             client_error: None,
         });
     };

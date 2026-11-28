@@ -122,7 +122,15 @@ pub async fn interdict_convoy(
         });
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(convoy.current_system_id);
+    let Some(sys_handle) = ctx.systems.get_handle(convoy.current_system_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            session.solar_system_id,
+            "interdict_convoy",
+            "Attacker ship is not in space",
+        ));
+    };
     let Some((_, ship_ball)) = (match sys_handle.get_ball_snapshot(ship_id).await {
         Ok(v) => v,
         Err(e) => {

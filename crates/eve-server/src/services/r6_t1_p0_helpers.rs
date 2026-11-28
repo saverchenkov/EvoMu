@@ -284,8 +284,9 @@ pub async fn expire_overdue_probes_for_char(
     }
 
     for p in &newly_expired {
-        let sys_handle = ctx.systems.get_or_spawn(p.solar_system_id);
-        let _ = sys_handle.remove_ball(p.probe_id).await;
+        if let Some(sys_handle) = ctx.systems.get_handle(p.solar_system_id) {
+            let _ = sys_handle.remove_ball(p.probe_id).await;
+        }
     }
 
     let (returned_ids, lost_ids) = ctx.db.with_mut_snapshot(|snap| {

@@ -1364,7 +1364,9 @@ pub async fn handle_activate_micro_jump_unit(
         });
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "ActivateMMJU", "Ship is not in space"));
+    };
     let (_, ship_ball) = sys_handle
         .get_ball_snapshot(ship_id)
         .await

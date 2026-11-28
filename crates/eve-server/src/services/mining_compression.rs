@@ -354,8 +354,9 @@ pub async fn handle_in_space_compression_mgr(
             .collect()
     });
 
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    if let Some(sid) = ship_id {
+    // Allow self-compression to resolve without waking a cold solar system; remote range/cloak checks require a live ballpark.
+    let handle_opt = ctx.systems.get_handle(sys_id);
+    if let (Some(ref handle), Some(sid)) = (&handle_opt, ship_id) {
         if handle
             .get_combat_state(sid)
             .await
@@ -383,26 +384,28 @@ pub async fn handle_in_space_compression_mgr(
             });
         }
     }
-    let my_pos = match ship_id {
-        Some(sid) => handle.get_ball_snapshot(sid).await.ok().flatten().map(|(_, b)| b.position),
-        None => None,
+    let my_pos = match (&handle_opt, ship_id) {
+        (Some(handle), Some(sid)) => handle.get_ball_snapshot(sid).await.ok().flatten().map(|(_, b)| b.position),
+        _ => None,
     };
     let mut in_range_compressor = false;
     for (c_ship_id, max_range) in candidate_compressors {
-        if handle
-            .get_combat_state(c_ship_id)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|cs| cs.is_cloaked)
-        {
-            continue;
+        if let Some(ref handle) = handle_opt {
+            if handle
+                .get_combat_state(c_ship_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|cs| cs.is_cloaked)
+            {
+                continue;
+            }
         }
         if Some(c_ship_id) == ship_id {
             in_range_compressor = true;
             break;
         }
-        if let Some(mpos) = my_pos {
+        if let (Some(ref handle), Some(mpos)) = (&handle_opt, my_pos) {
             if let Ok(Some((_, cball))) = handle.get_ball_snapshot(c_ship_id).await {
                 if (mpos - cball.position).length() <= max_range {
                     in_range_compressor = true;

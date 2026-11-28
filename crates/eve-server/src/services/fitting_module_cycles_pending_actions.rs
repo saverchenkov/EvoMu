@@ -901,7 +901,9 @@ pub(crate) async fn execute_pending_cycle_actions_list(
     if actions.is_empty() {
         return;
     }
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
     for action in actions {
         match action {
             PendingCycleAction::SalvageEnd {

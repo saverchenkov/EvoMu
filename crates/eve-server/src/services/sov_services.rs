@@ -57,14 +57,16 @@ pub fn emit_sovereignty_changed(ctx: &ServerContext, sys_id: u32, alliance_id: O
             alliance_id,
         },
     );
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    let aid = alliance_id.unwrap_or(0);
-    tokio::spawn(async move {
-        let _ = handle.emit_destiny_event(0, eve_destiny::DestinyEvent::OnSovereigntyChanged {
-            solar_system_id: sys_id,
-            alliance_id: aid,
-        }).await;
-    });
+    // Only broadcast the Destiny event when the solar system is already loaded; cold systems have no grid listeners.
+    if let Some(handle) = ctx.systems.get_handle(sys_id) {
+        let aid = alliance_id.unwrap_or(0);
+        tokio::spawn(async move {
+            let _ = handle.emit_destiny_event(0, eve_destiny::DestinyEvent::OnSovereigntyChanged {
+                solar_system_id: sys_id,
+                alliance_id: aid,
+            }).await;
+        });
+    }
 }
 
 /// Resolves a Sovereignty Hub structure ID from either a direct `hub_id`, a `solarSystemID` argument,
@@ -803,12 +805,16 @@ pub async fn handle(
             };
             let mut total_destroyed: usize = 0;
             for (sys_id, destroyed_ids, removed_dens, removed_mto_balls) in per_system {
-                let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                for &sid in &destroyed_ids {
-                    let _ = sys_handle.remove_ball(sid).await;
+                let sys_handle_opt = ctx.systems.get_handle(sys_id);
+                if let Some(ref sys_handle) = sys_handle_opt {
+                    for &sid in &destroyed_ids {
+                        let _ = sys_handle.remove_ball(sid).await;
+                    }
                 }
                 for &(did, owner_cid) in &removed_dens {
-                    let _ = sys_handle.remove_ball(did).await;
+                    if let Some(ref sys_handle) = sys_handle_opt {
+                        let _ = sys_handle.remove_ball(did).await;
+                    }
                     if owner_cid > 0 {
                         ctx.emit_typed(
                             NotificationTarget::Character(owner_cid),
@@ -822,8 +828,10 @@ pub async fn handle(
                         );
                     }
                 }
-                for &bid in &removed_mto_balls {
-                    let _ = sys_handle.remove_ball(bid).await;
+                if let Some(ref sys_handle) = sys_handle_opt {
+                    for &bid in &removed_mto_balls {
+                        let _ = sys_handle.remove_ball(bid).await;
+                    }
                 }
 
                 let mut sov_updated_ids = destroyed_ids.clone();

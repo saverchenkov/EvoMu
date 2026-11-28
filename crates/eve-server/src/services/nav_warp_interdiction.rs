@@ -1198,12 +1198,15 @@ async fn handle_get_session_change_timer(
         })
         .unwrap_or(0);
     let cur_tick_opt = if let Some(ship_id) = session.ship_id {
-        let h = ctx.systems.get_or_spawn(sys_id);
-        h.get_ball_snapshot(ship_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|(t, _)| (sys_id, t))
+        if let Some(h) = ctx.systems.get_handle(sys_id) {
+            h.get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(t, _)| (sys_id, t))
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -1243,12 +1246,15 @@ pub(crate) async fn handle_set_session_check(
         .unwrap_or(0);
     let cur_tick_opt = if let Some(ship_id) = session.ship_id {
         if sys_id > 0 {
-            let h = ctx.systems.get_or_spawn(sys_id);
-            h.get_ball_snapshot(ship_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|(t, _)| (sys_id, t))
+            if let Some(h) = ctx.systems.get_handle(sys_id) {
+                h.get_ball_snapshot(ship_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(t, _)| (sys_id, t))
+            } else {
+                None
+            }
         } else {
             None
         }

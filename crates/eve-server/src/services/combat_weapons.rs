@@ -311,7 +311,15 @@ async fn handle_weapons_inner(
             client_error: None,
         }));
     };
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Some(Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "FireWeapon",
+            format!("Active ship {ship_id} is not spawned in space"),
+        )));
+    };
     let Some((attacker_tick, attacker_ball)) = sys_handle
         .get_ball_snapshot(ship_id)
         .await
@@ -365,10 +373,11 @@ async fn handle_weapons_inner(
         }
     };
     if should_break_cloak && !controlling_structure && matches!(res, Some(Ok(_))) {
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        crate::services::inventory_fitting::fitting_module_cycles::break_gate_cloak_on_space_action(
-            ctx, &sys_handle, char_id, ship_id,
-        ).await;
+        if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+            crate::services::inventory_fitting::fitting_module_cycles::break_gate_cloak_on_space_action(
+                ctx, &sys_handle, char_id, ship_id,
+            ).await;
+        }
     }
     res
 }

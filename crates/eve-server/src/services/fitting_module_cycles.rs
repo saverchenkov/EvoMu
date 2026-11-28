@@ -218,7 +218,12 @@ async fn try_start_or_resolve_cycle<'a>(
         // online in space, allow cycle activation to proceed through `handle_module_cycles`.
         if is_docked || is_currently_offline {
             if let Some(sys_id) = session.solar_system_id {
-                if ctx.systems.get_or_spawn(sys_id).has_active_nanite_repair_sync(ship_id, raw_module_id) {
+                // Only live loaded solar systems can have an active nanite repair on the ship.
+                if ctx
+                    .systems
+                    .get_handle(sys_id)
+                    .is_some_and(|h| h.has_active_nanite_repair_sync(ship_id, raw_module_id))
+                {
                     return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError {
                         code: "ModuleBeingRepaired".into(),
                         message: format!("Module {raw_module_id} cannot be onlined while undergoing nanite repair"),

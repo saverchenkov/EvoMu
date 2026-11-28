@@ -365,14 +365,16 @@ pub(crate) async fn handle_clear_charges(
     }
 
     if let Some(sys_id) = session.solar_system_id {
-        let sys = ctx.systems.get_or_spawn(sys_id);
-        for &mid in &mod_ids_in_charge_slots {
-            if sys.has_active_module_cycle_sync(ship_id, mid) {
-                return Err(BridgeRpcError {
-                    code: "ModuleIsActive".into(),
-                    message: format!("Cannot unload charges while module {mid} is active"),
-                    client_error: None,
-                });
+        // Cold solar systems hold no active in-space module cycles; avoid waking them for docked ClearCharges.
+        if let Some(sys) = ctx.systems.get_handle(sys_id) {
+            for &mid in &mod_ids_in_charge_slots {
+                if sys.has_active_module_cycle_sync(ship_id, mid) {
+                    return Err(BridgeRpcError {
+                        code: "ModuleIsActive".into(),
+                        message: format!("Cannot unload charges while module {mid} is active"),
+                        client_error: None,
+                    });
+                }
             }
         }
     }
@@ -1582,7 +1584,7 @@ pub(crate) fn edge_distance_in_space_snap(
     target_id: i64,
     target_type_id: u32,
 ) -> Option<f64> {
-    let sys_h = ctx.systems.get_or_spawn_if_runtime(sys_id);
+    let sys_h = ctx.systems.get_handle(sys_id);
     let pos = |id: i64| {
         sys_h
             .as_ref()
