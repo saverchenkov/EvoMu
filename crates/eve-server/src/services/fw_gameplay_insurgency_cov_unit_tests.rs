@@ -607,3 +607,87 @@ async fn actor_fob_damage_phases_and_idle_roamer_patrol_branches() {
     }
     sync_insurgency_system_npcs(&ctx, FACTION_GURISTAS, 500_001, sys_id, 2, 3).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sync_insurgency_system_npcs_cleanup_and_idle_roamers_do_not_wake_cold_system() {
+    use crate::combat::npc_ai::npc_test_helpers::seed_npc_entity;
+    use crate::services::combat_crimewatch::ExtendedNpcEntity;
+    use eve_destiny::DamageVector;
+
+    let (ctx, _clock) = test_ctx_with_clock(30_000);
+    let cold_sys = 30_002_505_u32;
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    let pir_tid = crate::services::insurgency_complex_ops::select_named_or_regular_roamer_type(
+        &ctx,
+        cold_sys,
+        4637,
+        FACTION_GURISTAS,
+        2,
+        3,
+    )
+    .or_else(|| select_insurgency_roamer_type(&ctx, 4637, Some(FACTION_GURISTAS as u32), 0, 3))
+    .expect("pirate roamer type");
+    let enf_tid = crate::services::insurgency_complex_ops::select_named_or_regular_roamer_type(
+        &ctx,
+        cold_sys,
+        4638,
+        FACTION_GURISTAS,
+        2,
+        3,
+    )
+    .or_else(|| select_insurgency_roamer_type(&ctx, 4638, None, 0, 2))
+    .expect("enforcer roamer type");
+
+    let mk_roamer = |ball_id: i64, type_id: u32, faction_id: u32| ExtendedNpcEntity {
+        ball_id,
+        type_id,
+        faction_id,
+        archetype: "roamer".into(),
+        solar_system_id: cold_sys,
+        spawn_group_id: 0,
+        target_id: None,
+        aggression_threat: HashMap::new(),
+        threat_table: HashMap::new(),
+        bounty_isk: 0.0,
+        optimal_range: 10_000.0,
+        orbit_range: 5_000.0,
+        damage_vector: DamageVector::default(),
+        entropic_cycles: 0,
+        drifter_overshield_hp: 0.0,
+        drifter_doomsday_fired: false,
+        web_speed_factor: 1.0,
+        web_range: 0.0,
+        scram_strength: 0.0,
+        scram_range: 0.0,
+        neut_amount: 0.0,
+        ecm_jammed: false,
+        remote_shield_rep: 0.0,
+        remote_armor_rep: 0.0,
+        remote_rep_range: 0.0,
+        tag_drop_type_id: None,
+        spawn_position: DVec3::ZERO,
+        sleeper_wh_class: 0,
+        custom_cargo_loot: None,
+    };
+
+    let pir_bid = 9_542_001_i64;
+    let enf_bid = 9_542_002_i64;
+    seed_npc_entity(&ctx, mk_roamer(pir_bid, pir_tid, FACTION_GURISTAS as u32));
+    seed_npc_entity(&ctx, mk_roamer(enf_bid, enf_tid, 500_001));
+    mark_ci_sentry_deployed(&ctx, cold_sys);
+
+    // 1. Existing idle roamers on cold system without new spawns must not wake cold_sys.
+    sync_insurgency_system_npcs(&ctx, FACTION_GURISTAS, 500_001, cold_sys, 2, 3).await;
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert!(has_npc_entity(&ctx, pir_bid) && has_npc_entity(&ctx, enf_bid));
+
+    // 2. Dropping to (0, 0) cleans up stale NPC state and sentry flags without waking cold_sys.
+    sync_insurgency_system_npcs(&ctx, FACTION_GURISTAS, 500_001, cold_sys, 0, 0).await;
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    assert!(!has_npc_entity(&ctx, pir_bid));
+    assert!(!has_npc_entity(&ctx, enf_bid));
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.ci_sentry_deployed_systems.contains(&cold_sys));
+    });
+}

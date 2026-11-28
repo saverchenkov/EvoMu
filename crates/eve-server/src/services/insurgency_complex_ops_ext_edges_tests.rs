@@ -384,3 +384,51 @@ async fn collect_aligned_pilots_on_grid_filters_docked_capsule_cloaked_warping_r
     assert_eq!(angel_pilots.len(), 1);
     assert_eq!(angel_pilots[0].0, c_unaligned);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collect_aligned_pilots_on_grid_returns_empty_without_waking_cold_system() {
+    let mut sde = SdeRegistry::default();
+    sde.types.insert(587, make_sde_type(587, 25, None, true, 100.0));
+    let ctx = test_ctx_with_sde(sde);
+    let cold_sys = 30_000_142_u32;
+    let char_id = 91_542_001_i64;
+    let ship_id = 800_542_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().unwrap().clone();
+        ch.character_id = char_id;
+        ch.solar_system_id = cold_sys;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        ch.war_faction_id = Some(FACTION_GURISTAS);
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(cold_sys),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    let pilots = collect_aligned_pilots_on_grid(
+        &ctx,
+        cold_sys,
+        DVec3::ZERO,
+        30_000.0,
+        Some(FACTION_GURISTAS),
+        Some(FACTION_GURISTAS),
+    )
+    .await;
+    assert!(pilots.is_empty());
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+}

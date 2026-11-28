@@ -836,9 +836,11 @@ async fn siphon_steals_raw_processed_and_polymer_with_waste_and_capacity() {
         });
     });
 
-    // Advance 60s + 2 cycles (7200s)
+    // Advance 60s + 2 cycles (7200s) -> DB-only Mobile Siphon runs even when sys_id is cold!
     clock.advance_secs(60 + SIPHON_CYCLE_SECS * 2);
+    assert!(ctx.systems.get_handle(sys_id).is_none());
     step_system_deployables_sync(&ctx, sys_id);
+    assert!(ctx.systems.get_handle(sys_id).is_none());
 
     ctx.db.with_snapshot(|snap| {
         assert!(snap.items.contains_key(&locked_stack_id));
@@ -894,4 +896,116 @@ async fn siphon_steals_raw_processed_and_polymer_with_waste_and_capacity() {
     let active_inh = active_scan_inhibitor_positions(&ctx, sys_id);
     assert_eq!(active_inh.len(), 1);
     assert_eq!(active_inh[0].1, DVec3::new(123.0, 456.0, 789.0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mmju_and_deployable_sync_do_not_spawn_cold_system() {
+    use crate::services::mobile_deployables::read_deployable_state;
+    use eve_db::{MmjuSpoolEntry, PendingDecloakNotice};
+
+    let sys_id = 30_002_537_u32;
+    let now = 1_700_000_200_u64;
+    let (ctx, _clock) = make_ctx_with_clock_and_sde(now, |sde| {
+        sde.solar_systems.insert(
+            sys_id,
+            lowsec_system(sys_id, 10_000_030, 0.2, Vec::new()),
+        );
+        sde.types.insert(
+            33591,
+            make_type(33591, GROUP_MOBILE_MICRO_JUMP_UNIT, Vec::new(), 0.0, 50.0),
+        );
+    });
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let mmju_id = 889_101_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            mmju_id,
+            InventoryItemRecord {
+                item_id: mmju_id,
+                type_id: 33591,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(mmju_id, [0.0, 0.0, 0.0]);
+        write_deployable_state_snap(snap, |st| {
+            st.deployables.insert(
+                mmju_id,
+                MobileDeployableRecord {
+                    item_id: mmju_id,
+                    type_id: 33591,
+                    group_id: GROUP_MOBILE_MICRO_JUMP_UNIT,
+                    owner_id: char_id,
+                    solar_system_id: sys_id,
+                    anchor_start_unix: now - 120,
+                    anchor_duration_secs: 60,
+                    anchor_completed: true,
+                    is_unanchored: false,
+                    expires_at_unix: now + 3_600,
+                    last_interaction_unix: now - 120,
+                    reinforced_until_unix: None,
+                    last_ping_unix: None,
+                    position: [0.0, 0.0, 0.0],
+                    deployed_fleet_id: None,
+                },
+            );
+            st.mmju_spools.insert(
+                ship_id,
+                MmjuSpoolEntry {
+                    ship_id,
+                    unit_id: mmju_id,
+                    char_id,
+                    solar_system_id: sys_id,
+                    started_unix: now - 15,
+                    complete_at_unix: now,
+                    direction: [1.0, 0.0, 0.0],
+                },
+            );
+            st.pending_decloak_notifications.push(PendingDecloakNotice {
+                char_id,
+                ship_id,
+                module_id: 777_542,
+            });
+        });
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 9_889, Some(char_id), true, now);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+
+    let mut sess = auth_session(1, char_id, 98_000_001, sys_id);
+    sess.ship_id = Some(ship_id);
+    let mmju_err = handle_mmju_activate(&ctx, &sess, char_id, ship_id, sys_id, mmju_id)
+        .await
+        .expect_err("handle_mmju_activate on cold system must fail closed");
+    assert_eq!(mmju_err.code, "ShipNotInSpace");
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+
+    sync_system_deployables(&ctx, sys_id).await;
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+
+    step_system_deployables_sync(&ctx, sys_id);
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+    let st = read_deployable_state(&ctx);
+    assert!(!st.mmju_spools.contains_key(&ship_id));
+    assert!(st.pending_decloak_notifications.is_empty());
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs
+        .iter()
+        .any(|n| n.event == "OnCloakModuleForceDeactivated"));
 }

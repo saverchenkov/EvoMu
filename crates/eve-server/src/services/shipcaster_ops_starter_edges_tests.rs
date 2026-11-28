@@ -630,3 +630,66 @@ async fn execute_shipcaster_jump_preserves_heat_combat_state_and_clears_zarzakh_
         assert_eq!(item_dmg, Some(8.5));
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prevalidate_shipcaster_jump_and_pad_destruction_stay_cold() {
+    let ctx = build_shipcaster_ctx();
+    let cold_sys = 30_100_000_u32;
+    let cid = 92_000_542_i64;
+    let ship_id = 92_100_542_i64;
+    let pad_id = 55_542_001_i64;
+    let uid = spawn_char_with_ship(
+        &ctx,
+        cid,
+        cold_sys,
+        ship_id,
+        587,
+        ctx.now_unix().saturating_sub(600),
+    );
+    let _ = ctx.db.acquire_online_lock_with_computer_hash(
+        uid,
+        999_542,
+        Some(cid),
+        None,
+        true,
+        ctx.now_unix(),
+    );
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    let jump_err = prevalidate_shipcaster_jump(&ctx, cid, ship_id, cold_sys)
+        .await
+        .expect_err("cold origin system must fail closed with ShipNotInSpace");
+    assert_eq!(jump_err.code, "ShipNotInSpace");
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    with_misc_state(&ctx, |st| {
+        st.landing_pads.clear();
+        st.launchers.clear();
+        st.landing_pads.push(LandingPadRecord {
+            item_id: pad_id,
+            type_id: 75928,
+            built_type_id: 75928,
+            solar_system_id: cold_sys,
+            faction_id: 500_001,
+            is_built: true,
+            link_timestamp: 1_700_000_000,
+            is_disrupted: false,
+            position: DVec3::ZERO,
+            required_materials: BTreeMap::new(),
+            contributed_materials: BTreeMap::new(),
+        });
+    });
+    let _ = ctx.drain_notifications_for_char(cid);
+
+    on_landing_pad_ball_destroyed(&ctx, pad_id).await;
+
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+    with_misc_state(&ctx, |st| {
+        assert!(st.landing_pads.is_empty());
+    });
+    let notifs = ctx.drain_notifications_for_char(cid);
+    assert!(notifs
+        .iter()
+        .any(|n| n.event == "OnShipcasterTargetStateChanged"));
+}

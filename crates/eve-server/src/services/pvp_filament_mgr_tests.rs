@@ -310,6 +310,9 @@ fn pvp_filament_rpc_events_stats_and_queue_leave() {
     // Undocked without item fails ItemNotFound
     sess.station_id = None;
     sess.ship_id = Some(ship_id);
+    rt.block_on(async {
+        let _ = ctx.systems.get_or_spawn(30000142);
+    });
     let missing_item_err = rt
         .block_on(handle(
             &ctx,

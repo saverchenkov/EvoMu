@@ -1116,14 +1116,16 @@ pub async fn handle_wrecks_killmails(
                 Err(err) => return Some(Err(err)),
             };
 
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let pos = sys_handle
-                .get_ball_snapshot(ship_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|(_, b)| b.position)
-                .unwrap_or(DVec3::ZERO);
+            let pos = match ctx.systems.get_handle(sys_id) {
+                Some(sys_handle) => sys_handle
+                    .get_ball_snapshot(ship_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(_, b)| b.position)
+                    .unwrap_or(DVec3::ZERO),
+                None => DVec3::ZERO,
+            };
 
             let (ship_type_id, is_capsule) = ctx.db.with_snapshot(|snap| {
                 let stid = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(670);

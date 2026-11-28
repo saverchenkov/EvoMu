@@ -235,20 +235,26 @@ pub async fn escort_ice_heist_tanker(
             ))
         })?;
 
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let sys_opt = ctx.systems.get_handle(sys_id);
     let tanker_id = 1_896_000_000 + instance_id * 10 + 1;
     let guard_id = 1_896_000_000 + instance_id * 10 + 2;
-    if completed {
-        let _ = sys.remove_ball(tanker_id).await;
-        let _ = sys.remove_ball(guard_id).await;
-    } else {
-        let _ = sys.set_ball_position(tanker_id, ICE_HEIST_REFINERY_POS).await;
-        let _ = sys
-            .set_movement_mode(tanker_id, eve_destiny::MovementMode::Stop)
-            .await;
+    if let Some(ref sys) = sys_opt {
+        if completed {
+            let _ = sys.remove_ball(tanker_id).await;
+            let _ = sys.remove_ball(guard_id).await;
+        } else {
+            let _ = sys.set_ball_position(tanker_id, ICE_HEIST_REFINERY_POS).await;
+            let _ = sys
+                .set_movement_mode(tanker_id, eve_destiny::MovementMode::Stop)
+                .await;
+        }
     }
 
-    let all_balls = sys.list_balls().await.unwrap_or_default();
+    let all_balls = if let Some(ref sys) = sys_opt {
+        sys.list_balls().await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let mut lp_awarded = 0_i64;
     if just_won {
         let on_grid_ship_ids: std::collections::HashSet<i64> = all_balls
@@ -297,6 +303,9 @@ pub async fn escort_ice_heist_tanker(
 /// Drives Pirate Insurgency Ice Refinery Heist spawns, tanker escort movement/scoring,
 /// and Upwell Thunderchild guard weapon engagement on the 1 Hz system tick.
 pub async fn step_ice_heist_system(ctx: &ServerContext, sys_id: u32) {
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
     let active_instance_opt = read_insurgency_runtime(ctx, |rt| {
         rt.ice_heist_instances
             .iter()
@@ -314,7 +323,6 @@ pub async fn step_ice_heist_system(ctx: &ServerContext, sys_id: u32) {
         },
     };
 
-    let sys = ctx.systems.get_or_spawn(sys_id);
     let all_balls = sys.list_balls().await.unwrap_or_default();
     let tanker_id = 1_896_000_000 + instance_id * 10 + 1;
     let guard_id = 1_896_000_000 + instance_id * 10 + 2;

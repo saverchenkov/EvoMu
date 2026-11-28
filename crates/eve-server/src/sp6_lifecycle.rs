@@ -989,7 +989,7 @@ pub fn sample_live_ship_combat_hp(
     let handle = ctx
         .systems
         .find_ball_system_sync(ship_id)
-        .map(|sys_id| ctx.systems.get_or_spawn(sys_id))
+        .and_then(|sys_id| ctx.systems.get_handle(sys_id))
         .or_else(|| fallback_sys_id.and_then(|sys_id| ctx.systems.get_handle(sys_id)))?;
     let view = handle.view();
     let cs = view.combat_state(ship_id)?;
@@ -1010,7 +1010,7 @@ pub fn read_unified_ship_damage_state(
         None
     } else {
         ctx.systems.find_ball_system_sync(ship_id).and_then(|sys_id| {
-            let handle = ctx.systems.get_or_spawn(sys_id);
+            let handle = ctx.systems.get_handle(sys_id)?;
             let view = handle.view();
             let cs = view.combat_state(ship_id)?;
             Some(LiveShipCombatHp::from_combat_state(cs))
@@ -1312,7 +1312,15 @@ pub fn require_ship_ready_for_filament_jump(
             });
         }
     }
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "filament_activate",
+            format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
+        ));
+    };
     if sys_handle.is_ball_scrambled_sync(ship_id) {
         return Err(BridgeRpcError {
             code: "WarpScrambled".into(),
@@ -1473,10 +1481,12 @@ pub fn safe_logoff_blocking_space_conditions(
         conds.push("SAFE_LOGOFF_ACTIVE_MODULES");
     }
 
-    let in_warp = matches!(
-        ctx.systems.get_or_spawn(sys_id).view().movement_mode(ship_id),
-        Some(MovementMode::Warp { .. })
-    );
+    let in_warp = ctx.systems.get_handle(sys_id).is_some_and(|h| {
+        matches!(
+            h.view().movement_mode(ship_id),
+            Some(MovementMode::Warp { .. })
+        )
+    });
     if in_warp {
         conds.push("SAFE_LOGOFF_IN_WARP");
     }
@@ -1555,9 +1565,10 @@ pub async fn handle_safe_logoff(
     });
 
     if ship_id > 0 && sys_id > 0 && session.station_id.is_none() && session.structure_id.is_none() {
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        if sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-            failed_conditions.push("SAFE_LOGOFF_WARP_SCRAMBLED".to_string());
+        if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+            if sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+                failed_conditions.push("SAFE_LOGOFF_WARP_SCRAMBLED".to_string());
+            }
         }
         for code in safe_logoff_blocking_space_conditions(ctx, char_id, ship_id, sys_id) {
             failed_conditions.push(code.to_string());
@@ -1608,9 +1619,10 @@ pub async fn handle_safe_logoff(
 
     let complete_at_unix = now_unix.saturating_add(SAFE_LOGOFF_COUNTDOWN_SECS);
     if ship_id > 0 && sys_id > 0 && session.station_id.is_none() && session.structure_id.is_none() {
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
-        let _ = sys_handle.set_speed_fraction(ship_id, 0.0).await;
+        if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
+            let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
+            let _ = sys_handle.set_speed_fraction(ship_id, 0.0).await;
+        }
     }
     with_mut_sp6_state(&ctx.db, |st| {
         st.disconnected_ships.remove(&char_id);

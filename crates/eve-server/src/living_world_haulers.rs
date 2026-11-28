@@ -220,13 +220,14 @@ pub async fn step_hauler_convoy_internal(
         StepAction::Destroyed => Ok(ConvoyStepStatus::Destroyed),
         StepAction::AlreadyDocked => Ok(ConvoyStepStatus::AlreadyDocked),
         StepAction::Traverse { system_id, target_pos } => {
-            let handle = systems.get_or_spawn(system_id);
-            if let Ok(Some((_, ball))) = handle.get_ball_snapshot(convoy_id).await {
-                // If hauler is far from target gate/station, set warp movement mode toward destination
-                let dist = ball.position.distance(target_pos);
-                if dist > 5_000.0 && !matches!(ball.mode, MovementMode::Warp { .. }) {
-                    let warp_mode = MovementMode::new_warp(ball.position, target_pos, 3.0);
-                    let _ = handle.set_movement_mode(convoy_id, warp_mode).await;
+            if let Some(handle) = systems.get_handle(system_id) {
+                if let Ok(Some((_, ball))) = handle.get_ball_snapshot(convoy_id).await {
+                    // If hauler is far from target gate/station, set warp movement mode toward destination
+                    let dist = ball.position.distance(target_pos);
+                    if dist > 5_000.0 && !matches!(ball.mode, MovementMode::Warp { .. }) {
+                        let warp_mode = MovementMode::new_warp(ball.position, target_pos, 3.0);
+                        let _ = handle.set_movement_mode(convoy_id, warp_mode).await;
+                    }
                 }
             }
             Ok(ConvoyStepStatus::TraversingSystem { system_id })
@@ -238,8 +239,9 @@ pub async fn step_hauler_convoy_internal(
             ship_type_id,
         } => {
             if lod_level == 2 {
-                let old_handle = systems.get_or_spawn(prev_sys);
-                let _ = old_handle.remove_ball(convoy_id).await;
+                if let Some(old_handle) = systems.get_handle(prev_sys) {
+                    let _ = old_handle.remove_ball(convoy_id).await;
+                }
 
                 let new_handle = systems.get_or_spawn(next_sys);
                 let gate_pos = sde
@@ -277,8 +279,9 @@ pub async fn step_hauler_convoy_internal(
             lod_level,
         } => {
             if lod_level == 2 {
-                let handle = systems.get_or_spawn(destination_system_id);
-                let _ = handle.remove_ball(convoy_id).await;
+                if let Some(handle) = systems.get_handle(destination_system_id) {
+                    let _ = handle.remove_ball(convoy_id).await;
+                }
             }
             Ok(ConvoyStepStatus::DockedAtDestination {
                 station_id: destination_station_id,

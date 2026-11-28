@@ -308,6 +308,7 @@ async fn pvp_filament_mgr_queue_leave_events_and_leaderboard_math() {
     );
 
     // Space checks: invalid itemID, pod hull, missing item, unowned item
+    let _ = ctx.systems.get_or_spawn(sys_id);
     let mut s1 = make_space_session(c1, corp_id, sys_id, ship1, None);
     assert_eq!(
         call_pvp_rpc(&ctx, &mut s1, "JoinPVPQueue", &[PyRep::Integer(0)]).await.unwrap_err().code,

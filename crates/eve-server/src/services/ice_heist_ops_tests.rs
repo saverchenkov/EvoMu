@@ -138,12 +138,13 @@ async fn ice_heist_empire_win_lp_guards_steering_scoring_and_thunderchild_combat
     assert!((fallback_dps.em - 570.0).abs() < 1e-6);
     assert!((fallback_dps.kinetic - 570.0).abs() < 1e-6);
 
-    // 2) Setup insurgency in sys_id at stage 3 and test step_ice_heist_system auto-spawn + ball properties
+    // 2) Setup insurgency in sys_id at stage 3 and test live-system step_ice_heist_system ball properties
     let sys_id = 30_045_330_u32;
     let camp_id = 77_002_i64;
     init_insurgency_campaign(&ctx_sde, camp_id, FACTION_ANGEL_CARTEL, 500_003, sys_id, vec![sys_id]);
     add_system_corruption(&ctx_sde, camp_id, sys_id, 500);
 
+    let sys = ctx_sde.systems.get_or_spawn(sys_id);
     step_ice_heist_system(&ctx_sde, sys_id).await;
     let inst_id = read_insurgency_runtime(&ctx_sde, |rt| {
         rt.ice_heist_instances
@@ -158,7 +159,6 @@ async fn ice_heist_empire_win_lp_guards_steering_scoring_and_thunderchild_combat
 
     let tanker_id = 1_896_000_000 + inst_id * 10 + 1;
     let guard_id = 1_896_000_000 + inst_id * 10 + 2;
-    let sys = ctx_sde.systems.get_or_spawn(sys_id);
     assert_eq!(
         sys.get_ball_snapshot(tanker_id).await.unwrap().map(|(_, b)| b.max_velocity),
         Some(2_500.0)

@@ -1245,7 +1245,9 @@ pub async fn spawn_matched_arena_instance(
             p_ship_id,
             p_origin_sys,
         );
-        ctx.systems.get_or_spawn(p_origin_sys).try_remove_ball(p_ship_id);
+        if let Some(h) = ctx.systems.get_handle(p_origin_sys) {
+            h.try_remove_ball(p_ship_id);
+        }
 
         let p_ship_type = ctx
             .db
@@ -1368,8 +1370,17 @@ pub async fn handle_pvp_end_gate_activation(
         return Err(BridgeRpcError::user_error("TooFarFromGate"));
     }
 
-    let arena = ctx.systems.get_or_spawn(32_000_001);
-    let Some((_, gb)) = arena.get_ball_snapshot(target_gate_id).await.ok().flatten() else {
+    let arena_gate = if let Some(arena) = ctx.systems.get_handle(32_000_001) {
+        arena
+            .get_ball_snapshot(target_gate_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|gb| (arena, gb))
+    } else {
+        None
+    };
+    let Some((arena, (_, gb))) = arena_gate else {
         return Err(BridgeRpcError::user_error("TooFarFromGate"));
     };
     let Some(sid) = active_ship_id else {
