@@ -663,6 +663,9 @@ async fn release_in_flight_superweapon_best_effort_handles_open_and_full_channel
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finalize_post_unlock_ops_flushes_remote_assistance_and_worker_thread_stops_cleanly() {
+    use crate::system_actor::post_unlock::{
+        DeferredDeactivationHookOp, PostUnlockIntent, PostUnlockOps,
+    };
     let (reg, db, _sde) = test_registry_with_db();
     let jita = 30_000_142_u32;
     let (src_ship, tgt_a, tgt_b, tgt_c) = (830_001_i64, 830_002_i64, 830_003_i64, 830_004_i64);
@@ -766,10 +769,8 @@ async fn finalize_post_unlock_ops_flushes_remote_assistance_and_worker_thread_st
     *h.module_deactivation_post_unlock_hook.write().unwrap() = Some((raw_hook, post_hook));
 
     h.cmd_tx
-        .try_send(SystemCommand::TryRemoveModuleCycle {
+        .try_send(SystemCommand::StopNonWarpModuleCycles {
             ship_id: src_ship,
-            module_id: mod_hook,
-            wait_for_post_unlock: false,
             reply: tokio::sync::oneshot::channel().0,
         })
         .unwrap();

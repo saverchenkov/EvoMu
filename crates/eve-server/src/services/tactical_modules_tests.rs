@@ -720,12 +720,12 @@ async fn wire_module_deactivation_hook_flushes_remote_assistance_on_current_thre
     .await
     .expect("register RSB cycle");
 
-    // Deactivating on a `current_thread` runtime freezes the actor task while `try_remove_module_cycle`
-    // waits for `post_unlock_worker`. Because `flush_module_ewar_in_state` pre-flushes
-    // `remote_assistance` inside the actor and `finish_flushed_module_ewar` pushes the target fit
-    // without blocking on the actor mailbox, this must complete without a 5s deadlock.
+    // Expiring the cycle via sync `try_step_full_tick` on a `current_thread` runtime freezes
+    // the actor task while waiting for `post_unlock_worker`. Because `flush_module_ewar_in_state`
+    // pre-flushes `remote_assistance` inside the actor and `finish_flushed_module_ewar` pushes the
+    // target fit without blocking on the actor mailbox, this must complete without a 5s deadlock.
     let t0 = std::time::Instant::now();
-    sys.try_remove_module_cycle(logi_ship_id, rsb_mod_id);
+    sys.try_step_full_tick(11.0);
     assert!(
         t0.elapsed() < std::time::Duration::from_secs(2),
         "deactivation hook must not deadlock against current_thread actor"
@@ -734,8 +734,8 @@ async fn wire_module_deactivation_hook_flushes_remote_assistance_on_current_thre
         ctx.current_fit_rev(ship_id) > rev_before_deact,
         "finish_flushed_module_ewar must invalidate/bump target ship fit rev"
     );
-    let remaining = sys
-        .view()
+    let view_after_deact = sys.view();
+    let remaining = view_after_deact
         .remote_assistance_for(ship_id)
         .expect("RTC entry still active");
     assert_eq!(remaining.len(), 1);
@@ -775,7 +775,10 @@ async fn wire_module_deactivation_hook_flushes_remote_assistance_on_current_thre
             10_000.0,
         )
         .unwrap_err();
-        assert!(matches!(err.client_error, Some(eve_proto::ClientError::Internal(_))));
+        assert!(matches!(
+            err.client_error.as_deref(),
+            Some(eve_proto::ClientError::Internal(_))
+        ));
     }
     assert_eq!(ctx.current_fit_rev(ship_id), rev_before_err);
     assert!(sys.view().remote_assistance_for(ship_id).is_none());
