@@ -148,7 +148,15 @@ pub(in crate::services) async fn handle_fleet_burst_fallback(
         Err(e) => return Some(Err(e)),
     };
 
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        return Some(Err(BridgeRpcError::ship_not_in_space(
+            active_ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "command_burst",
+            "Active ship ball is not spawned in space",
+        )));
+    };
     let Some((_, booster_ball)) = sys.get_ball_snapshot(active_ship_id).await.ok().flatten() else {
         return Some(Err(BridgeRpcError::ship_not_in_space(
             active_ship_id,

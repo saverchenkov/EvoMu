@@ -95,7 +95,9 @@ pub(crate) async fn handle_mine(
         });
     }
 
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdMineRepeatedly", "Active ship is not spawned in Ballpark"));
+    };
     let Some((_, ship_ball)) = handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
         return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "CmdMineRepeatedly", "Active ship is not spawned in Ballpark"));
     };

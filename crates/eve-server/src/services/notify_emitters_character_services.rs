@@ -1737,7 +1737,9 @@ pub(crate) async fn fast_forward_and_sync_space_clock(
         return;
     }
 
-    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_h) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
     let pre_cs = sys_h.get_combat_state(ship_id).await.ok().flatten();
     let _ = sys_h.fast_forward_clock(ship_id, secs).await;
     let Some(post_cs) = sys_h.get_combat_state(ship_id).await.ok().flatten() else {

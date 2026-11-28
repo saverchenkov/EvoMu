@@ -321,7 +321,15 @@ where
         });
     }
 
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "ActivateDoomsday",
+            format!("Active Titan {ship_id} is not in space in solar system {sys_id}"),
+        ));
+    };
     let all_balls = sys.list_balls().await.unwrap_or_default();
     let Some(titan_ball_initial) = all_balls.iter().find(|b| b.id == ship_id).cloned() else {
         return Err(BridgeRpcError::ship_not_in_space(

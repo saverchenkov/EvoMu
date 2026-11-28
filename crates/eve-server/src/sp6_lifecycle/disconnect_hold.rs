@@ -294,12 +294,16 @@ pub(super) fn finalize_expired_disconnected_ship(
     if !proceed_initial {
         return;
     }
-    let handle = ctx.systems.get_or_spawn(disc.solar_system_id);
-    let final_pos = handle
-        .get_ball_position_sync(disc.ship_id)
+    // If the solar system already evicted before expiry, finalize DB despawn without waking it.
+    let handle_opt = ctx.systems.get_handle(disc.solar_system_id);
+    let final_pos = handle_opt
+        .as_ref()
+        .and_then(|h| h.get_ball_position_sync(disc.ship_id))
         .map(|v| [v.x, v.y, v.z])
         .unwrap_or(disc.last_position);
-    let final_cs = handle.view().combat_state(disc.ship_id).cloned();
+    let final_cs = handle_opt
+        .as_ref()
+        .and_then(|h| h.view().combat_state(disc.ship_id).cloned());
     let (proceed_despawn, prelogoff_session) = pre_despawn_gate(ctx, &disc);
     if !proceed_despawn {
         return;
@@ -310,7 +314,9 @@ pub(super) fn finalize_expired_disconnected_ship(
         disc.solar_system_id,
         disc.ship_id,
     );
-    handle.try_remove_ball(disc.ship_id);
+    if let Some(handle) = handle_opt {
+        handle.try_remove_ball(disc.ship_id);
+    }
     let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
         let Some(d) = snap
             .sp6_lifecycle

@@ -128,7 +128,15 @@ pub(super) async fn handle_loot_all(
         });
     }
 
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "loot_all",
+            "Active ship ball is not present in space",
+        ));
+    };
     let active_ball_id = ctx
         .db
         .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id))

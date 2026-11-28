@@ -139,7 +139,9 @@ pub async fn is_near_in_space_fitting_service(ctx: &ServerContext, sys_id: u32, 
     if providers.is_empty() {
         return false;
     }
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return false;
+    };
     let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await else { return false };
     for (pid, is_depot) in providers {
         let p_pos = if let Ok(Some((_, p_ball))) = sys_handle.get_ball_snapshot(pid).await {

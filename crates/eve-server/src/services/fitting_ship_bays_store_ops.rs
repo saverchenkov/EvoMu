@@ -360,7 +360,15 @@ pub(super) async fn handle_store_vessel(
     let sys_id = session
         .solar_system_id
         .ok_or_else(|| err("NotInSpace", "StoreVessel in space requires solarSystemID"))?;
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            active_ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "ship_bay_access",
+            format!("Host {host_ship_id} or active ship {active_ship_id} is not on grid"),
+        ));
+    };
     let caller_pos = sys
         .get_ball_snapshot(active_ship_id)
         .await

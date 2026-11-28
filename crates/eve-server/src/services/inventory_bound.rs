@@ -198,7 +198,7 @@ pub fn handle(
                     if has_inv && live_ok {
                         let ship_id = session.ship_id.unwrap_or(0);
                         ctx.systems
-                            .get_or_spawn_if_runtime(sys_id)
+                            .get_handle(sys_id)
                             .and_then(|sys_handle| {
                                 let ship_pos = sys_handle.get_ball_position_sync(ship_id)?;
                                 let unit_pos = sys_handle.get_ball_position_sync(item_id)?;
@@ -260,7 +260,7 @@ pub fn handle(
                         })
                         .unwrap_or(item_id);
                     ctx.systems
-                        .get_or_spawn_if_runtime(sys_id)
+                        .get_handle(sys_id)
                         .and_then(|sys_handle| {
                             sys_handle
                                 .get_ball_position_sync(caller_ship)
@@ -603,7 +603,7 @@ fn self_inv_item(
                 })
                 .unwrap_or(object_id);
             ctx.systems
-                .get_or_spawn_if_runtime(sys_id)
+                .get_handle(sys_id)
                 .and_then(|sys_handle| {
                     sys_handle
                         .get_ball_position_sync(caller_ship)

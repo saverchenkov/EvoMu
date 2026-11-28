@@ -1441,23 +1441,25 @@ pub async fn evaluate_effective_signature_radius(
     let tp_sig_mult = (tp_mult > 1.0 + 1e-6).then_some(tp_mult);
     let ext_sig_mult = (bloom_mult > 1.0).then_some(bloom_mult);
 
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
-        if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
-            let cs_mismatch = (cs.tp_sig_multiplier.unwrap_or(1.0) - tp_mult).abs() > 1e-6
-                || (cs.external_sig_multiplier.unwrap_or(1.0) - bloom_mult).abs() > 1e-6
-                || cs
-                    .base_signature_radius
-                    .is_some_and(|b| (b - unbloomed_sig).abs() > 1e-3);
-            if (ball.radius - effective_sig).abs() > 1e-3 || cs_mismatch {
-                let _ = sys_handle
-                    .modify_combat_state(ship_id, move |live_cs| {
-                        live_cs.base_signature_radius = Some(unbloomed_sig);
-                        live_cs.tp_sig_multiplier = tp_sig_mult;
-                        live_cs.external_sig_multiplier = ext_sig_mult;
-                        live_cs.signature_radius = effective_sig;
-                    })
-                    .await;
+    // Sync ballpark signature radius only if the solar system actor is currently loaded.
+    if let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) {
+        if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+            if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
+                let cs_mismatch = (cs.tp_sig_multiplier.unwrap_or(1.0) - tp_mult).abs() > 1e-6
+                    || (cs.external_sig_multiplier.unwrap_or(1.0) - bloom_mult).abs() > 1e-6
+                    || cs
+                        .base_signature_radius
+                        .is_some_and(|b| (b - unbloomed_sig).abs() > 1e-3);
+                if (ball.radius - effective_sig).abs() > 1e-3 || cs_mismatch {
+                    let _ = sys_handle
+                        .modify_combat_state(ship_id, move |live_cs| {
+                            live_cs.base_signature_radius = Some(unbloomed_sig);
+                            live_cs.tp_sig_multiplier = tp_sig_mult;
+                            live_cs.external_sig_multiplier = ext_sig_mult;
+                            live_cs.signature_radius = effective_sig;
+                        })
+                        .await;
+                }
             }
         }
     }
@@ -1487,7 +1489,7 @@ pub async fn step_passive_shield_recharge(
     recharge_time_s: f64,
     dt: f64,
 ) -> Option<(f64, f64)> {
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let sys_handle = ctx.systems.get_handle(solar_system_id)?;
     let mut cs = sys_handle.get_combat_state(ball_id).await.ok().flatten()?;
     if cs.max_shield_hp <= 0.0 {
         return None;

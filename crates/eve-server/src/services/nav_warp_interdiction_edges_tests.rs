@@ -848,3 +848,469 @@ async fn use_warp_vector_gate_cloak_vs_covert_cloak_rollback_none_and_agency_war
         .await;
     assert!(cs_after_cov.is_cloaked);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn docked_safe_and_evicted_handlers_keep_cold_system_cold() {
+    use crate::services::inventory_fitting::fitting_containers_ships_ops::handle_clear_charges;
+    use crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles;
+    use crate::services::sov_services::emit_sovereignty_changed;
+    use crate::sp6_lifecycle::{on_advance_secs, DisconnectedShipEntry};
+    use crate::system_actor::SystemLifecycleState;
+    use std::collections::HashMap;
+
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let cold_sys = 30_000_142_u32;
+    let station_id = 60_003_760_i64;
+    let char_id = 90_542_101_i64;
+    let ship_id = 1_000_542_101_i64;
+    let hi_mod_id = 1_000_542_102_i64;
+    let charge_id = 1_000_542_103_i64;
+    let offline_mod_id = 1_000_542_104_i64;
+    let disc_char_id = 90_542_102_i64;
+    let disc_ship_id = 1_000_542_105_i64;
+    let uid = char_id as u64;
+
+    // Pick a real lightweight high-slot module, small charge, and lightweight med-slot online-able module from SDE.
+    let hi_mod_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| {
+            t.published
+                && t.category_id == 7
+                && t.effect_ids.contains(&12)
+                && t.effect_ids.contains(&16)
+                && t.default_attributes.get(&50).copied().unwrap_or(0.0) <= 5.0
+                && t.default_attributes.get(&30).copied().unwrap_or(0.0) <= 5.0
+                && !t.default_attributes.contains_key(&1298)
+                && !t.default_attributes.contains_key(&1302)
+        })
+        .map(|t| t.type_id)
+        .expect("lightweight high-slot module in SDE");
+    let charge_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.published && t.category_id == 8 && t.volume > 0.0 && t.volume <= 0.1)
+        .map(|t| t.type_id)
+        .expect("small charge in SDE");
+    let med_mod_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| {
+            t.published
+                && t.category_id == 7
+                && t.effect_ids.contains(&13)
+                && t.effect_ids.contains(&16)
+                && t.default_attributes.get(&50).copied().unwrap_or(0.0) <= 5.0
+                && t.default_attributes.get(&30).copied().unwrap_or(0.0) <= 5.0
+                && !t.default_attributes.contains_key(&1298)
+                && !t.default_attributes.contains_key(&1302)
+        })
+        .map(|t| t.type_id)
+        .expect("lightweight med-slot module in SDE");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(
+            format!("cold_dock_{uid}"),
+            AccountRecord {
+                user_id: uid,
+                username: format!("cold_dock_{uid}"),
+                password_token: "pw".into(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        let mut ch = make_char(char_id, "ColdDockedPilot", cold_sys, ship_id);
+        ch.station_id = Some(station_id);
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            hi_mod_id,
+            InventoryItemRecord {
+                item_id: hi_mod_id,
+                type_id: hi_mod_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            charge_id,
+            InventoryItemRecord {
+                item_id: charge_id,
+                type_id: charge_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            offline_mod_id,
+            InventoryItemRecord {
+                item_id: offline_mod_id,
+                type_id: med_mod_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(offline_mod_id, false);
+
+        // Offline character with an expired disconnect hold in the same cold solar system.
+        let disc_ch = make_char(disc_char_id, "ColdDiscPilot", cold_sys, disc_ship_id);
+        snap.characters.insert(disc_char_id, disc_ch);
+        snap.items.insert(
+            disc_ship_id,
+            InventoryItemRecord {
+                item_id: disc_ship_id,
+                type_id: 587,
+                owner_id: disc_char_id,
+                location_id: i64::from(cold_sys),
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.sp6_lifecycle.disconnected_ships.insert(
+            disc_char_id,
+            DisconnectedShipEntry {
+                char_id: disc_char_id,
+                ship_id: disc_ship_id,
+                ship_type_id: 587,
+                solar_system_id: cold_sys,
+                disconnected_at_unix: now.saturating_sub(120),
+                remove_at_unix: now.saturating_sub(10),
+                emergency_warp_dest: None,
+                last_position: [123.0, 456.0, 789.0],
+                last_velocity: [0.0, 0.0, 0.0],
+                removed_from_space: false,
+                pre_warp_position: None,
+            },
+        );
+    });
+    ctx.db
+        .acquire_online_lock(uid, uid + 1000, Some(char_id), true, now)
+        .unwrap();
+
+    let mut docked_sess = auth_session(uid, char_id, 98_000_001, cold_sys);
+    docked_sess.station_id = Some(station_id);
+    docked_sess.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+
+    // 1. handle_get_session_change_timer while docked
+    let timer_res = handle_get_session_change_timer(&ctx, &mut docked_sess)
+        .await
+        .expect("docked GetSessionChangeTimer must succeed");
+    assert_eq!(timer_res.dict_get("active"), Some(&PyRep::Bool(false)));
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+
+    // 2. handle_set_session_check while docked
+    let check_res = handle_set_session_check(&ctx, &mut docked_sess, &[PyRep::String("dock".into())])
+        .await
+        .expect("docked SetSessionCheck must succeed");
+    assert_eq!(
+        check_res.dict_get("sessionChangeTimerSeconds"),
+        Some(&PyRep::Integer(10))
+    );
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+
+    // 3. handle_clear_charges while docked unloads charges to cargo without waking system
+    let clr_res = handle_clear_charges(&ctx, &docked_sess, None, &[PyRep::Integer(ship_id)])
+        .await
+        .expect("docked ClearCharges must succeed");
+    assert_eq!(clr_res, PyRep::None);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items[&charge_id].flag),
+        InventoryFlag::Cargo
+    );
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+
+    // 4. Docked Activate(moduleID, "online") brings offline module online without waking system
+    let online_res = handle_module_cycles(
+        &ctx,
+        &mut docked_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(offline_mod_id), PyRep::String("online".into())],
+        &kw,
+    )
+    .await
+    .expect("dogmaIM.Activate(online) handled")
+    .expect("docked module online must succeed");
+    assert!(!matches!(online_res, PyRep::None));
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.module_online_states.get(&offline_mod_id).copied()),
+        Some(Some(true)).flatten()
+    );
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+
+    // 5. emit_sovereignty_changed emits cluster notification while keeping cold system cold
+    emit_sovereignty_changed(&ctx, cold_sys, Some(99_000_001), None);
+    let has_sov_notif = ctx
+        .pending_notifications
+        .read()
+        .unwrap()
+        .get(&char_id)
+        .is_some_and(|list| list.iter().any(|n| n.event == "OnSovereigntyChanged"));
+    assert!(has_sov_notif, "OnSovereigntyChanged must still queue for online pilots");
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+
+    // 6. disconnect_hold finalizes an expired disconnected ship when system is already cold
+    on_advance_secs(&ctx, now, 0);
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.sp6_lifecycle.disconnected_ships[&disc_char_id].removed_from_space);
+        assert_eq!(
+            snap.item_positions.get(&disc_ship_id),
+            Some(&[123.0, 456.0, 789.0])
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn in_space_cold_handlers_fail_closed_with_ship_not_in_space_and_preserve_self_compression() {
+    use crate::services::combat_crimewatch::combat_weapons::handle_weapons;
+    use crate::services::combat_crimewatch::combat_wrecks_killmails::handle_wrecks_killmails;
+    use crate::services::mining_advanced::mining_compression::handle_in_space_compression_mgr;
+    use crate::services::space_entity_mining::handle_mine;
+    use crate::system_actor::SystemLifecycleState;
+    use std::collections::HashMap;
+
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let cold_sys = 30_000_144_u32;
+    let char_id = 90_542_201_i64;
+    let ship_id = 1_000_542_201_i64;
+    let weapon_mod_id = 1_000_542_202_i64;
+    let wreck_id = 1_000_542_203_i64;
+    let ore_id = 1_000_542_204_i64;
+    let core_mod_id = 1_000_542_205_i64;
+    let comp_mod_id = 1_000_542_206_i64;
+    let uid = char_id as u64;
+
+    let weapon_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.published && t.category_id == 7 && t.group_id == 55)
+        .map(|t| t.type_id)
+        .expect("projectile turret in SDE");
+    let wreck_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 2 && t.group_id == 186)
+        .map(|t| t.type_id)
+        .expect("wreck type in SDE");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(
+            format!("cold_space_{uid}"),
+            AccountRecord {
+                user_id: uid,
+                username: format!("cold_space_{uid}"),
+                password_token: "pw".into(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        snap.characters
+            .insert(char_id, make_char(char_id, "ColdSpacePilot", cold_sys, ship_id));
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 28352, // Rorqual
+                owner_id: char_id,
+                location_id: i64::from(cold_sys),
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            weapon_mod_id,
+            InventoryItemRecord {
+                item_id: weapon_mod_id,
+                type_id: weapon_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            wreck_id,
+            InventoryItemRecord {
+                item_id: wreck_id,
+                type_id: wreck_tid,
+                owner_id: char_id,
+                location_id: i64::from(cold_sys),
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ore_id,
+            InventoryItemRecord {
+                item_id: ore_id,
+                type_id: 1230, // Veldspar -> Compressed Veldspar (62516)
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedOreHold,
+                quantity: 1_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.db
+        .acquire_online_lock(uid, uid + 1000, Some(char_id), true, now)
+        .unwrap();
+
+    let mut space_sess = auth_session(uid, char_id, 98_000_001, cold_sys);
+    space_sess.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+
+    // 1. CmdMineRepeatedly fails closed with ShipNotInSpace without waking cold_sys
+    let mine_err = handle_mine(&ctx, &space_sess, None, &[PyRep::Integer(99_900_001)])
+        .await
+        .expect_err("CmdMineRepeatedly on cold system must fail closed");
+    assert_eq!(mine_err.code, "ShipNotInSpace");
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+
+    // 2. FireWeapon fails closed with ShipNotInSpace without waking cold_sys
+    let wpn_err = handle_weapons(
+        &ctx,
+        &mut space_sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(weapon_mod_id), PyRep::Integer(99_900_002)],
+        &kw,
+    )
+    .await
+    .expect("FireWeapon handled")
+    .expect_err("FireWeapon on cold system must fail closed");
+    assert_eq!(wpn_err.code, "ShipNotInSpace");
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+
+    // 3. invbroker.LootAll fails closed with ShipNotInSpace without waking cold_sys
+    let loot_err = handle_wrecks_killmails(
+        &ctx,
+        &mut space_sess,
+        "invbroker",
+        "LootAll",
+        &[PyRep::Integer(wreck_id)],
+        &kw,
+    )
+    .await
+    .expect("invbroker.LootAll handled")
+    .expect_err("LootAll on cold system must fail closed");
+    assert_eq!(loot_err.code, "ShipNotInSpace");
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+
+    // 4. mining_compression: fails closed without waking when no compressor is active
+    let no_comp_err = handle_in_space_compression_mgr(&ctx, &mut space_sess, &[PyRep::Integer(ore_id)])
+        .await
+        .expect_err("compression without active compressor must fail");
+    assert_eq!(no_comp_err.code, "NoActiveCompressorInRange");
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+
+    // 5. mining_compression: self-compression succeeds without waking cold_sys
+    let core_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 515)
+        .map(|t| t.type_id)
+        .expect("Industrial Core in SDE");
+    let comp_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| {
+            t.group_id == 4174
+                && t.default_attributes
+                    .get(&3255)
+                    .and_then(|id| ctx.sde.type_lists.get(&(id.round() as u32)))
+                    .zip(ctx.sde.types.get(&1230))
+                    .is_some_and(|(tl, ore)| tl.contains(ore))
+        })
+        .map(|t| t.type_id)
+        .expect("Ore Compressor matching Veldspar in SDE");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            core_mod_id,
+            InventoryItemRecord {
+                item_id: core_mod_id,
+                type_id: core_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            comp_mod_id,
+            InventoryItemRecord {
+                item_id: comp_mod_id,
+                type_id: comp_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot2,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(core_mod_id);
+        snap.module_active_states.insert(comp_mod_id);
+    });
+    let self_comp_res = handle_in_space_compression_mgr(&ctx, &mut space_sess, &[PyRep::Integer(ore_id)])
+        .await
+        .expect("self-compression must succeed without waking cold system");
+    assert_eq!(
+        self_comp_res.dict_get("compressedTypeID").and_then(PyRep::as_i64),
+        ctx.sde.compressible_types.get(&1230).map(|&id| i64::from(id))
+    );
+    assert_eq!(ctx.systems.system_lifecycle_state(cold_sys), SystemLifecycleState::Cold);
+}
