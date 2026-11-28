@@ -62,6 +62,9 @@ async fn pilot_drone_capacity_and_salvager_tractor_ownership_branches() {
     let salvager_type = make_fighter_type(65002, 1122, 7, 5.0, vec![(54, 5_000.0)]);
     let kw = HashMap::new();
 
+    // Spawn the solar system before running in-space tractor/salvager target checks (`#1542` cold fail-closed).
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
     // TargetNotInSpace when wreck ball is absent
     assert_eq!(
         activate_salvager_or_tractor_module(
@@ -84,7 +87,6 @@ async fn pilot_drone_capacity_and_salvager_tractor_ownership_branches() {
     );
 
     // Spawn wreck at 25 km (out of 20 km tractor range and 5 km salvager range)
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let wreck_id = 910_500_i64;
     let wreck_ball = make_ball(wreck_id, 26_561, DVec3::new(25_000.0, 0.0, 0.0), DVec3::ZERO);
     let _ = sys_handle
@@ -539,17 +541,24 @@ async fn cold_system_docked_cmd_engage_and_inspace_drone_commands_fail_closed_wi
         Some(eve_proto::UserErrorKey::CantShipNotPresent)
     );
 
-    // 3. Cold-safe no-op/cleanup helpers stay Cold while still pruning DB decay records.
-    let abandon_res = handle_npcs_drones(&ctx, &mut session, "entity", "CmdAbandonDrone", &[], &kw)
+    // 3. RPC entity.CmdAbandonDrone / CmdReconnectToDrones fail closed while direct sp6_lifecycle helpers no-op cleanly.
+    for method in ["CmdAbandonDrone", "CmdReconnectToDrones"] {
+        let entity_err = handle_npcs_drones(&ctx, &mut session, "entity", method, &[], &kw)
+            .await
+            .expect("handled")
+            .expect_err(&format!("cold-system entity.{method} must fail closed"));
+        assert_eq!(entity_err.code, "ShipNotInSpace");
+    }
+
+    let abandon_res = crate::sp6_lifecycle::handle_cmd_abandon_drone(&ctx, &mut session, &[], &kw)
         .await
-        .expect("handled")
-        .expect("cold CmdAbandonDrone returns empty dict");
+        .expect("cold handle_cmd_abandon_drone returns empty dict");
     assert_eq!(abandon_res, PyRep::Dict(Vec::new()));
 
-    let reconnect_res = handle_npcs_drones(&ctx, &mut session, "entity", "CmdReconnectToDrones", &[], &kw)
-        .await
-        .expect("handled")
-        .expect("cold CmdReconnectToDrones returns empty dict");
+    let reconnect_res =
+        crate::sp6_lifecycle::handle_cmd_reconnect_to_drones(&ctx, &mut session, &[], &kw)
+            .await
+            .expect("cold handle_cmd_reconnect_to_drones returns empty dict");
     assert_eq!(reconnect_res, PyRep::Dict(Vec::new()));
 
     assert_eq!(
