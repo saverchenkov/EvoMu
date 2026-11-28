@@ -3115,7 +3115,7 @@ async fn poisoned_ballpark_and_actor_state_do_not_degrade_tidi_or_view_publicati
     .expect("add module cycle");
 
     // Deliberately poison both locks externally so `is_poisoned() == true` directly exercises
-    // `celestials.rs` sites `:205`, `:378`, and `:1074`.
+    // `BallparkWriteGuard::drop` (`celestials.rs`), while `set_tidi_factor_raw` updates the view lock-free.
     let sys_poison = sys.clone();
     let _ = std::thread::spawn(move || {
         let mut bp = sys_poison.ballpark.write().unwrap();
@@ -3133,17 +3133,35 @@ async fn poisoned_ballpark_and_actor_state_do_not_degrade_tidi_or_view_publicati
     assert!(sys.ballpark.is_poisoned());
     assert!(sys.actor_state.is_poisoned());
 
-    // `set_tidi_factor_raw` (`celestials.rs:1074`) + `publish_view_from` (`celestials.rs:378`)
-    // must recover poisoned guards instead of skipping republish or dropping actor_state.
+    // `set_tidi_factor_raw` updates `view().tidi_factor` lock-free without acquiring poisoned
+    // `ballpark` or `actor_state`, preserving the last published position and active modules.
     let _ = sys.set_tidi_factor_raw(0.25);
     let view_tidi = sys.view();
     assert!((view_tidi.tidi_factor - 0.25).abs() < 1e-12);
     assert_eq!(
         view_tidi.ball_position(ship_id),
-        Some(DVec3::new(7_777.0, 0.0, 0.0))
+        Some(DVec3::new(4_000.0, 0.0, 0.0))
     );
     assert!(view_tidi.has_active_module(ship_id));
-    assert!((view_tidi.sim_elapsed_secs - 42.0).abs() < 1e-12);
+    assert!((view_tidi.sim_elapsed_secs - 0.0).abs() < 1e-12);
+
+    // Even while another thread holds `sys.ballpark.write()`, `set_tidi_factor_raw` updates
+    // `view().tidi_factor` immediately without locking `ballpark` or `actor_state`.
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (rel_tx, rel_rx) = std::sync::mpsc::channel();
+    let sys_hold = sys.clone();
+    let holder = std::thread::spawn(move || {
+        let _bp = sys_hold.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        held_tx.send(()).unwrap();
+        rel_rx.recv().unwrap();
+    });
+    held_rx.recv().unwrap();
+    let _ = sys.set_tidi_factor_raw(0.5);
+    assert!((sys.view().tidi_factor - 0.5).abs() < 1e-12);
+    let _ = sys.set_tidi_factor_raw(0.25);
+    assert!((sys.view().tidi_factor - 0.25).abs() < 1e-12);
+    rel_tx.send(()).unwrap();
+    holder.join().unwrap();
 
     // Clean `BallparkWriteGuard` drop (`celestials.rs:205`) must likewise recover poisoned `actor_state`.
     {
@@ -3157,25 +3175,216 @@ async fn poisoned_ballpark_and_actor_state_do_not_degrade_tidi_or_view_publicati
     );
     assert!(view_drop.has_active_module(ship_id));
     assert!((view_drop.sim_elapsed_secs - 42.0).abs() < 1e-12);
+    assert!((view_drop.tidi_factor - 0.25).abs() < 1e-12);
 }
 
-#[test]
-fn non_test_eve_server_has_no_poison_dropping_ballpark_or_actor_state_lock_patterns() {
-    fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_rs_files(&path, out);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                out.push(path);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_tidi_factor_raw_updates_view_without_locking() {
+    let reg = SystemRegistry::new();
+    let sys = reg.get_or_spawn(30_000_142);
+    let ship_id: BallId = 840_000_201;
+    sys.spawn_ball_with_combat(
+        make_actor_ball(ship_id, 587, DVec3::new(1_234.0, 0.0, 0.0)),
+        CombatState::default(),
+    )
+    .await
+    .expect("spawn ball");
+
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (rel_tx, rel_rx) = std::sync::mpsc::channel();
+    let sys_hold = sys.clone();
+    let holder = std::thread::spawn(move || {
+        let _bp = sys_hold.ballpark.write().unwrap();
+        let _st = sys_hold.actor_state.write().unwrap();
+        held_tx.send(()).unwrap();
+        rel_rx.recv().unwrap();
+    });
+    held_rx.recv().unwrap();
+
+    let prev1 = sys.set_tidi_factor_raw(0.35);
+    assert!((prev1 - 1.0).abs() < 1e-12);
+    let v1 = sys.view();
+    assert!((v1.tidi_factor - 0.35).abs() < 1e-12);
+    assert_eq!(v1.ball_position(ship_id), Some(DVec3::new(1_234.0, 0.0, 0.0)));
+
+    let prev2 = sys.set_tidi_factor_raw(0.20);
+    assert!((prev2 - 0.35).abs() < 1e-12);
+    assert!((sys.view().tidi_factor - 0.20).abs() < 1e-12);
+
+    rel_tx.send(()).unwrap();
+    holder.join().unwrap();
+    assert!((sys.view().tidi_factor - 0.20).abs() < 1e-12);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_system_and_late_stopping_cooldowns_persist_via_actor_without_external_locks() {
+    use eve_db::ServerClock;
+    let (jita, amarr) = (30_000_142_u32, 30_002_187_u32);
+    let clock = Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_750_500_000));
+    let repo = eve_db::WorldRepository::new_empty();
+    repo.set_clock(clock.clone());
+    repo.with_mut_snapshot(|snap| {
+        let nid = -(7_500_000_000_000_i64.saturating_add(amarr as i64));
+        snap.owner_notes.insert(
+            nid,
+            eve_db::OwnerNoteRecord {
+                note_id: nid,
+                character_id: 0,
+                item_id: nid,
+                label: "tidi".to_string(),
+                note: "0.5".to_string(),
+                timestamp_unix: 100,
+            },
+        );
+    });
+    let db = Arc::new(repo);
+    let sde = Arc::new(SdeRegistry::with_canonical_seed());
+    let reg = Arc::new(SystemRegistry::with_sde_and_db(sde, Arc::clone(&db)));
+
+    // 1. Graceful `stop_system` flushes rebased TiDi cooldowns inside the actor task before
+    //    `cmd_tx.closed()`, and `finish_stopping_slot` merges late `Stopping` transitions.
+    let h = reg.get_or_spawn(jita);
+    let _ = h.set_tidi_factor_raw(0.25);
+    let k1 = (550_001_i64, 650_001_i64, 11_370_u32);
+    let k_late = (550_001_i64, 650_002_i64, 11_370_u32);
+    h.record_module_cooldown(
+        k1.0,
+        k1.1,
+        k1.2,
+        clock.now_unix_secs() as f64,
+        30.0,
+        0.25,
+        true,
+    )
+    .await
+    .unwrap();
+    for _ in 0..20 {
+        let _ = h.step_manual(1.0).await.unwrap();
+    }
+    assert!((h.sim_elapsed_secs() - 5.0).abs() < 1e-6);
+    clock.advance_secs(40);
+    drop(h);
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let entered_tx = std::sync::Mutex::new(Some(entered_tx));
+    let release_rx = std::sync::Mutex::new(Some(release_rx));
+    reg.set_before_stop_finish_hook_for_test(Some(Arc::new(move |sid, _| {
+        if sid == jita {
+            if let Some(tx) = entered_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            if let Some(rx) = release_rx.lock().unwrap().take() {
+                let _ = rx.recv();
+            }
+        }
+    })));
+
+    let reg_stop = Arc::clone(&reg);
+    let stop_task = tokio::spawn(async move { reg_stop.stop_system(jita).await });
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+    reg.set_before_stop_finish_hook_for_test(None);
+    assert!(!stop_task.is_finished());
+
+    // Actor-owned shutdown flush already committed rebased `k1` before `finish_stopping_slot`.
+    let mid_rows = load_cold_system_module_cooldowns_from_db(&db, jita);
+    let mid_k1 = mid_rows.get(&k1).copied().expect("actor flush persisted k1");
+    assert!((mid_k1.delay_s - 25.0).abs() < 1e-6 && mid_k1.recorded_sys_sim_s.abs() < 1e-6);
+
+    // Queue a late `Stopping` transition before `finish_stopping_slot` finishes.
+    reg.record_cold_system_module_cooldown_in_db(
+        &db,
+        jita,
+        k_late.0,
+        k_late.1,
+        k_late.2,
+        eve_db::ServerClock::now_unix_secs(clock.as_ref()) as f64,
+        18.0,
+        0.25,
+        true,
+    );
+    release_tx.send(()).unwrap();
+    assert!(stop_task.await.unwrap());
+
+    let after_rows = load_cold_system_module_cooldowns_from_db(&db, jita);
+    assert!((after_rows[&k1].delay_s - 25.0).abs() < 1e-6);
+    assert!((after_rows[&k_late].delay_s - 18.0).abs() < 1e-6);
+
+    // 2. Dead-actor exit (`CurrentThread` runtime drop -> `rt_alive_rx` -> actor shutdown guard)
+    //    persists cooldowns using the DB TiDi owner-note fallback and `try_reclaim_dead_live_slot_to_cold`
+    //    reclaims without external `actor_state` lock acquisition.
+    let reg_ct = Arc::clone(&reg);
+    let clock_ct = Arc::clone(&clock);
+    let k2 = (550_002_i64, 650_003_i64, 11_370_u32);
+    let ct_cmd_tx = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let h_amarr = reg_ct.get_or_spawn(amarr);
+            h_amarr
+                .record_module_cooldown(
+                    k2.0,
+                    k2.1,
+                    k2.2,
+                    eve_db::ServerClock::now_unix_secs(clock_ct.as_ref()) as f64,
+                    30.0,
+                    0.5,
+                    true,
+                )
+                .await
+                .unwrap();
+            for _ in 0..10 {
+                let _ = h_amarr.step_manual(1.0).await.unwrap();
+            }
+            assert!((h_amarr.sim_elapsed_secs() - 5.0).abs() < 1e-6);
+            h_amarr.cmd_tx.clone()
+        })
+    })
+    .join()
+    .unwrap();
+    for _ in 0..100 {
+        if ct_cmd_tx.is_closed() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(ct_cmd_tx.is_closed());
+    assert!(reg.try_reclaim_dead_live_slot_to_cold(amarr));
+    let amarr_rows = load_cold_system_module_cooldowns_from_db(&db, amarr);
+    let amarr_k2 = amarr_rows.get(&k2).copied().expect("dead actor flush persisted k2");
+    assert!((amarr_k2.delay_s - 25.0).abs() < 1e-6 && amarr_k2.recorded_sys_sim_s.abs() < 1e-6);
+
+    // 3. Verify `module_cooldowns.rs` and `celestials.rs` contain zero external `ballpark`/`actor_state` locks.
+    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/system_actor");
+    for file in ["module_cooldowns.rs", "celestials.rs"] {
+        let content = std::fs::read_to_string(src_dir.join(file)).unwrap();
+        let prod = strip_comments_strings_and_cfg_test(&content);
+        let compact: String = prod.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        for target in ["ballpark", "actor_state"] {
+            for meth in ["read(", "read_unranked(", "write(", "write_untracked(", "try_read(", "try_write(", "try_write_unranked(", "lock("] {
+                let needle = format!("{target}.{meth}");
+                let mut pos = 0usize;
+                while let Some(off) = compact[pos..].find(&needle) {
+                    let idx = pos + off;
+                    let boundary_ok = idx == 0
+                        || !(compact.as_bytes()[idx - 1].is_ascii_alphanumeric()
+                            || compact.as_bytes()[idx - 1] == b'_');
+                    assert!(
+                        !boundary_ok,
+                        "{file} must not contain external lock `{needle}`"
+                    );
+                    pos = idx + needle.len();
+                }
             }
         }
     }
+}
 
-    fn strip_comments_strings_and_cfg_test(src: &str) -> String {
+fn strip_comments_strings_and_cfg_test(src: &str) -> String {
         let bytes = src.as_bytes();
         let n = bytes.len();
         let mut no_comments_or_strings = vec![b' '; n];
@@ -3378,6 +3587,22 @@ fn non_test_eve_server_has_no_poison_dropping_ballpark_or_actor_state_lock_patte
             }
         }
         String::from_utf8_lossy(&out).into_owned()
+    }
+
+#[test]
+fn non_test_eve_server_has_no_poison_dropping_ballpark_or_actor_state_lock_patterns() {
+    fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
     }
 
     fn find_poison_dropping_lock_violations(rel_path: &str, prod_src: &str) -> Vec<String> {

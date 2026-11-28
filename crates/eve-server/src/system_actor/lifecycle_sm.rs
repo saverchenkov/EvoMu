@@ -67,6 +67,8 @@ pub(crate) struct PreparedSystemActivation {
     pub(in crate::system_actor) ballpark_shared: Arc<BallparkHandle>,
     pub(in crate::system_actor) actor_state_shared:
         Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
+    pub(in crate::system_actor) fighters_needs_sqlite_hydration: bool,
+    pub(in crate::system_actor) fighters_dirty_stamp: Arc<std::sync::atomic::AtomicU64>,
     pub(in crate::system_actor) initial_post_unlock_ops: super::post_unlock::PostUnlockOps,
     pub(in crate::system_actor) staged_claims: StagedSeedClaims,
 }
@@ -1148,12 +1150,9 @@ impl SystemRegistry {
         gate: &Arc<LifecycleGate>,
     ) {
         self.clear_db_ballpark_for_handle(solar_system_id, &handle);
-        let (tidi, actor_state, post_unlock) =
-            (handle.tidi_factor(), Arc::clone(&handle.actor_state), Arc::clone(&handle.post_unlock_actions));
+        let post_unlock = Arc::clone(&handle.post_unlock_actions);
         drop(handle);
         super::flush_post_unlock_actions(&post_unlock);
-        self.flush_stopped_actor_module_cooldowns(solar_system_id, &actor_state, tidi);
-        drop(actor_state);
         self.finish_stopping_slot(solar_system_id, generation, gate, "reclaim_dead_live_to_cold");
     }
 
@@ -1178,27 +1177,26 @@ impl SystemRegistry {
             .expect("stop task handle initialized")
             .cmd_tx
             .clone();
+        let (reg_tidi, reg_hist) = self.resolve_effective_tidi_mode(solar_system_id, true);
+        self.cooldown_persist_gate(solar_system_id)
+            .record_shutdown_tidi_mode(reg_tidi, reg_hist);
         let (tx, rx) = tokio::sync::oneshot::channel();
         let sent = cmd_tx
             .send(SystemCommand::ShutdownActor { reply: tx })
             .await
             .is_ok();
-        let stopped_actor_info = cleanup.handle.take().map(|handle| {
+        let post_unlock_actions = cleanup.handle.take().map(|handle| {
             self.clear_db_ballpark_for_handle(solar_system_id, &handle);
-            let tidi_factor = handle.tidi_factor();
-            let actor_state = Arc::clone(&handle.actor_state);
             let post_unlock_actions = Arc::clone(&handle.post_unlock_actions);
             drop(handle);
-            (tidi_factor, actor_state, post_unlock_actions)
+            post_unlock_actions
         });
         if sent {
             let _ = rx.await;
         }
         cmd_tx.closed().await;
-        if let Some((tidi_factor, actor_state, post_unlock_actions)) = stopped_actor_info {
+        if let Some(post_unlock_actions) = post_unlock_actions {
             super::flush_post_unlock_actions(&post_unlock_actions);
-            self.flush_stopped_actor_module_cooldowns(solar_system_id, &actor_state, tidi_factor);
-            drop(actor_state);
         }
         if origin.reclaim_transient() {
             self.reclaim_transient_items_in_db(solar_system_id);
@@ -1544,6 +1542,7 @@ impl SystemRegistry {
             if !cg.pending_transitions.is_empty() {
                 persist_gate.mark_pending_transitions();
             }
+            cg.shutdown_tidi_mode = None;
             cg.phase = CooldownGatePhase::Loading;
         }
         guard.insert(
@@ -1979,6 +1978,7 @@ impl SystemRegistry {
             if matches_gen {
                 let mut cg = persist_gate.inner.lock().unwrap_or_else(|e| e.into_inner());
                 let pending = persist_gate.take_all_pending_transitions(&mut cg);
+                cg.shutdown_tidi_mode = None;
                 cg.phase = CooldownGatePhase::Cold;
                 let flushed = if !pending.is_empty() {
                     if let Some(ref db) = self.db {

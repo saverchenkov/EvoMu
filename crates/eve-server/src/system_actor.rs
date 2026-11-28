@@ -1751,6 +1751,8 @@ impl SystemRegistry {
             Arc::clone(&tidi_factor_bits),
         ));
         ballpark_shared.attach_drone_hydration(initial_actor_state.drone_hydration.clone());
+        let fighters_needs_sqlite_hydration = initial_actor_state.fighters_needs_sqlite_hydration;
+        let fighters_dirty_stamp = Arc::clone(&initial_actor_state.fighters_dirty_stamp);
         let actor_state_shared: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>> =
             Arc::new(RankedRwLock::new(initial_actor_state));
         ballpark_shared.attach_actor_state(&actor_state_shared);
@@ -1774,6 +1776,8 @@ impl SystemRegistry {
             view_rx,
             ballpark_shared,
             actor_state_shared,
+            fighters_needs_sqlite_hydration,
+            fighters_dirty_stamp,
             initial_post_unlock_ops,
             staged_claims,
         })
@@ -1789,7 +1793,9 @@ impl SystemRegistry {
             committed_warp_balls, warp_stopped_at, active_module_ships, hibernated,
             hibernated_since_unix, idle_ticks, dynamic_ball_count, pending_destroyed_balls,
             broadcast_seq_gate_actor, tidi_factor_bits, view_tx, view_rx,
-            ballpark_shared, actor_state_shared, initial_post_unlock_ops, staged_claims: _,
+            ballpark_shared, actor_state_shared,
+            fighters_needs_sqlite_hydration, fighters_dirty_stamp,
+            initial_post_unlock_ops, staged_claims: _,
         } = prepared;
         let (ct_driver, actor_rt_handle, ct_sentinel) = match rt_handle.runtime_flavor() {
             tokio::runtime::RuntimeFlavor::CurrentThread => {
@@ -1936,6 +1942,98 @@ impl SystemRegistry {
             Some((rx, done_tx, exited)) => (Some(rx), ActorExitGuard(Some((done_tx, exited)))),
             None => (None, ActorExitGuard(None)),
         };
+        struct ActorShutdownCooldownInner {
+            solar_system_id: SolarSystemId,
+            actor_state_actor: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>>,
+            tidi_factor_bits_actor: Arc<std::sync::atomic::AtomicU64>,
+            cooldown_persist_gate_actor: Arc<CooldownPersistGate>,
+            db_opt_actor: Option<Arc<eve_db::WorldRepository>>,
+        }
+
+        struct ActorShutdownCooldownGuard(Option<ActorShutdownCooldownInner>);
+
+        impl ActorShutdownCooldownGuard {
+            fn flush_now(&mut self) {
+                let Some(inner) = self.0.take() else {
+                    return;
+                };
+                if inner.solar_system_id == 0
+                    || !module_cooldowns::can_write_sqlite_safely()
+                    || held_lock_ranks().iter().any(|&r| r >= RANK_ACTOR_STATE)
+                {
+                    return;
+                }
+                let captured_tidi =
+                    celestials::clamp_tidi_factor_bits(&inner.tidi_factor_bits_actor);
+                let (reg_tidi, reg_has_tidi_history) = inner
+                    .cooldown_persist_gate_actor
+                    .take_shutdown_tidi_mode()
+                    .unwrap_or_else(|| {
+                        let db_tidi = if !held_lock_ranks()
+                            .iter()
+                            .any(|&r| r >= eve_db::lock_rank::RANK_WORLD_INNER)
+                        {
+                            inner
+                                .db_opt_actor
+                                .as_ref()
+                                .and_then(|db| {
+                                    db.with_snapshot(|snap| {
+                                        let nid = -(7_500_000_000_000_i64
+                                            .saturating_add(inner.solar_system_id as i64));
+                                        snap.owner_notes
+                                            .get(&nid)
+                                            .and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
+                                    })
+                                })
+                                .filter(|v| v.is_finite())
+                                .unwrap_or(1.0)
+                                .clamp(0.10, 1.0)
+                        } else {
+                            1.0
+                        };
+                        (db_tidi, db_tidi < 0.999_999)
+                    });
+                let eff_tidi = if captured_tidi.is_finite() && captured_tidi < 0.999_999 {
+                    captured_tidi.clamp(0.10, 1.0)
+                } else {
+                    reg_tidi
+                };
+                let payload_opt = {
+                    let mut st = inner
+                        .actor_state_actor
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
+                    module_cooldowns::take_stopped_cooldown_persist_payload_in_state(
+                        &mut st,
+                        inner.solar_system_id,
+                        &inner.cooldown_persist_gate_actor,
+                        eff_tidi,
+                        reg_has_tidi_history,
+                    )
+                };
+                if let Some(payload) = payload_opt {
+                    let _ = module_cooldowns::persist_cooldown_payload_with_gate_in_db(
+                        inner.solar_system_id,
+                        &inner.cooldown_persist_gate_actor,
+                        payload,
+                    );
+                }
+            }
+        }
+
+        impl Drop for ActorShutdownCooldownGuard {
+            fn drop(&mut self) {
+                self.flush_now();
+            }
+        }
+
+        let shutdown_cooldown_guard = ActorShutdownCooldownGuard(Some(ActorShutdownCooldownInner {
+            solar_system_id,
+            actor_state_actor: Arc::clone(&actor_state_actor),
+            tidi_factor_bits_actor: Arc::clone(&tidi_factor_bits_actor),
+            cooldown_persist_gate_actor: Arc::clone(&cooldown_persist_gate_actor),
+            db_opt_actor: db_opt_actor.clone(),
+        }));
         let drone_hydration_actor = ballpark_shared.drone_hydration_shared().cloned().unwrap_or_default();
         actor_rt_handle.spawn(async move {
             let _actor_exit_guard = actor_exit_guard;
@@ -1943,6 +2041,7 @@ impl SystemRegistry {
             let mut post_unlock_tx_opt = post_unlock_shutdown;
             let mut shutdown_reply = ShutdownReplyGuard(None);
             let mut cmd_rx = cmd_rx;
+            let mut shutdown_cooldown_guard = shutdown_cooldown_guard;
             let (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor) =
                 (ballpark_actor, actor_state_actor, view_tx_actor, ball_positions_actor, scrambled_balls_actor, warp_stopped_at_actor, active_module_ships_actor, pending_destroyed_actor, event_tx_actor);
             let mut last_active_totals: HashMap<BallId, (Option<i32>, Option<i32>)> = HashMap::new();
@@ -3124,6 +3223,7 @@ impl SystemRegistry {
                 );
             }
             flush_actor_active_drones(true);
+            shutdown_cooldown_guard.flush_now();
             let leftover_post_unlock_actions = {
                 let mut actions = post_unlock_actions_actor.lock().unwrap_or_else(|e| e.into_inner());
                 std::mem::take(&mut *actions)
@@ -3134,12 +3234,10 @@ impl SystemRegistry {
             drop((cmd_rx, shutdown_reply));
         });
 
-        let (fighters_needs_hydration, dirty_stamp) = {
-            let st = actor_state_shared.read().unwrap_or_else(|e| e.into_inner());
-            (Arc::new(std::sync::atomic::AtomicBool::new(st.fighters_needs_sqlite_hydration)), Arc::clone(&st.fighters_dirty_stamp))
-        };
+        let fighters_needs_hydration =
+            Arc::new(std::sync::atomic::AtomicBool::new(fighters_needs_sqlite_hydration));
         let fighter_ctx = Arc::new(fighters_persistence::FighterHandleCtx {
-            dirty_stamp, persist: Arc::clone(&self.fighter_persist), db_opt: self.db.clone(), sde_opt: self.sde.clone(),
+            dirty_stamp: fighters_dirty_stamp, persist: Arc::clone(&self.fighter_persist), db_opt: self.db.clone(), sde_opt: self.sde.clone(),
         });
         let handle = SystemHandle {
             solar_system_id, cmd_tx,

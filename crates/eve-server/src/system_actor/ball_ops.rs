@@ -210,7 +210,7 @@ fn run_direct_ball_op_on_current_thread_inner<R>(
                 &ballpark,
                 handle.event_tx.receiver_count(),
             );
-            handle.publish_view_from(&ballpark, Some(&actor_st));
+            handle.publish_view_from(&ballpark, &actor_st);
         }
         let ticket = super::post_unlock::enqueue_tick_post_unlock_or_barrier_under_locks(
             handle,
