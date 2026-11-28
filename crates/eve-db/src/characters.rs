@@ -5,6 +5,29 @@ use crate::types::*;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use std::collections::{HashMap, HashSet};
 
+/// Pre-transition DB snapshot used to atomically restore character, dock, ship, active-module,
+/// and module-damage state if a space transition fails after DB commit.
+#[derive(Debug, Clone)]
+pub struct SpaceTransitionDbRollbackSnapshot {
+    pub effective_ship_id: i64,
+    pub prev_solar_system_id: SolarSystemId,
+    pub prev_constellation_id: u32,
+    pub prev_region_id: u32,
+    pub prev_station_id: Option<i64>,
+    pub prev_structure_id: Option<i64>,
+    pub prev_ship_location: Option<(i64, InventoryFlag)>,
+    pub prev_ship_combat_hp: Option<PersistedCombatHp>,
+    pub prev_meta_combat_hp: Option<PersistedCombatHp>,
+    pub prev_item_position: Option<[f64; 3]>,
+    pub prev_ship_armor_damage: Option<f64>,
+    pub prev_ship_hull_damage: Option<f64>,
+    pub prev_module_damage_attrs: Vec<(i64, Option<f64>)>,
+    pub prev_active_mods: Vec<i64>,
+    pub prev_active_charges: Vec<(i64, u32)>,
+    pub prev_ship_fit_inputs: Option<ShipFitInputsRecord>,
+    pub cleared_overloads: bool,
+}
+
 impl WorldRepository {
     pub fn get_characters_for_user(&self, user_id: u64) -> Vec<CharacterRecord> {
         let guard = self.read_state();
@@ -717,6 +740,290 @@ impl WorldRepository {
                 ship.version += 1;
             }
             Ok(guard.characters[&character_id].clone())
+        })
+    }
+
+    /// Captures pre-transition character, dock, ship, and module-damage attributes before
+    /// `set_character_solar_system` mutates snapshot state.
+    pub fn capture_space_transition_rollback(
+        &self,
+        character_id: i64,
+        fallback_ship_id: i64,
+        fallback_old_sys_id: SolarSystemId,
+        sde: &SdeRegistry,
+    ) -> SpaceTransitionDbRollbackSnapshot {
+        self.with_snapshot(|snap| {
+            let ch = snap.characters.get(&character_id);
+            let prev_sys = ch
+                .map(|c| c.solar_system_id)
+                .filter(|&s| s > 0)
+                .unwrap_or(fallback_old_sys_id);
+            let (fallback_const, fallback_reg) = sde
+                .solar_systems
+                .get(&prev_sys)
+                .map(|s| (s.constellation_id, s.region_id))
+                .unwrap_or((20_000_020, 10_000_002));
+            let (prev_const, prev_reg) = ch
+                .map(|c| (c.constellation_id, c.region_id))
+                .unwrap_or((fallback_const, fallback_reg));
+            let effective_ship_id = ch
+                .map(|c| c.active_ship_id)
+                .filter(|&id| id > 0)
+                .unwrap_or(fallback_ship_id);
+            let prev_ship_location = (effective_ship_id > 0)
+                .then(|| {
+                    snap.items
+                        .get(&effective_ship_id)
+                        .map(|it| (it.location_id, it.flag))
+                })
+                .flatten();
+            let prev_ship_combat_hp = (effective_ship_id > 0)
+                .then(|| snap.sp6_lifecycle.ship_combat_hp.get(&effective_ship_id).copied())
+                .flatten();
+            let prev_meta_combat_hp = (effective_ship_id > 0)
+                .then(|| {
+                    snap.sp6_lifecycle
+                        .ship_combat_hp
+                        .get(&(-effective_ship_id))
+                        .copied()
+                })
+                .flatten();
+            let prev_item_position = (effective_ship_id > 0)
+                .then(|| snap.item_positions.get(&effective_ship_id).copied())
+                .flatten();
+            let (prev_ship_armor_damage, prev_ship_hull_damage) = (effective_ship_id > 0)
+                .then(|| {
+                    snap.items.get(&effective_ship_id).map(|ship| {
+                        (
+                            ship.dynamic_attributes
+                                .get(&eve_sde::attr_ids::ARMOR_DAMAGE)
+                                .copied(),
+                            ship.dynamic_attributes
+                                .get(&eve_sde::attr_ids::DAMAGE)
+                                .copied(),
+                        )
+                    })
+                })
+                .flatten()
+                .unwrap_or((None, None));
+            let prev_module_damage_attrs = if effective_ship_id > 0 {
+                snap.items
+                    .values()
+                    .filter(|it| it.location_id == effective_ship_id)
+                    .map(|it| {
+                        (
+                            it.item_id,
+                            it.dynamic_attributes
+                                .get(&eve_sde::attr_ids::DAMAGE)
+                                .copied(),
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            SpaceTransitionDbRollbackSnapshot {
+                effective_ship_id,
+                prev_solar_system_id: prev_sys,
+                prev_constellation_id: prev_const,
+                prev_region_id: prev_reg,
+                prev_station_id: ch.and_then(|c| c.station_id),
+                prev_structure_id: ch.and_then(|c| c.structure_id),
+                prev_ship_location,
+                prev_ship_combat_hp,
+                prev_meta_combat_hp,
+                prev_item_position,
+                prev_ship_armor_damage,
+                prev_ship_hull_damage,
+                prev_module_damage_attrs,
+                prev_active_mods: Vec::new(),
+                prev_active_charges: Vec::new(),
+                prev_ship_fit_inputs: None,
+                cleared_overloads: false,
+            }
+        })
+    }
+
+    /// Atomically rolls back character solar system/constellation/region, station/structure dock,
+    /// active ship location/flag, deactivated module states/overloads, and module `DAMAGE` attrs.
+    pub fn rollback_space_transition(
+        &self,
+        character_id: i64,
+        fallback_ship_id: i64,
+        fallback_old_sys_id: SolarSystemId,
+        fallback_old_dock: Option<(i64, bool)>,
+        rollback_opt: Option<&SpaceTransitionDbRollbackSnapshot>,
+        sde: &SdeRegistry,
+    ) -> Result<(), DbError> {
+        let restore_sys_id = rollback_opt
+            .map(|rb| rb.prev_solar_system_id)
+            .filter(|&s| s > 0)
+            .unwrap_or(fallback_old_sys_id);
+        let (sde_const, sde_reg) = sde
+            .solar_systems
+            .get(&restore_sys_id)
+            .map(|s| (s.constellation_id, s.region_id))
+            .unwrap_or((20_000_020, 10_000_002));
+        let (restore_const, restore_reg) = rollback_opt
+            .filter(|rb| rb.prev_solar_system_id == restore_sys_id)
+            .map(|rb| (rb.prev_constellation_id, rb.prev_region_id))
+            .unwrap_or((sde_const, sde_reg));
+        let target_dock = fallback_old_dock.or_else(|| {
+            rollback_opt.and_then(|rb| {
+                rb.prev_station_id
+                    .map(|id| (id, false))
+                    .or_else(|| rb.prev_structure_id.map(|id| (id, true)))
+            })
+        });
+        let restore_ship_id = rollback_opt
+            .map(|rb| rb.effective_ship_id)
+            .filter(|&id| id > 0)
+            .unwrap_or(fallback_ship_id);
+
+        self.try_with_mut_snapshot(|guard| {
+            let valid_structure = matches!(target_dock, Some((dock_id, true)) if guard
+                .structures
+                .get(&dock_id)
+                .is_some_and(|st| st.solar_system_id == restore_sys_id && st.state != "Destroyed"));
+
+            if restore_sys_id > 0 {
+                if let Some(ch) = guard.characters.get_mut(&character_id) {
+                    ch.solar_system_id = restore_sys_id;
+                    ch.constellation_id = restore_const;
+                    ch.region_id = restore_reg;
+                    ch.station_id = match target_dock {
+                        Some((dock_id, false)) => Some(dock_id),
+                        _ => None,
+                    };
+                    ch.structure_id = match target_dock {
+                        Some((dock_id, true)) if valid_structure => Some(dock_id),
+                        _ => None,
+                    };
+                    ch.version += 1;
+                    ch.system_epoch += 1;
+                }
+                if restore_ship_id > 0 {
+                    if let Some(ship) = guard.items.get_mut(&restore_ship_id) {
+                        let (ship_loc, ship_flag) =
+                            if matches!(target_dock, Some((_, true))) && !valid_structure {
+                                (i64::from(restore_sys_id), InventoryFlag::None)
+                            } else {
+                                rollback_opt
+                                    .and_then(|rb| rb.prev_ship_location)
+                                    .unwrap_or_else(|| match target_dock {
+                                        Some((dock_id, false)) => (dock_id, InventoryFlag::Hangar),
+                                        Some((dock_id, true)) if valid_structure => {
+                                            (dock_id, InventoryFlag::Hangar)
+                                        }
+                                        _ => (i64::from(restore_sys_id), InventoryFlag::None),
+                                    })
+                            };
+                        ship.location_id = ship_loc;
+                        ship.flag = ship_flag;
+                        if let Some(rb) = rollback_opt.filter(|rb| rb.effective_ship_id == restore_ship_id) {
+                            match rb.prev_ship_armor_damage {
+                                Some(val) => {
+                                    ship.dynamic_attributes
+                                        .insert(eve_sde::attr_ids::ARMOR_DAMAGE, val);
+                                }
+                                None => {
+                                    ship.dynamic_attributes
+                                        .remove(&eve_sde::attr_ids::ARMOR_DAMAGE);
+                                }
+                            }
+                            match rb.prev_ship_hull_damage {
+                                Some(val) => {
+                                    ship.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, val);
+                                }
+                                None => {
+                                    ship.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
+                                }
+                            }
+                        }
+                        ship.version += 1;
+                    }
+                }
+            }
+
+            if let Some(rb) = rollback_opt {
+                if rb.effective_ship_id > 0 {
+                    match rb.prev_ship_combat_hp {
+                        Some(hp) => {
+                            guard
+                                .sp6_lifecycle
+                                .ship_combat_hp
+                                .insert(rb.effective_ship_id, hp);
+                        }
+                        None => {
+                            guard
+                                .sp6_lifecycle
+                                .ship_combat_hp
+                                .remove(&rb.effective_ship_id);
+                        }
+                    }
+                    match rb.prev_meta_combat_hp {
+                        Some(meta) => {
+                            guard
+                                .sp6_lifecycle
+                                .ship_combat_hp
+                                .insert(-rb.effective_ship_id, meta);
+                        }
+                        None => {
+                            guard
+                                .sp6_lifecycle
+                                .ship_combat_hp
+                                .remove(&(-rb.effective_ship_id));
+                        }
+                    }
+                    match rb.prev_item_position {
+                        Some(pos) => {
+                            guard.item_positions.insert(rb.effective_ship_id, pos);
+                        }
+                        None => {
+                            guard.item_positions.remove(&rb.effective_ship_id);
+                        }
+                    }
+                }
+                for &mid in &rb.prev_active_mods {
+                    guard.module_active_states.insert(mid);
+                    guard.module_active_charges.remove(&mid);
+                }
+                for &(mid, charge_tid) in &rb.prev_active_charges {
+                    guard.module_active_charges.insert(mid, charge_tid);
+                }
+                if rb.cleared_overloads {
+                    match &rb.prev_ship_fit_inputs {
+                        Some(fit_inputs) => {
+                            guard
+                                .ship_fit_inputs
+                                .insert(rb.effective_ship_id, fit_inputs.clone());
+                        }
+                        None => {
+                            guard.ship_fit_inputs.remove(&rb.effective_ship_id);
+                        }
+                    }
+                }
+                for &(mid, prev_dmg) in &rb.prev_module_damage_attrs {
+                    if let Some(item) = guard.items.get_mut(&mid) {
+                        let cur_dmg = item
+                            .dynamic_attributes
+                            .get(&eve_sde::attr_ids::DAMAGE)
+                            .copied();
+                        if cur_dmg != prev_dmg {
+                            match prev_dmg {
+                                Some(val) => {
+                                    item.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, val);
+                                }
+                                None => {
+                                    item.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
+                                }
+                            }
+                            item.version += 1;
+                        }
+                    }
+                }
+            }
+            Ok(())
         })
     }
 

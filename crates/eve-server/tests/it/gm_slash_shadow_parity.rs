@@ -409,10 +409,9 @@ async fn gm_heal_updates_shadow_client_over_wire() {
     );
 }
 
-/// Parity test staged for the `#1193` `/tr` move family track (`auth_cache.rs:1922,2122-2133` on
-/// unchanged `main` only emits ship `OnItemChange` when `old_dock_id.is_some()`, leaving
-/// `ShadowInventory` ship `location_id` at Jita `30000142` on space-to-space `/tr me 30000144`).
-#[ignore = "live main /tr defect (omits ship OnItemChange when old_dock_id is None); belongs to #1193 Track 2 /tr family"]
+/// Wire parity test for `/tr`, `/moveme`, cross-system, and same-system relocations (`#1193`).
+/// Under `#931` (`1702fdfa`), scene transitions (`solar_system_id` / `station_id` changes) suppress
+/// active-ship `OnItemChange` and converge ship inventory via `dogmaIM.GetAllInfo` without dock/undock.
 #[tokio::test]
 async fn gm_tr_updates_shadow_client_over_wire() {
     let ctx = ServerContext::new();
@@ -420,16 +419,22 @@ async fn gm_tr_updates_shadow_client_over_wire() {
     let kw = HashMap::new();
     let (mut harness, ship_id) = prepare_undocked_gm_wire_harness(&ctx, 119_310).await;
 
-    // `/tr me <dest_system>` moves session + ship item location seamlessly on wire without dock/undock refresh.
+    // 1. Cross-system `/tr me <dest_system>` updates session + DB immediately and converges ShadowClient
+    // without dock/undock refresh (`GetAllInfo` refreshes client ship location on scene entry per `#931`).
     let tr_cmd = format!("/tr me {PERIMETER}");
     let tr_rep = harness
         .call_ok("slash", None, "SlashCmd", &[PyRep::String(tr_cmd)], &kw)
         .await;
     assert_eq!(tr_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(i64::from(PERIMETER))));
     harness.assert_shadow_converged();
+    {
+        let sh_tr = harness.shadow().unwrap();
+        assert_eq!(sh_tr.session.solar_system_id, Some(PERIMETER));
+        assert_eq!(sh_tr.session.station_id, None);
+    }
+    harness.call_ok("dogmaIM", None, "GetAllInfo", &[], &kw).await;
+    harness.assert_shadow_converged();
     let sh_tr = harness.shadow().unwrap();
-    assert_eq!(sh_tr.session.solar_system_id, Some(PERIMETER));
-    assert_eq!(sh_tr.session.station_id, None);
     assert_eq!(
         sh_tr.inventory.items.get(&ship_id).map(|i| i.location_id),
         Some(i64::from(PERIMETER))
@@ -440,6 +445,57 @@ async fn gm_tr_updates_shadow_client_over_wire() {
         assert_ne!(ch.solar_system_id, JITA);
         assert_eq!(snap.items.get(&ship_id).map(|i| i.location_id), Some(i64::from(PERIMETER)));
     });
+
+    // 2. `/moveme` alias crosses back to Jita cleanly over wire.
+    let moveme_cmd = format!("/moveme {JITA}");
+    let moveme_rep = harness
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String(moveme_cmd)], &kw)
+        .await;
+    assert_eq!(moveme_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(i64::from(JITA))));
+    harness.assert_shadow_converged();
+    harness.call_ok("dogmaIM", None, "GetAllInfo", &[], &kw).await;
+    harness.assert_shadow_converged();
+    let sh_back = harness.shadow().unwrap();
+    assert_eq!(sh_back.session.solar_system_id, Some(JITA));
+    assert_eq!(sh_back.session.station_id, None);
+    assert_eq!(
+        sh_back.inventory.items.get(&ship_id).map(|i| i.location_id),
+        Some(i64::from(JITA))
+    );
+
+    // 3. Same-system `/tr me <stationID>` keeps pilot undocked in Jita and moves ship ball near station.
+    let jita_station_id = 60_003_760_i64;
+    let jita_station_pos = ctx
+        .sde
+        .stations
+        .get(&jita_station_id)
+        .expect("Jita 4-4 in SDE")
+        .position;
+    let same_cmd = format!("/tr me {jita_station_id}");
+    let same_rep = harness
+        .call_ok("slash", None, "SlashCmd", &[PyRep::String(same_cmd)], &kw)
+        .await;
+    assert_eq!(same_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(i64::from(JITA))));
+    harness.assert_shadow_converged();
+    let sh_same = harness.shadow().unwrap();
+    assert_eq!(sh_same.session.solar_system_id, Some(JITA));
+    assert_eq!(sh_same.session.station_id, None);
+    assert_eq!(
+        sh_same.inventory.items.get(&ship_id).map(|i| i.location_id),
+        Some(i64::from(JITA))
+    );
+    let (_, ball) = ctx
+        .systems
+        .get_handle(JITA)
+        .expect("Jita live after same-system /tr")
+        .get_ball_snapshot(ship_id)
+        .await
+        .expect("snapshot query")
+        .expect("ship ball present in Jita");
+    assert!(
+        (ball.position - (jita_station_pos + glam::DVec3::new(5_000.0, 0.0, 0.0))).length() < 1.0,
+        "same-system /tr must position ship 5 km from Jita 4-4"
+    );
 }
 
 #[tokio::test]

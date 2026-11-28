@@ -1302,3 +1302,262 @@ async fn structure_beacon_and_fleet_beacon_jumps_retain_ballpark_protection_acro
         .expect("targetable once tick 60 protection expires");
     }
 }
+
+#[tokio::test]
+async fn wormhole_jump_preserves_rollback_gate_cloak_combat_state_and_session_transition() {
+    let ctx = test_ctx();
+    let old_sys = 30_000_142_u32;
+    let dest_sys = 30_000_144_u32;
+    let char_id = 96_881_i64;
+    let ship_id = 96_882_i64;
+    let wh_ball_id = 750_000_881_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("char");
+        ch.character_id = char_id;
+        ch.corporation_id = 98_000_001;
+        ch.solar_system_id = old_sys;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        put_item(
+            snap,
+            ship_id,
+            588,
+            char_id,
+            old_sys as i64,
+            InventoryFlag::None,
+            1,
+            true,
+        );
+        let st_old = snap.system_states.entry(old_sys).or_default();
+        st_old.wormhole_destination_system_id = Some(dest_sys);
+        st_old.wormhole_remaining_mass_kg = 1_000_000_000.0;
+        let st_dest = snap.system_states.entry(dest_sys).or_default();
+        st_dest.wormhole_remaining_mass_kg = 1_000_000_000.0;
+    });
+
+    let old_h = ctx.systems.get_or_spawn(old_sys);
+    let damaged_cs = CombatState {
+        shield_hp: 100.0,
+        max_shield_hp: 400.0,
+        armor_hp: 150.0,
+        max_armor_hp: 300.0,
+        structure_hp: 200.0,
+        max_structure_hp: 400.0,
+        capacitor: 50.0,
+        max_capacitor: 200.0,
+        is_cloaked: false,
+        ..Default::default()
+    };
+    old_h
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 588,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_500_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            damaged_cs.clone(),
+            SlimItemMeta {
+                owner_id: char_id,
+                char_id: Some(char_id),
+                corp_id: 98_000_001,
+                alliance_id: -1,
+                group_id: 25,
+                category_id: 6,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("spawn origin ship");
+    spawn_ship(
+        &old_h,
+        wh_ball_id,
+        26272,
+        988,
+        2,
+        DVec3::new(500.0, 0.0, 0.0),
+        DVec3::ZERO,
+        false,
+    )
+    .await;
+
+    let mut sess = make_session(char_id, 98_000_001, Some(old_sys), Some(ship_id));
+    let res = handle(
+        &ctx,
+        &mut sess,
+        None,
+        "wormholeMgr",
+        "WormholeJump",
+        &[PyRep::Integer(wh_ball_id)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("wormhole jump succeeds");
+
+    assert_eq!(res.dict_get("solarSystemID"), Some(&PyRep::Integer(i64::from(dest_sys))));
+    assert_eq!(sess.solar_system_id, Some(dest_sys));
+    assert_eq!(sess.station_id, None);
+    assert!(old_h.get_ball_snapshot(ship_id).await.unwrap().is_none());
+
+    let dest_h = ctx.systems.get_handle(dest_sys).expect("dest system woken");
+    let (dest_tick, _) = dest_h
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("ship present in destination");
+    let dest_cs = dest_h
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .expect("dest combat state");
+    assert!(dest_cs.is_cloaked);
+    assert_eq!(dest_cs.gate_cloak_remaining_ticks, 60);
+    assert_eq!(dest_cs.undock_invulnerable_remaining_ticks, 60);
+    assert!(dest_cs.sync_invuln_with_undock_timer);
+    assert!((dest_cs.shield_hp - dest_cs.max_shield_hp * 0.25).abs() < 1e-3);
+    assert!((dest_cs.armor_hp - dest_cs.max_armor_hp * 0.50).abs() < 1e-3);
+    assert!((dest_cs.structure_hp - dest_cs.max_structure_hp * 0.50).abs() < 1e-3);
+    assert!((dest_cs.capacitor - dest_cs.max_capacitor * 0.25).abs() < 1e-3);
+    assert!(
+        crate::services::space_destiny::check_session_change_timer_active(
+            &ctx,
+            char_id,
+            ctx.now_unix(),
+            Some((dest_sys, dest_tick)),
+        )
+        .is_some(),
+        "wormhole jump must record session-change timer"
+    );
+
+    let moved_pos = DVec3::new(19_000.0, 400.0, -200.0);
+    assert!(dest_h.set_ball_position(ship_id, moved_pos).await);
+    dest_h
+        .modify_combat_state(ship_id, |cs| {
+            cs.is_cloaked = false;
+            cs.gate_cloak_remaining_ticks = 0;
+            cs.undock_invulnerable_remaining_ticks = 0;
+        })
+        .await
+        .unwrap()
+        .expect("dest combat state");
+    dest_h
+        .apply_true_damage(ship_id, 10.0)
+        .await
+        .expect("apply_true_damage");
+    assert_eq!(
+        dest_h
+            .flush_condition_checkpoint()
+            .await
+            .expect("flush_condition_checkpoint"),
+        1,
+        "post-wormhole ConditionCheckpoint must persist with synced epoch (`T2E-R3-01`)"
+    );
+    let expected_shield = (dest_cs.shield_hp - 10.0).max(0.0);
+    ctx.db.with_snapshot(|snap| {
+        let p = snap
+            .item_positions
+            .get(&ship_id)
+            .copied()
+            .expect("item_positions persisted after wormhole jump");
+        assert!((DVec3::from_array(p) - moved_pos).length() < 1e-3);
+        let hp = snap
+            .sp6_lifecycle
+            .ship_combat_hp
+            .get(&ship_id)
+            .expect("ship_combat_hp updated after wormhole jump");
+        assert!((hp.shield_hp - expected_shield).abs() < 1e-2);
+    });
+
+    // Verify DB rollback preserves ship ball on origin when shared wormhole transition hits DB failure.
+    struct TempDbDir(std::path::PathBuf);
+    impl Drop for TempDbDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let tmp_dir = TempDbDir(std::env::temp_dir().join(format!(
+        "evomu_wh_rollback_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )));
+    let db = Arc::new(eve_db::WorldRepository::open_sqlite(tmp_dir.0.join("world.sqlite")).expect("sqlite"));
+    let rb_ctx = ServerContext::with_sde_and_repository(Arc::clone(&ctx.sde), db);
+    rb_ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = eve_db::CharacterRecord::default();
+        ch.character_id = char_id;
+        ch.corporation_id = 98_000_001;
+        ch.solar_system_id = old_sys;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        put_item(
+            snap,
+            ship_id,
+            588,
+            char_id,
+            old_sys as i64,
+            InventoryFlag::None,
+            1,
+            true,
+        );
+    });
+    let rb_old = rb_ctx.systems.get_or_spawn(old_sys);
+    spawn_ship(&rb_old, ship_id, 588, 25, 6, DVec3::ZERO, DVec3::ZERO, false).await;
+    rb_ctx.db.set_fault_plan_for_test(eve_db::TxFaultPlan::FailAtCommit);
+
+    let mut rb_sess = make_session(char_id, 98_000_001, Some(old_sys), Some(ship_id));
+    let rb_err = crate::domain::transitions::relocate_character_in_space(
+        &rb_ctx,
+        Some(&mut rb_sess),
+        crate::domain::transitions::RelocateInSpaceRequest {
+            char_id,
+            ship_id,
+            old_sys_id: old_sys,
+            old_dock: None,
+            dest_sys_id: dest_sys,
+            was_in_space: true,
+            arrival_position: Some(DVec3::new(2_000.0, 0.0, 0.0)),
+            fallback_arrival_position: DVec3::new(2_000.0, 0.0, 0.0),
+            arrival_velocity: DVec3::ZERO,
+            require_take_ball: true,
+            take_ball_missing_code: "SystemTransitionFailed",
+            db_transition_failed_code: "SystemTransitionFailed",
+            destination_wake: crate::domain::transitions::DestinationWakePolicy::SessionArrival(
+                crate::system_actor::SessionArrivalWakeReason::Jump,
+            ),
+            transition_kind: crate::domain::transitions::SpaceTransitionKind::JumpSystem,
+            transition_reason: "wormhole_jump",
+            combat_state_preservation:
+                crate::domain::transitions::CombatStatePreservation::PreserveNormalized {
+                    fallback: None,
+                },
+            gate_cloak_invuln:
+                crate::domain::transitions::GateCloakInvulnPolicy::standard_jump_cloak(),
+            cleanup: crate::domain::transitions::LeaveSpaceCleanupPolicy::gameplay_jump(),
+            sync_local_chat: true,
+            persist_item_position: true,
+            record_session_change_timer: true,
+            record_solar_system_jump: true,
+            bind_beyonce: false,
+            push_set_state: true,
+        },
+    )
+    .await
+    .expect_err("DB commit fault must fail wormhole relocation");
+    assert_eq!(rb_err.code, "SystemTransitionFailed");
+    assert_eq!(rb_sess.solar_system_id, Some(old_sys));
+    assert!(rb_ctx.systems.get_handle(dest_sys).is_none());
+    assert!(rb_old.get_ball_snapshot(ship_id).await.unwrap().is_some());
+}

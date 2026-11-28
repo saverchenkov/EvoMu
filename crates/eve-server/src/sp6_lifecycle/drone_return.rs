@@ -944,7 +944,17 @@ pub fn abandon_drones_on_warp_sync(
     sys_id: u32,
 ) {
     let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
-    let abandoned_drones = if let Some(ref sys_handle) = sys_handle_opt {
+    abandon_drones_on_warp_with_handle(ctx, char_id, ship_id, sys_id, sys_handle_opt.as_ref());
+}
+
+fn abandon_drones_on_warp_with_handle(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    sys_handle_opt: Option<&crate::system_actor::SystemHandle>,
+) {
+    let abandoned_drones = if let Some(sys_handle) = sys_handle_opt {
         sys_handle
             .mutate_active_drones_with_claims_sync(move |drones, _, _, claimed| {
                 let mut rows = Vec::new();
@@ -985,12 +995,12 @@ pub fn abandon_drones_on_warp_sync(
         Vec::new()
     };
     if !abandoned_drones.is_empty() {
-        if let Some(ref sys_handle) = sys_handle_opt {
+        if let Some(sys_handle) = sys_handle_opt {
             let abandoned_bids: Vec<i64> = abandoned_drones.iter().map(|&(bid, _, _, _)| bid).collect();
             let _ = sys_handle.clear_drone_runtime_batch_sync(abandoned_bids);
         }
         for &(bid, did, tid, notify_char_id) in &abandoned_drones {
-            if let Some(ref sys_handle) = sys_handle_opt {
+            if let Some(sys_handle) = sys_handle_opt {
                 sys_handle.try_remove_module_cycle(bid, -bid);
                 sys_handle.try_stop_ball(bid);
                 let _ = sys_handle.enqueue_destiny_event(
@@ -1019,7 +1029,32 @@ pub fn abandon_drones_and_fighters_for_ship_sync(
     ship_id: i64,
     sys_id: u32,
 ) {
-    abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
+    let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
+    abandon_drones_and_fighters_with_handle(ctx, char_id, ship_id, sys_id, sys_handle_opt);
+}
+
+/// Non-waking variant of [`abandon_drones_and_fighters_for_ship_sync`] (`#1542`, `#1193`).
+///
+/// Uses `ctx.systems.get_handle(sys_id)` so cold origin solar systems remain unloaded while live
+/// actors abandon drones/fighters and scanner probes + cold-DB fighter state still clean up.
+pub fn abandon_drones_and_fighters_without_wake_sync(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+) {
+    let sys_handle_opt = (sys_id > 0).then(|| ctx.systems.get_handle(sys_id)).flatten();
+    abandon_drones_and_fighters_with_handle(ctx, char_id, ship_id, sys_id, sys_handle_opt);
+}
+
+fn abandon_drones_and_fighters_with_handle(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    sys_handle_opt: Option<crate::system_actor::SystemHandle>,
+) {
+    abandon_drones_on_warp_with_handle(ctx, char_id, ship_id, sys_id, sys_handle_opt.as_ref());
 
     let mut probes_changed = false;
     if let Ok(mut probes) = ctx.active_scanner_probes.write() {
@@ -1034,7 +1069,6 @@ pub fn abandon_drones_and_fighters_for_ship_sync(
         crate::services::space_probe_scanning::sync_scanner_probes_to_db(ctx);
     }
 
-    let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
     let fg_snap = if let Some(ref sys_handle) = sys_handle_opt {
         let _ = ctx.systems.ensure_live_fighters_hydrated_sync(sys_id, sys_handle);
         sys_handle.view().fighters.clone()

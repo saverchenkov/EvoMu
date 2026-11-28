@@ -13,6 +13,7 @@ pub mod items;
 pub mod mail;
 pub mod market_acl;
 pub mod skills;
+pub mod transitions;
 pub mod wars;
 
 #[cfg(test)]

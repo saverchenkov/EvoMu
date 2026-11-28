@@ -1123,3 +1123,337 @@ async fn gm_giveitem_typed_parser_rejects_invalid_args_and_never_wakes_cold_syst
     });
 }
 
+#[tokio::test]
+async fn slash_tr_does_not_wake_cold_origin_system_on_valid_or_invalid_target() {
+    let ctx = test_ctx();
+    let cid = 90_000_001_i64;
+    let cold_origin_sys = 30_000_140_u32; // Maurasi
+    let dest_sys = 30_000_144_u32; // Perimeter
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&cid).expect("pilot");
+        ch.solar_system_id = cold_origin_sys;
+        ch.station_id = None;
+        ch.structure_id = None;
+    });
+    assert!(
+        ctx.systems.get_handle(cold_origin_sys).is_none(),
+        "precondition: origin system must be cold before /tr"
+    );
+
+    let mut sess = auth_session(1, cid, 98_000_001, cold_origin_sys);
+    sess.role = service_roles::ROLE_GMH;
+
+    let bad_err = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/tr me 99999999".into())],
+        &kw,
+    )
+    .await
+    .expect("slash handled")
+    .expect_err("unknown location must fail without waking cold origin");
+    assert_eq!(bad_err.code, "SolarSystemNotFound");
+    assert!(
+        ctx.systems.get_handle(cold_origin_sys).is_none(),
+        "failed /tr lookup must not wake cold origin system"
+    );
+    assert!(
+        ctx.systems.get_handle(0).is_none(),
+        "system 0 must never be spawned"
+    );
+
+    let ok_rep = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/tr me {dest_sys}"))],
+        &kw,
+    )
+    .await
+    .expect("slash handled")
+    .expect("/tr me <dest_sys> succeeds from cold origin");
+    assert_eq!(ok_rep.dict_get("solarSystemID").and_then(PyRep::as_i64), Some(i64::from(dest_sys)));
+    assert_eq!(sess.solar_system_id, Some(dest_sys));
+    assert!(
+        ctx.systems.get_handle(cold_origin_sys).is_none(),
+        "cross-system /tr from cold origin system must NOT spawn an actor for old_sys_id"
+    );
+    assert!(
+        ctx.systems.get_handle(dest_sys).is_some(),
+        "destination solar system must be woken"
+    );
+    assert!(
+        ctx.systems.get_handle(0).is_none(),
+        "system 0 must never be spawned"
+    );
+}
+
+#[tokio::test]
+async fn slash_tr_live_origin_abandons_drones_fighters_probes_and_aborts_self_destruct_while_cold_stays_cold() {
+    let ctx = test_ctx();
+    let live_sys = 30_000_142_u32; // Jita (live)
+    let cold_sys = 30_000_140_u32; // Maurasi (kept cold)
+    let dest_sys = 30_000_144_u32; // Perimeter
+    let kw = HashMap::new();
+
+    // 1. Live origin `/tr me <dest>`: deployed drone, fighter, probe, and self-destruct all tear down.
+    let cid = 90_000_001_i64;
+    let ship_id = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&cid).expect("pilot");
+        ch.solar_system_id = live_sys;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id
+    });
+    let drone_id = 100_891_010_i64;
+    let fighter_id = 100_891_020_i64;
+    let probe_id = 555_891_001_i64;
+    let live_handle = ctx.systems.get_or_spawn(live_sys);
+    for (bid, tid) in [(ship_id, 587_u32), (drone_id, 2454_u32), (fighter_id, 23057_u32)] {
+        let cs = if bid == ship_id {
+            eve_destiny::CombatState {
+                shield_hp: 160.0,
+                max_shield_hp: 500.0,
+                armor_hp: 140.0,
+                max_armor_hp: 400.0,
+                structure_hp: 110.0,
+                max_structure_hp: 350.0,
+                capacitor: 75.0,
+                max_capacitor: 250.0,
+                ..Default::default()
+            }
+        } else {
+            eve_destiny::CombatState::default()
+        };
+        let _ = live_handle
+            .spawn_ball_with_meta(
+                eve_destiny::Ball {
+                    id: bid,
+                    type_id: tid,
+                    position: glam::DVec3::new(500.0, 0.0, 0.0),
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 350.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                cs,
+                ctx.build_ship_slim_meta(cid, tid),
+            )
+            .await;
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut f_item = eve_db::InventoryItemRecord::default();
+        f_item.item_id = fighter_id;
+        f_item.type_id = 23057;
+        f_item.owner_id = cid;
+        f_item.location_id = ship_id;
+        f_item.flag = eve_db::InventoryFlag::Cargo;
+        f_item.quantity = 9;
+        f_item.singleton = true;
+        snap.items.insert(fighter_id, f_item);
+    });
+    crate::services::drone_test_helpers::seed_active_drones(
+        &ctx,
+        [crate::system_actor::DroneSpaceState {
+            ball_id: drone_id,
+            drone_item_id: drone_id,
+            type_id: 2454,
+            group_id: 100,
+            owner_char_id: cid,
+            original_owner_char_id: cid,
+            parent_ship_id: ship_id,
+            solar_system_id: live_sys,
+            target_id: Some(999),
+            activity_state: 1,
+            assist_char_id: None,
+            guard_char_id: None,
+            is_abandoned: false,
+            is_sentry: false,
+            bandwidth_used: 5.0,
+            max_velocity: 1_500.0,
+            optimal_range: 5_000.0,
+            damage_vector: eve_destiny::DamageVector::default(),
+            shield_repair_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            web_speed_factor: 1.0,
+            neut_amount: 0.0,
+            ecm_strength: 0.0,
+            tp_sig_bonus_pct: 0.0,
+        }],
+    );
+    crate::services::fighter_test_helpers::insert_active_fighter(
+        &ctx,
+        fighter_id,
+        crate::router::ActiveFighterSquadron {
+            ball_id: fighter_id,
+            item_id: fighter_id,
+            type_id: 23057,
+            owner_char_id: cid,
+            parent_ship_id: ship_id,
+            tube_index: 0,
+            squadron_size: 9,
+            target_id: Some(999),
+            is_abandoned: false,
+            mwd_active: true,
+        },
+    );
+    crate::probe_test_helpers::seed_probe(
+        &ctx,
+        crate::router::ActiveScannerProbe {
+            probe_id,
+            probe_type_id: 30013,
+            owner_char_id: cid,
+            ship_id,
+            launcher_module_id: 555_891_000,
+            solar_system_id: live_sys,
+            position: [0.0; 3],
+            destination: [0.0; 3],
+            range_step: 2,
+            scan_range_m: 1_000_000.0,
+            base_sensor_strength: 10.0,
+            max_flight_time_s: 300.0,
+            launched_at_unix: 1_000,
+            state: 1,
+            warp_end_ft: None,
+        },
+    );
+    crate::sp6_lifecycle::register_self_destruct_countdown(&ctx, ship_id, cid, live_sys, 1_000, 1_120);
+
+    let mut sess = auth_session(1, cid, 98_000_001, live_sys);
+    sess.role = service_roles::ROLE_GMH;
+    let _ = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/tr me {dest_sys}"))],
+        &kw,
+    )
+    .await
+    .expect("slash handled")
+    .expect("/tr me <dest_sys> from live origin ok");
+
+    let d_after = crate::services::drone_test_helpers::active_drone(&ctx, drone_id).expect("drone present");
+    assert!(d_after.is_abandoned && d_after.owner_char_id == 0);
+    assert!(
+        crate::services::fighter_test_helpers::active_fighter(&ctx, fighter_id)
+            .expect("fighter present")
+            .is_abandoned
+    );
+    assert_eq!(crate::probe_test_helpers::get_probe(&ctx, probe_id).unwrap().state, 0);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&fighter_id].location_id, i64::from(live_sys));
+        assert!(!snap.sp6_lifecycle.self_destructs.contains_key(&ship_id));
+    });
+    assert!(
+        !ctx.combat_ephemeral
+            .read()
+            .unwrap()
+            .self_destruct_countdowns
+            .contains_key(&ship_id)
+    );
+    // Post-`/tr` arrival combat state carries taken live HP, and destination checkpoints + positions commit (`T2E-R3-01`).
+    let dest_h = ctx.systems.get_handle(dest_sys).expect("dest system woken");
+    let tr_cs = dest_h.get_combat_state(ship_id).await.unwrap().expect("dest combat state");
+    assert!((tr_cs.shield_hp - 160.0).abs() < 1e-3 && (tr_cs.armor_hp - 140.0).abs() < 1e-3);
+    let moved_pos = glam::DVec3::new(25_000.0, 300.0, -150.0);
+    assert!(dest_h.set_ball_position(ship_id, moved_pos).await);
+    dest_h.apply_true_damage(ship_id, 20.0).await.expect("apply_true_damage");
+    assert_eq!(dest_h.flush_condition_checkpoint().await.expect("flush_condition_checkpoint"), 1);
+    ctx.db.with_snapshot(|snap| {
+        let p = snap.item_positions.get(&ship_id).copied().expect("item_positions persisted");
+        assert!((glam::DVec3::from_array(p) - moved_pos).length() < 1e-3);
+        let hp = snap.sp6_lifecycle.ship_combat_hp.get(&ship_id).expect("ship_combat_hp updated");
+        assert!((hp.shield_hp - 140.0).abs() < 1e-3);
+    });
+
+    // 2. Remote `/tr <other_cid> <dest_sys>` on cold origin keeps cold_sys unloaded while clearing probes & self-destruct.
+    let remote_cid = 90_891_555_i64;
+    let remote_ship = 91_891_555_i64;
+    let remote_probe = 555_891_555_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.get(&cid).cloned().expect("template char");
+        ch.character_id = remote_cid;
+        ch.solar_system_id = cold_sys;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = remote_ship;
+        snap.characters.insert(remote_cid, ch);
+
+        let mut ship = eve_db::InventoryItemRecord::default();
+        ship.item_id = remote_ship;
+        ship.type_id = 587;
+        ship.owner_id = remote_cid;
+        ship.location_id = i64::from(cold_sys);
+        ship.quantity = 1;
+        ship.singleton = true;
+        snap.items.insert(remote_ship, ship);
+    });
+    crate::probe_test_helpers::seed_probe(
+        &ctx,
+        crate::router::ActiveScannerProbe {
+            probe_id: remote_probe,
+            probe_type_id: 30013,
+            owner_char_id: remote_cid,
+            ship_id: remote_ship,
+            launcher_module_id: 555_891_554,
+            solar_system_id: cold_sys,
+            position: [0.0; 3],
+            destination: [0.0; 3],
+            range_step: 2,
+            scan_range_m: 1_000_000.0,
+            base_sensor_strength: 10.0,
+            max_flight_time_s: 300.0,
+            launched_at_unix: 1_000,
+            state: 1,
+            warp_end_ft: None,
+        },
+    );
+    crate::sp6_lifecycle::register_self_destruct_countdown(
+        &ctx,
+        remote_ship,
+        remote_cid,
+        cold_sys,
+        1_000,
+        1_120,
+    );
+    assert!(ctx.systems.get_handle(cold_sys).is_none());
+
+    let _ = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/tr {remote_cid} {dest_sys}"))],
+        &kw,
+    )
+    .await
+    .expect("slash handled")
+    .expect("remote /tr <other_cid> <dest_sys> ok");
+
+    assert!(
+        ctx.systems.get_handle(cold_sys).is_none(),
+        "remote /tr from cold origin must NOT wake old_sys_id"
+    );
+    assert_eq!(crate::probe_test_helpers::get_probe(&ctx, remote_probe).unwrap().state, 0);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.sp6_lifecycle.self_destructs.contains_key(&remote_ship));
+    });
+    assert!(
+        !ctx.combat_ephemeral
+            .read()
+            .unwrap()
+            .self_destruct_countdowns
+            .contains_key(&remote_ship)
+    );
+}
+

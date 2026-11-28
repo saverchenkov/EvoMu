@@ -52,10 +52,10 @@ pub use cluster_tick_downtime::{
     spawn_mission_wave_on_pocket_entry_if_needed,
 };
 pub use drone_return::{
-    abandon_drones_and_fighters_for_ship_sync, abandon_drones_on_warp_sync,
-    disconnect_drones_for_ship_on_warp_sync, handle_cmd_abandon_drone,
-    handle_cmd_reconnect_to_drones, handle_cmd_return_bay, seed_persisted_abandoned_drones,
-    step_repeating_drone_mining, step_returning_drones,
+    abandon_drones_and_fighters_for_ship_sync, abandon_drones_and_fighters_without_wake_sync,
+    abandon_drones_on_warp_sync, disconnect_drones_for_ship_on_warp_sync,
+    handle_cmd_abandon_drone, handle_cmd_reconnect_to_drones, handle_cmd_return_bay,
+    seed_persisted_abandoned_drones, step_repeating_drone_mining, step_returning_drones,
 };
 
 use crate::router::notify_registry::{

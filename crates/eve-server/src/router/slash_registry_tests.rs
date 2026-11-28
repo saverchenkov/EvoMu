@@ -1633,6 +1633,110 @@ fn typed_heal_and_kill_argument_parsers_enforce_contract() {
 }
 
 #[test]
+fn typed_teleport_argument_parser_enforces_contract() {
+    assert_eq!(
+        parse_teleport_slash_args("30000144").expect("[loc]"),
+        TeleportSlashArgs {
+            target: TeleportSlashTarget::SelfChar,
+            location_id: 30_000_144,
+            noblock: false,
+        }
+    );
+    for alias in ["me", "ME", "myship", " \"MYSHIP\" "] {
+        assert_eq!(
+            parse_teleport_slash_args(&format!("{alias} 30000144")).expect("[me, loc]"),
+            TeleportSlashArgs {
+                target: TeleportSlashTarget::SelfChar,
+                location_id: 30_000_144,
+                noblock: false,
+            },
+            "for [{alias}, loc]"
+        );
+        assert_eq!(
+            parse_teleport_slash_args(&format!("60003760 {alias}")).expect("[loc, me]"),
+            TeleportSlashArgs {
+                target: TeleportSlashTarget::SelfChar,
+                location_id: 60_003_760,
+                noblock: false,
+            },
+            "for [loc, {alias}]"
+        );
+    }
+    assert_eq!(
+        parse_teleport_slash_args("90000002 30000142").expect("[char_id, loc]"),
+        TeleportSlashArgs {
+            target: TeleportSlashTarget::CharId(90_000_002),
+            location_id: 30_000_142,
+            noblock: false,
+        }
+    );
+
+    // `noblock` stripping (case-insensitive) across all valid argument shapes
+    assert_eq!(
+        parse_teleport_slash_args("30000144 noblock").expect("[loc, noblock]"),
+        TeleportSlashArgs {
+            target: TeleportSlashTarget::SelfChar,
+            location_id: 30_000_144,
+            noblock: true,
+        }
+    );
+    assert_eq!(
+        parse_teleport_slash_args("me 30000144 NOBLOCK").expect("[me, loc, noblock]"),
+        TeleportSlashArgs {
+            target: TeleportSlashTarget::SelfChar,
+            location_id: 30_000_144,
+            noblock: true,
+        }
+    );
+    assert_eq!(
+        parse_teleport_slash_args("60003760 myship noblock").expect("[loc, myship, noblock]"),
+        TeleportSlashArgs {
+            target: TeleportSlashTarget::SelfChar,
+            location_id: 60_003_760,
+            noblock: true,
+        }
+    );
+    assert_eq!(
+        parse_teleport_slash_args("90000002 30000142 noblock").expect("[char_id, loc, noblock]"),
+        TeleportSlashArgs {
+            target: TeleportSlashTarget::CharId(90_000_002),
+            location_id: 30_000_142,
+            noblock: true,
+        }
+    );
+
+    for bad in [
+        "",
+        "   ",
+        "noblock",
+        "\"\"",
+        "0",
+        "-5",
+        "badloc",
+        "me 0",
+        "0 me",
+        "me me",
+        "me -10",
+        "self 30000144",
+        "90000002 0",
+        "0 30000144",
+        "90000002 badloc",
+        "me 30000144 extra",
+        "90000002 30000144 extra",
+    ] {
+        let err = parse_teleport_slash_args(bad).expect_err("bad teleport arg must fail");
+        assert_eq!(err.code, "InvalidSlashArgument", "for /tr {bad:?}");
+        assert!(matches!(
+            err.client_error.as_deref(),
+            Some(ClientError::User {
+                key: UserErrorKey::SlashError,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
 fn track2_combat_domain_parity_source_guard() {
     let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
 
@@ -1677,4 +1781,87 @@ fn track2_combat_domain_parity_source_guard() {
     let repair_prod = production_prefix(&repair_raw);
     assert!(repair_prod.contains("clear_ship_and_fitted_damage_in_snap("));
     assert!(repair_prod.contains("clear_fitted_module_damage_in_cache("));
+}
+
+#[test]
+fn track2_transition_domain_parity_source_guard() {
+    let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    let auth_raw =
+        fs::read_to_string(src_root.join("services/auth_cache.rs")).expect("services/auth_cache.rs");
+    let auth_prod = production_prefix(&auth_raw);
+    let tp_start = auth_prod
+        .find("async fn handle_slash_teleport(")
+        .expect("handle_slash_teleport");
+    let tp_tail = &auth_prod[tp_start..];
+    assert!(tp_tail.contains("parse_teleport_slash_args("));
+    assert!(tp_tail.contains("relocate_character_in_space("));
+    for forbidden in [
+        "get_or_spawn",
+        "take_ball(",
+        "leave_space_in_snap(",
+        "set_character_solar_system(",
+        "execute_session_transition_sync(",
+    ] {
+        assert!(
+            !tp_tail.contains(forbidden),
+            "handle_slash_teleport must not contain `{forbidden}`"
+        );
+    }
+
+    let shipcaster_raw = fs::read_to_string(src_root.join("services/shipcaster_ops_starter.rs"))
+        .expect("services/shipcaster_ops_starter.rs");
+    let shipcaster_prod = production_prefix(&shipcaster_raw);
+    let sc_start = shipcaster_prod
+        .find("pub async fn execute_shipcaster_jump(")
+        .expect("execute_shipcaster_jump");
+    let sc_fn = &shipcaster_prod[sc_start..];
+    assert!(
+        sc_fn.contains("relocate_character_in_space(")
+            || sc_fn.contains("relocate_character_in_space_with_pre_spawn(")
+    );
+    for forbidden in [
+        "get_or_spawn",
+        "take_ball(",
+        "restore_ball(",
+        "leave_space_in_snap(",
+        "set_character_solar_system(",
+        "execute_session_transition_sync(",
+    ] {
+        assert!(
+            !sc_fn.contains(forbidden),
+            "execute_shipcaster_jump must not contain `{forbidden}`"
+        );
+    }
+
+    let cyno_raw = fs::read_to_string(src_root.join("services/space_cyno_filaments.rs"))
+        .expect("services/space_cyno_filaments.rs");
+    let cyno_prod = production_prefix(&cyno_raw);
+    let wh_start = cyno_prod
+        .find("async fn execute_legacy_wormhole_jump(")
+        .expect("execute_legacy_wormhole_jump");
+    let wh_end = cyno_prod[wh_start..]
+        .find("async fn handle_random_jump_filament(")
+        .map(|off| wh_start + off)
+        .expect("end of execute_legacy_wormhole_jump");
+    let wh_fn = &cyno_prod[wh_start..wh_end];
+    assert!(wh_fn.contains("relocate_character_in_space("));
+    for forbidden in [
+        "get_or_spawn",
+        "take_ball(",
+        "restore_ball(",
+        "leave_space_in_snap(",
+        "set_character_solar_system(",
+        "execute_session_transition_sync(",
+    ] {
+        assert!(
+            !wh_fn.contains(forbidden),
+            "execute_legacy_wormhole_jump must not contain `{forbidden}`"
+        );
+    }
+
+    let transitions_raw =
+        fs::read_to_string(src_root.join("domain/transitions.rs")).expect("domain/transitions.rs");
+    let transitions_prod = production_prefix(&transitions_raw);
+    assert!(!transitions_prod.contains("get_or_spawn"));
 }
