@@ -7,7 +7,7 @@ use super::{
     serialize_doll_pyrep, serialize_portrait_pyrep,
 };
 use crate::router::notify_registry::{
-    OnModuleFitted, OnSecurityStatusUpdate, OnSetPlayerStanding,
+    OnSecurityStatusUpdate, OnSetPlayerStanding,
 };
 #[cfg(test)]
 use crate::router::slash_registry::{
@@ -1144,70 +1144,70 @@ pub(crate) fn dispatch_fit_slash(
     }
     let (_, cid) = ServerContext::require_character(session)?;
     let cmd = inv.raw;
-    let tokens = parse_slash_tokens(inv.rest);
-    if tokens.is_empty() {
-        return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /fit [ship_id|me] <type_id> [flag_id]".into(), client_error: None });
-    }
+    let parsed = crate::router::slash_registry::parse_fit_slash_args(inv.rest)?;
     let caller_ship_id = ctx
         .db
         .with_snapshot(|snap| snap.characters.get(&cid).map(|c| c.active_ship_id))
         .or(session.ship_id)
         .unwrap_or(0);
 
-    let (ship_id, type_id, explicit_flag) = if is_me_or_myship(&tokens[0]) {
-        let Some(tid) = tokens.get(1).and_then(|s| s.parse::<u32>().ok()) else {
-            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /fit me <type_id> [flag_id]".into(), client_error: None });
-        };
-        let flg = tokens
-            .get(2)
-            .and_then(|s| s.parse::<u16>().ok())
-            .map(InventoryFlag::from_u16);
-        (caller_ship_id, tid, flg)
-    } else if tokens.len() >= 2 {
-        let first_i64 = tokens[0].parse::<i64>().unwrap_or(0);
-        let matched_target_ship = ctx.db.with_snapshot(|snap| {
-            if snap
-                .items
-                .get(&first_i64)
-                .and_then(|i| ctx.sde.types.get(&i.type_id))
-                .is_some_and(|t| matches!(t.category_id, 6 | 65))
-            {
-                Some(first_i64)
+    let (ship_id, type_id, explicit_flag) = match parsed {
+        crate::router::slash_registry::FitSlashArgs::CallerShip {
+            type_id,
+            explicit_flag,
+        } => (caller_ship_id, type_id, explicit_flag),
+        crate::router::slash_registry::FitSlashArgs::NumericPrefix {
+            first,
+            second,
+            third_flag,
+        } => {
+            let matched_target_ship = ctx.db.with_snapshot(|snap| {
+                if snap
+                    .items
+                    .get(&first)
+                    .and_then(|i| ctx.sde.types.get(&i.type_id))
+                    .is_some_and(|t| matches!(t.category_id, 6 | 65))
+                {
+                    Some(first)
+                } else {
+                    snap.characters.get(&first).map(|c| c.active_ship_id)
+                }
+            });
+            if let Some(target_ship_id) = matched_target_ship {
+                (target_ship_id, second, third_flag)
+            } else if third_flag.is_some() {
+                return Err(BridgeRpcError {
+                    code: "ShipNotFound".into(),
+                    message: format!("Target ship {first} not found"),
+                    client_error: None,
+                });
             } else {
-                snap.characters.get(&first_i64).map(|c| c.active_ship_id)
+                let tid = u32::try_from(first).ok().filter(|&v| v > 0).ok_or_else(|| {
+                    crate::router::slash_registry::invalid_slash_arg_error(
+                        "Usage: /fit [me|myship|<ship_id|char_id>] <type_id> [flag_id]",
+                    )
+                })?;
+                let flg = u16::try_from(second)
+                    .ok()
+                    .filter(|&v| v > 0)
+                    .map(InventoryFlag::from_u16)
+                    .ok_or_else(|| {
+                        crate::router::slash_registry::invalid_slash_arg_error(
+                            "Invalid flag_id for /fit",
+                        )
+                    })?;
+                (caller_ship_id, tid, Some(flg))
             }
-        });
-        if let Some(target_ship_id) = matched_target_ship {
-            let Some(tid) = tokens.get(1).and_then(|s| s.parse::<u32>().ok()) else {
-                return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /fit <ship_id|char_id> <type_id> [flag_id]".into(), client_error: None });
-            };
-            let flg = tokens
-                .get(2)
-                .and_then(|s| s.parse::<u16>().ok())
-                .map(InventoryFlag::from_u16);
-            (target_ship_id, tid, flg)
-        } else {
-            let Some(tid) = tokens[0].parse::<u32>().ok() else {
-                return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /fit <type_id> [flag_id]".into(), client_error: None });
-            };
-            let flg = tokens
-                .get(1)
-                .and_then(|s| s.parse::<u16>().ok())
-                .map(InventoryFlag::from_u16);
-            (caller_ship_id, tid, flg)
         }
-    } else {
-        let Some(tid) = tokens[0].parse::<u32>().ok() else {
-            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /fit <type_id> [flag_id]".into(), client_error: None });
-        };
-        (caller_ship_id, tid, None)
     };
 
     let Some(mod_type) = ctx.sde.types.get(&type_id) else {
-        return Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Module type {type_id} not found in SDE"), client_error: None });
+        return Err(BridgeRpcError {
+            code: "TypeNotFound".into(),
+            message: format!("Module type {type_id} not found in SDE"),
+            client_error: None,
+        });
     };
-    let effects = &mod_type.effect_ids;
-
     let Some((ship_owner_id, ship_cat_id)) = ctx.db.with_snapshot(|snap| {
         snap.items.get(&ship_id).map(|ship_item| {
             let cat = ctx
@@ -1219,296 +1219,92 @@ pub(crate) fn dispatch_fit_slash(
             (ship_item.owner_id, cat)
         })
     }) else {
-        return Err(BridgeRpcError { code: "ShipNotFound".into(), message: format!("Target ship {ship_id} not found"), client_error: None });
+        return Err(BridgeRpcError {
+            code: "ShipNotFound".into(),
+            message: format!("Target ship {ship_id} not found"),
+            client_error: None,
+        });
     };
 
-        let pre_fit_opt = if ship_cat_id == 6 {
-            ctx.fit(ship_owner_id, ship_id).ok()
+    let before_ship_attrs = if ship_cat_id == 6 {
+        crate::services::notify_emitters_skills_trade_godma::snapshot_ship_fitting_attrs_for_ship(
+            ctx,
+            ship_owner_id,
+            ship_id,
+        )
+    } else {
+        None
+    };
+
+    // Explicit-flag GM `/fit <ship> <type> <flag>` forces the chosen slot online when hull CPU/PG
+    // permits; auto-slot `/fit <type>` checks pilot skills (#648).
+    let online_policy = if explicit_flag.is_some() {
+        crate::domain::fitting::FitOnlinePolicy::SkipSkillsCheckResources
+    } else {
+        crate::domain::fitting::FitOnlinePolicy::CheckSkillsAndResources
+    };
+
+    let outcome = crate::domain::fitting::fit_newly_minted_item_tx(
+        ctx,
+        crate::domain::fitting::MintAndFitRequest {
+            ship_id,
+            type_id,
+            explicit_flag,
+            online_policy,
+        },
+    )
+    .map_err(|err| {
+        if crate::domain::fitting::is_fit_slot_validation_error(&err) {
+            BridgeRpcError::fitting_validation_failed(
+                Some(ship_id),
+                None,
+                Some(i64::from(type_id)),
+                &mod_type.name,
+                err.message,
+            )
+        } else {
+            crate::services::domain_err_to_rpc(err)
+        }
+    })?;
+
+    let rec = outcome.item;
+    // ProcessInventoryChange still emits right before `invalidate_and_push_fit` / `OnModuleFitted`
+    // (#1252, parity with `inventory_fitting.rs`); `OnItemChange` is commit-projected.
+    crate::router::notify_registry::emit_process_inventory_change(
+        ctx,
+        rec.owner_id,
+        &rec,
+        0,
+        0,
+    );
+    ctx.invalidate_and_push_fit(ship_id);
+    if outcome.is_fitting_slot {
+        let after_fit_opt = if outcome.ship_category_id == 6 {
+            ctx.get_or_rebuild_ship_fitting(rec.owner_id, ship_id).ok()
         } else {
             None
         };
-        let before_ship_attrs = pre_fit_opt.as_ref().map(|f| {
-            crate::services::notify_emitters_skills_trade_godma::snapshot_ship_fitting_attrs(ctx, f)
-        });
+        crate::services::inventory_fitting::emit_module_fitted_notifications(
+            ctx,
+            rec.owner_id,
+            ship_id,
+            &rec,
+            outcome.is_online,
+            true,
+            before_ship_attrs.as_ref(),
+            after_fit_opt.as_ref(),
+            true,
+        );
+    }
 
-        let res = ctx.db.try_with_mut_snapshot(|snap| {
-            let Some(ship_item) = snap.items.get(&ship_id).cloned() else {
-                return Err(BridgeRpcError { code: "ShipNotFound".into(), message: format!("Target ship {ship_id} not found"), client_error: None });
-            };
-            let occupied_flags: std::collections::HashSet<InventoryFlag> = snap
-                .items
-                .values()
-                .filter(|i| i.location_id == ship_id)
-                .map(|i| i.flag)
-                .collect();
-
-            let candidate_flags: Vec<InventoryFlag> = if effects.contains(&12) {
-                vec![
-                    InventoryFlag::HiSlot0,
-                    InventoryFlag::HiSlot1,
-                    InventoryFlag::HiSlot2,
-                    InventoryFlag::HiSlot3,
-                    InventoryFlag::HiSlot4,
-                    InventoryFlag::HiSlot5,
-                    InventoryFlag::HiSlot6,
-                    InventoryFlag::HiSlot7,
-                ]
-            } else if effects.contains(&13) {
-                vec![
-                    InventoryFlag::MedSlot0,
-                    InventoryFlag::MedSlot1,
-                    InventoryFlag::MedSlot2,
-                    InventoryFlag::MedSlot3,
-                    InventoryFlag::MedSlot4,
-                    InventoryFlag::MedSlot5,
-                    InventoryFlag::MedSlot6,
-                    InventoryFlag::MedSlot7,
-                ]
-            } else if effects.contains(&11) {
-                vec![
-                    InventoryFlag::LoSlot0,
-                    InventoryFlag::LoSlot1,
-                    InventoryFlag::LoSlot2,
-                    InventoryFlag::LoSlot3,
-                    InventoryFlag::LoSlot4,
-                    InventoryFlag::LoSlot5,
-                    InventoryFlag::LoSlot6,
-                    InventoryFlag::LoSlot7,
-                ]
-            } else if effects.contains(&2663) {
-                vec![
-                    InventoryFlag::RigSlot0,
-                    InventoryFlag::RigSlot1,
-                    InventoryFlag::RigSlot2,
-                ]
-            } else if mod_type.category_id == 32 || effects.contains(&3772) {
-                if let Some(&req_slot_f) = mod_type.default_attributes.get(&1366) {
-                    vec![InventoryFlag::from_u16(req_slot_f as u16)]
-                } else {
-                    vec![
-                        InventoryFlag::SubSystemSlot0,
-                        InventoryFlag::SubSystemSlot1,
-                        InventoryFlag::SubSystemSlot2,
-                        InventoryFlag::SubSystemSlot3,
-                        InventoryFlag::SubSystemSlot4,
-                    ]
-                }
-            } else if mod_type.category_id == 18 {
-                vec![InventoryFlag::DroneBay]
-            } else {
-                vec![
-                    InventoryFlag::HiSlot0,
-                    InventoryFlag::HiSlot1,
-                    InventoryFlag::MedSlot0,
-                    InventoryFlag::LoSlot0,
-                    InventoryFlag::Cargo,
-                ]
-            };
-
-            let has_slot_effect = effects.iter().any(|e| matches!(e, 11 | 12 | 13 | 2663 | 3772));
-            let has_structure_slot_effect = has_slot_effect || effects.contains(&6306);
-            let ship_group_id = ctx.sde.types.get(&ship_item.type_id).map(|t| t.group_id);
-            let chosen_flag = if explicit_flag == Some(InventoryFlag::Cargo) {
-                InventoryFlag::Cargo
-            } else if mod_type.category_id == 18 {
-                match explicit_flag {
-                    None | Some(InventoryFlag::DroneBay) => InventoryFlag::DroneBay,
-                    Some(other) => {
-                        return Err(BridgeRpcError::fitting_validation_failed(Some(ship_id), None, Some(i64::from(type_id)), &mod_type.name, format!("Drone type {type_id} cannot be fitted into slot flag {}", other as u16)));
-                    }
-                }
-            } else if ship_cat_id == 6 && mod_type.category_id == 8 {
-                match explicit_flag {
-                    Some(ef) if matches!(ef as u16, 11..=34) => ef,
-                    _ => {
-                        return Err(BridgeRpcError::fitting_validation_failed(Some(ship_id), None, Some(i64::from(type_id)), &mod_type.name, format!("Charge type {type_id} ({}) requires an explicit module slot or Cargo flag", mod_type.name)));
-                    }
-                }
-            } else if ship_cat_id == 6 && matches!(mod_type.category_id, 7 | 32) && has_slot_effect
-            {
-                if mod_type.category_id == 32 && ship_group_id != Some(963) {
-                    return Err(BridgeRpcError::fitting_validation_failed(Some(ship_id), None, Some(i64::from(type_id)), &mod_type.name, format!("Subsystem type {type_id} ({}) can only be fitted to Strategic Cruisers", mod_type.name)));
-                }
-                if let Some(ef) = explicit_flag {
-                    let raw = ef as u16;
-                    let slot_matches = match raw {
-                        11..=18 => effects.contains(&11),
-                        19..=26 => effects.contains(&13),
-                        27..=34 => effects.contains(&12),
-                        92..=94 => effects.contains(&2663),
-                        125..=132 => mod_type.category_id == 32 || effects.contains(&3772),
-                        _ => false,
-                    };
-                    if !slot_matches {
-                        return Err(BridgeRpcError::fitting_validation_failed(Some(ship_id), None, Some(i64::from(type_id)), &mod_type.name, format!("Type {type_id} ({}) is incompatible with slot flag {raw}", mod_type.name)));
-                    }
-                    ef
-                } else {
-                    // Validate hull slot limits, subsystem slots, and turret/launcher hardpoints before creating the item.
-                    let mut chosen: Option<InventoryFlag> = None;
-                    let mut first_err: Option<String> = None;
-                    for &cand in &candidate_flags {
-                        if occupied_flags.contains(&cand) {
-                            continue;
-                        }
-                        if let Some(ref base_fit) = pre_fit_opt {
-                            let mut sim_fit = base_fit.clone();
-                            match sim_fit.fit_module_with_state(
-                                -(snap.next_entity_id + 1),
-                                type_id,
-                                cand as u16,
-                                false,
-                                &ctx.sde,
-                            ) {
-                                Ok(()) => {
-                                    chosen = Some(cand);
-                                    break;
-                                }
-                                Err(msg) => {
-                                    if first_err.is_none() {
-                                        first_err = Some(msg);
-                                    }
-                                }
-                            }
-                        } else {
-                            chosen = Some(cand);
-                            break;
-                        }
-                    }
-                    let Some(valid_flag) = chosen else {
-                        return Err(BridgeRpcError::fitting_validation_failed(Some(ship_id), None, Some(i64::from(type_id)), &mod_type.name, first_err.unwrap_or_else(|| format!("No free compatible fitting slot for module type {type_id} on ship {ship_id}"))));
-                    };
-                    valid_flag
-                }
-            } else if ship_cat_id == 65
-                && mod_type.category_id == 66
-                && has_structure_slot_effect
-            {
-                if let Some(ef) = explicit_flag {
-                    if !matches!(ef as u16, 11..=34 | 92..=94 | 164..=171) {
-                        return Err(BridgeRpcError::fitting_validation_failed(Some(ship_id), None, Some(i64::from(type_id)), &mod_type.name, format!("Structure module type {type_id} is incompatible with slot flag {}", ef as u16)));
-                    }
-                    ef
-                } else if effects.contains(&6306) {
-                    (164u16..=171)
-                        .map(InventoryFlag::from_u16)
-                        .find(|f| !occupied_flags.contains(f))
-                        .unwrap_or_else(|| InventoryFlag::from_u16(164))
-                } else {
-                    candidate_flags
-                        .iter()
-                        .copied()
-                        .find(|f| !occupied_flags.contains(f))
-                        .unwrap_or(candidate_flags[0])
-                }
-            } else {
-                return Err(BridgeRpcError::fitting_validation_failed(Some(ship_id), None, Some(i64::from(type_id)), &mod_type.name, format!("Type {type_id} ({}) cannot be fitted onto target {ship_id}", mod_type.name)));
-            };
-
-            snap.next_entity_id += 1;
-            let item_id = snap.next_entity_id;
-            let rec = InventoryItemRecord {
-                item_id,
-                type_id,
-                owner_id: ship_item.owner_id,
-                location_id: ship_id,
-                flag: chosen_flag,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            };
-            snap.items.insert(item_id, rec.clone());
-            snap.module_online_states.insert(item_id, false);
-            Ok((rec, chosen_flag))
-        });
-
-        return match res {
-            Ok((rec, chosen_flag)) => {
-                ctx.invalidate_ship_fitting(ship_id);
-                let flag_u16 = chosen_flag as u16;
-                let is_fitting_slot = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
-                let mut is_online = false;
-                if is_fitting_slot {
-                    if let Ok(mut fit) = ctx.fit(rec.owner_id, ship_id) {
-                        // Explicit-flag GM `/fit <ship> <type> <flag>` forces the chosen slot online
-                        // when hull CPU/PG permits; auto-slot `/fit <type>` checks pilot skills (#648).
-                        let online_ok = if explicit_flag.is_some() {
-                            fit.set_module_online_skip_skills(rec.item_id, &ctx.sde).is_ok()
-                        } else {
-                            fit.set_module_online(rec.item_id, &ctx.sde).is_ok()
-                        };
-                        if fit.modules.contains_key(&rec.item_id) && online_ok {
-                            is_online = true;
-                        }
-                    }
-                    if is_online {
-                        ctx.db.with_mut_snapshot(|snap| {
-                            snap.module_online_states.insert(rec.item_id, true);
-                        });
-                    }
-                }
-                // ProcessInventoryChange still emits right before `invalidate_and_push_fit` / `OnModuleFitted`
-                // (#1252, parity with `inventory_fitting.rs`); `OnItemChange` is commit-projected.
-                crate::router::notify_registry::emit_process_inventory_change(
-                    ctx,
-                    rec.owner_id,
-                    &rec,
-                    0,
-                    0,
-                );
-                ctx.invalidate_and_push_fit(ship_id);
-                if is_fitting_slot {
-                    let group_id = ctx
-                        .sde
-                        .types
-                        .get(&type_id)
-                        .map(|t| i64::from(t.group_id))
-                        .unwrap_or(0);
-                    ctx.emit_typed(
-                        NotificationTarget::Character(rec.owner_id),
-                        OnModuleFitted {
-                            char_id: rec.owner_id,
-                            flag: chosen_flag as i64,
-                            type_id: type_id as i64,
-                            group_id,
-                        },
-                    );
-                    let _ = ctx.notify_module_online_state(rec.owner_id, rec.item_id, is_online);
-                    if is_online {
-                        let eff_id = ctx.effect_id_for_module(type_id, Some("online")).unwrap_or(16) as i32;
-                        ctx.notify_godma_ship_effect(
-                            crate::router::NotificationTarget::Character(rec.owner_id),
-                            rec.item_id,
-                            eff_id,
-                            true,
-                            0,
-                            0,
-                        );
-                    }
-                    crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes_for_ship(
-                        ctx,
-                        rec.owner_id,
-                        ship_id,
-                        before_ship_attrs.as_ref(),
-                        true,
-                    );
-                }
-                Ok(PyRep::keyval([
-                    ("command", PyRep::String(cmd.to_string())),
-                    ("shipID", PyRep::Integer(ship_id)),
-                    ("itemID", PyRep::Integer(rec.item_id)),
-                    ("typeID", PyRep::Integer(type_id as i64)),
-                    ("flagID", PyRep::Integer(chosen_flag as i64)),
-                    ("online", PyRep::Bool(is_online)),
-                ]))
-            }
-            Err(e) => Err(e),
-        }
+    Ok(PyRep::keyval([
+        ("command", PyRep::String(cmd.to_string())),
+        ("shipID", PyRep::Integer(ship_id)),
+        ("itemID", PyRep::Integer(rec.item_id)),
+        ("typeID", PyRep::Integer(i64::from(type_id))),
+        ("flagID", PyRep::Integer(outcome.chosen_flag as i64)),
+        ("online", PyRep::Bool(outcome.is_online)),
+    ]))
 }
 
 /// Registry dispatch target for `/load` (`#1193`).
@@ -1519,132 +1315,134 @@ pub(crate) fn dispatch_load_slash(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, cid) = ServerContext::require_character(session)?;
     let cmd = inv.raw;
-    let tokens = parse_slash_tokens(inv.rest);
-    if tokens.is_empty() {
-        return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /load [target|me] <type_id> [quantity]".into(), client_error: None });
+    let parsed = crate::router::slash_registry::parse_load_slash_args(inv.rest)?;
+
+    enum LoadTargetSpec {
+        Caller,
+        ExplicitTarget(i64),
     }
 
-    let parse_qty = |tok_opt: Option<&String>| -> Result<i32, BridgeRpcError> {
-        match tok_opt {
-            None => Ok(1),
-            Some(s) => s
-                .parse::<i32>()
-                .ok()
-                .filter(|&q| q > 0)
-                .ok_or_else(|| BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Quantity for /load must be a positive integer".into(), client_error: None }),
+    let (target_spec, type_id, qty) = match parsed {
+        crate::router::slash_registry::LoadSlashArgs::Caller { type_id, quantity } => {
+            (LoadTargetSpec::Caller, type_id, quantity)
         }
-    };
-
-    let (explicit_target_tok, type_id_tok, qty_tok) = if is_me_or_myship(&tokens[0]) {
-        let Some(tid_s) = tokens.get(1) else {
-            return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /load me <type_id> [quantity]".into(), client_error: None });
-        };
-        (Some(tokens[0].as_str()), tid_s.as_str(), tokens.get(2))
-    } else if tokens.len() >= 2 {
-        let first_i64 = tokens[0].parse::<i64>().unwrap_or(0);
-        let is_known_target = first_i64 > 0
-            && (ctx.sde.stations.contains_key(&first_i64)
+        crate::router::slash_registry::LoadSlashArgs::TargetId {
+            target_id,
+            type_id,
+            quantity,
+        } => (LoadTargetSpec::ExplicitTarget(target_id), type_id, quantity),
+        crate::router::slash_registry::LoadSlashArgs::NumericPair { first, second } => {
+            let is_known_target = ctx.sde.stations.contains_key(&first)
                 || ctx.db.with_snapshot(|snap| {
-                    snap.characters.contains_key(&first_i64)
-                        || snap.items.contains_key(&first_i64)
-                        || snap.structures.contains_key(&first_i64)
-                }));
-        if is_known_target {
-            (Some(tokens[0].as_str()), tokens[1].as_str(), tokens.get(2))
-        } else {
-            (None, tokens[0].as_str(), tokens.get(1))
+                    snap.characters.contains_key(&first)
+                        || snap.items.contains_key(&first)
+                        || snap.structures.contains_key(&first)
+                });
+            if is_known_target {
+                let tid = u32::try_from(second).ok().filter(|&v| v > 0).ok_or_else(|| {
+                    crate::router::slash_registry::invalid_slash_arg_error(
+                        "Usage: /load [target|me] <type_id> [quantity]",
+                    )
+                })?;
+                (LoadTargetSpec::ExplicitTarget(first), tid, 1)
+            } else {
+                let tid = u32::try_from(first).ok().filter(|&v| v > 0).ok_or_else(|| {
+                    crate::router::slash_registry::invalid_slash_arg_error(
+                        "Usage: /load [target|me] <type_id> [quantity]",
+                    )
+                })?;
+                (LoadTargetSpec::Caller, tid, second)
+            }
         }
-    } else {
-        (None, tokens[0].as_str(), None)
     };
 
-    let Ok(type_id) = type_id_tok.parse::<u32>() else {
-        return Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /load [target|me] <type_id> [quantity]".into(), client_error: None });
-    };
-    let qty = parse_qty(qty_tok)?;
     let Some(inv_type) = ctx.sde.types.get(&type_id) else {
-        return Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Type ID {type_id} not found in SDE"), client_error: None });
+        return Err(BridgeRpcError {
+            code: "TypeNotFound".into(),
+            message: format!("Type ID {type_id} not found in SDE"),
+            client_error: None,
+        });
     };
     let is_ship = inv_type.category_id == 6;
 
-        let res = ctx.db.try_with_mut_snapshot(|snap| {
-            let resolve_char_dest = |char_id: i64| -> Result<(i64, i64, InventoryFlag), BridgeRpcError> {
-                let ch = snap
-                    .characters
-                    .get(&char_id)
-                    .ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found"), client_error: None })?;
+    let rec = ctx.db.try_with_mut_snapshot(|snap| {
+        let resolve_char_dest =
+            |char_id: i64| -> Result<(i64, i64, InventoryFlag), BridgeRpcError> {
+                let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("Character {char_id} not found"),
+                    client_error: None,
+                })?;
                 if ch.active_ship_id > 0 && snap.items.contains_key(&ch.active_ship_id) {
                     Ok((char_id, ch.active_ship_id, InventoryFlag::Cargo))
                 } else if let Some(st_id) = ch.station_id.or(ch.structure_id) {
                     Ok((char_id, st_id, InventoryFlag::Hangar))
                 } else {
-                    Err(BridgeRpcError { code: "TargetNotFound".into(), message: format!("Character {char_id} has no active ship or docked station"), client_error: None })
+                    Err(BridgeRpcError {
+                        code: "TargetNotFound".into(),
+                        message: format!(
+                            "Character {char_id} has no active ship or docked station"
+                        ),
+                        client_error: None,
+                    })
                 }
             };
 
-            let (owner_id, location_id, flag) = match explicit_target_tok {
-                None => resolve_char_dest(cid)?,
-                Some(tok) if is_me_or_myship(tok) => resolve_char_dest(cid)?,
-                Some(tok) => {
-                    let target_id = tok
-                        .parse::<i64>()
-                        .map_err(|_| BridgeRpcError { code: "InvalidSlashArgument".into(), message: format!("Invalid target '{tok}' for /load"), client_error: None })?;
-                    if snap.characters.contains_key(&target_id) {
-                        resolve_char_dest(target_id)?
-                    } else if let Some(target_item) = snap.items.get(&target_id) {
-                        (target_item.owner_id, target_id, InventoryFlag::Cargo)
-                    } else if snap.structures.contains_key(&target_id)
-                        || ctx.sde.stations.contains_key(&target_id)
-                    {
-                        (cid, target_id, InventoryFlag::Hangar)
-                    } else {
-                        return Err(BridgeRpcError { code: "TargetNotFound".into(), message: format!("Target {target_id} not found for /load"), client_error: None });
-                    }
+        let (owner_id, location_id, flag) = match target_spec {
+            LoadTargetSpec::Caller => resolve_char_dest(cid)?,
+            LoadTargetSpec::ExplicitTarget(target_id) => {
+                if snap.characters.contains_key(&target_id) {
+                    resolve_char_dest(target_id)?
+                } else if let Some(target_item) = snap.items.get(&target_id) {
+                    (target_item.owner_id, target_id, InventoryFlag::Cargo)
+                } else if snap.structures.contains_key(&target_id)
+                    || ctx.sde.stations.contains_key(&target_id)
+                {
+                    (cid, target_id, InventoryFlag::Hangar)
+                } else {
+                    return Err(BridgeRpcError {
+                        code: "TargetNotFound".into(),
+                        message: format!("Target {target_id} not found for /load"),
+                        client_error: None,
+                    });
                 }
-            };
+            }
+        };
 
-            snap.next_entity_id += 1;
-            let item_id = snap.next_entity_id;
-            let rec = InventoryItemRecord {
-                item_id,
-                type_id,
+        let granted = crate::domain::items::grant_item_in_snap(
+            Some(&ctx.sde),
+            snap,
+            None,
+            crate::domain::items::GrantItemRequest::explicit(
                 owner_id,
                 location_id,
                 flag,
-                quantity: qty,
-                singleton: is_ship && qty == 1,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            };
-            snap.items.insert(item_id, rec.clone());
-            Ok(rec)
-        });
+                type_id,
+                qty,
+            )
+            .with_singleton(is_ship && qty == 1)
+            .with_merge_existing_stack(false),
+        )
+        .map_err(crate::services::domain_err_to_rpc)?;
+        Ok(granted.item)
+    })?;
 
-        match res {
-            Ok(rec) => {
-                // V24.02 `menu_implant.PlugEmIn`, `dna.Load`, and `svc_invtools.SpawnRandom`
-                // index `slash.SlashCmd('/load ...')[0]` as the spawned `itemID`, while chat
-                // and `svc_slash.JobHandler` format non-`None` replies via `'slash result: %s' % res`.
-                // Returning a `PyRep::List` (rather than a 2-tuple) satisfies `res[0]` without
-                // triggering Python `TypeError` tuple unpacking in `%s` formatting.
-                Ok(PyRep::List(vec![
-                    PyRep::Integer(rec.item_id),
-                    PyRep::keyval([
-                        ("command", PyRep::String(cmd.to_string())),
-                        ("itemID", PyRep::Integer(rec.item_id)),
-                        ("typeID", PyRep::Integer(type_id as i64)),
-                        ("quantity", PyRep::Integer(qty as i64)),
-                        ("locationID", PyRep::Integer(rec.location_id)),
-                        ("flagID", PyRep::Integer(rec.flag as i64)),
-                    ]),
-                ]))
-            }
-            Err(e) => Err(e),
-        }
+    // V24.02 `menu_implant.PlugEmIn`, `dna.Load`, and `svc_invtools.SpawnRandom`
+    // index `slash.SlashCmd('/load ...')[0]` as the spawned `itemID`, while chat
+    // and `svc_slash.JobHandler` format non-`None` replies via `'slash result: %s' % res`.
+    // Returning a `PyRep::List` (rather than a 2-tuple) satisfies `res[0]` without
+    // triggering Python `TypeError` tuple unpacking in `%s` formatting.
+    Ok(PyRep::List(vec![
+        PyRep::Integer(rec.item_id),
+        PyRep::keyval([
+            ("command", PyRep::String(cmd.to_string())),
+            ("itemID", PyRep::Integer(rec.item_id)),
+            ("typeID", PyRep::Integer(i64::from(type_id))),
+            ("quantity", PyRep::Integer(i64::from(qty))),
+            ("locationID", PyRep::Integer(rec.location_id)),
+            ("flagID", PyRep::Integer(rec.flag as i64)),
+        ]),
+    ]))
 }
 
 /// Registry dispatch target for `/kill` (`#1193`).
