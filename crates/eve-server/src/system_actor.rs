@@ -3186,6 +3186,12 @@ impl SystemRegistry {
                 );
             }
             flush_actor_active_drones(true);
+            flush_post_unlock_actions_on_actor(
+                &post_unlock_actions_actor,
+                &actor_flush_thread_actor,
+                solar_system_id,
+                &command_panics_actor,
+            );
             shutdown_cooldown_guard.flush_now();
             let leftover_post_unlock_actions = {
                 let mut actions = post_unlock_actions_actor.lock().unwrap_or_else(|e| e.into_inner());

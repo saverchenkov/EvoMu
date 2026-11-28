@@ -3543,7 +3543,7 @@ async fn aborted_loading_does_not_steal_gate_or_resurrect_deleted_cooldown() {
     assert!(cg.in_flight_loading_transitions.is_empty() && cg.pending_transitions.is_empty());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stale_gen1_actor_exit_does_not_steal_gen2_transitions_or_tidi_mode() {
     use crate::system_actor::module_cooldowns::CooldownGatePhase;
     use eve_db::ServerClock;
@@ -3577,7 +3577,9 @@ async fn stale_gen1_actor_exit_does_not_steal_gen2_transitions_or_tidi_mode() {
             let _ = tx.send(());
         }
         if let Some(rx) = step_release_rx.lock().unwrap().take() {
-            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+            let _ = tokio::task::block_in_place(|| {
+                rx.recv_timeout(std::time::Duration::from_secs(10))
+            });
         }
     }));
     let (tx_step, _rx_step) = tokio::sync::oneshot::channel();
@@ -3689,7 +3691,9 @@ async fn stale_gen1_actor_exit_does_not_steal_gen2_transitions_or_tidi_mode() {
             let _ = tx.send(());
         }
         if let Some(rx) = g2_release_rx.lock().unwrap().take() {
-            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+            let _ = tokio::task::block_in_place(|| {
+                rx.recv_timeout(std::time::Duration::from_secs(10))
+            });
         }
     }));
     let (tx_step2, _rx_step2) = tokio::sync::oneshot::channel();
@@ -3720,7 +3724,9 @@ async fn stale_gen1_actor_exit_does_not_steal_gen2_transitions_or_tidi_mode() {
             let _ = tx.send(());
         }
         if let Some(rx) = g3_release_rx.lock().unwrap().take() {
-            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+            let _ = tokio::task::block_in_place(|| {
+                rx.recv_timeout(std::time::Duration::from_secs(10))
+            });
         }
     }));
     let (tx_step3, _rx_step3) = tokio::sync::oneshot::channel();
