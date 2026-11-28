@@ -913,6 +913,26 @@ async fn docked_safe_and_evicted_handlers_keep_cold_system_cold() {
         .expect("lightweight med-slot module in SDE");
 
     ctx.db.with_mut_snapshot(|snap| {
+        let char_skills = snap.skills.entry(char_id).or_default();
+        for tid in [587_u32, hi_mod_tid, med_mod_tid] {
+            if let Some(t) = ctx.sde.types.get(&tid) {
+                for attr_id in [182_u16, 183, 184, 1285, 1289, 1290] {
+                    if let Some(&sk_f) = t.default_attributes.get(&attr_id) {
+                        let sk_id = sk_f as u32;
+                        if sk_id > 0 {
+                            char_skills.insert(
+                                sk_id,
+                                TrainedSkillRecord {
+                                    type_id: sk_id,
+                                    level: 5,
+                                    skill_points: 256_000.0,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
         snap.accounts.insert(
             format!("cold_dock_{uid}"),
             AccountRecord {
