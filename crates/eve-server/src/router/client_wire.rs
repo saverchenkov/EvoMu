@@ -53,15 +53,8 @@ pub struct ClientWireSession<'c> {
     pub deferred_ship_id: Option<PendingDeferredShipId>,
 }
 
-fn build_wire_state_for_session(
-    ctx: &ServerContext,
-    session: &SessionState,
-    client_id: u64,
-) -> SessionWireState {
-    let mut wire_state = SessionWireState::new(session.session_id, client_id)
-        .with_flight_recorder(std::sync::Arc::clone(&ctx.flight_recorder));
-    let scene_epoch = ctx.session_scene_epoch(session.session_id);
-    let has_ballpark = session.character_id.is_some()
+fn session_has_active_ballpark(ctx: &ServerContext, session: &SessionState) -> bool {
+    session.character_id.is_some()
         && session.solar_system_id.is_some()
         && session.station_id.is_none()
         && (session.structure_id.is_none()
@@ -70,7 +63,36 @@ fn build_wire_state_for_session(
                 .zip(session.solar_system_id)
                 .is_some_and(|(cid, sys_id)| {
                     ctx.is_space_ballpark_bootstrapped(session.session_id, cid, sys_id)
-                }));
+                }))
+}
+
+fn initial_wire_tick_subscription(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> (Option<u32>, broadcast::Receiver<TickBroadcast>) {
+    if session_has_active_ballpark(ctx, session) {
+        if let Some(sid) = session
+            .solar_system_id
+            .filter(|&s| s > 0 && ctx.sde.solar_systems.contains_key(&s))
+        {
+            return (Some(sid), ctx.systems.get_or_spawn(sid).subscribe());
+        }
+    }
+    // Pre-character, unauthenticated, and docked sessions without View Outside hold a closed
+    // channel until undock or space entry attaches a live solar system subscription.
+    let (_tx, closed_rx) = broadcast::channel(1);
+    (None, closed_rx)
+}
+
+fn build_wire_state_for_session(
+    ctx: &ServerContext,
+    session: &SessionState,
+    client_id: u64,
+) -> SessionWireState {
+    let mut wire_state = SessionWireState::new(session.session_id, client_id)
+        .with_flight_recorder(std::sync::Arc::clone(&ctx.flight_recorder));
+    let scene_epoch = ctx.session_scene_epoch(session.session_id);
+    let has_ballpark = session_has_active_ballpark(ctx, session);
     let is_scene_in_space = has_ballpark
         || (session.character_id.is_some()
             && session.station_id.is_none()
@@ -111,11 +133,7 @@ impl<'c> ClientWireSession<'c> {
     pub fn from_session(ctx: &'c ServerContext, mut session: SessionState) -> Self {
         let client_id = 1_000_000_000_000_u64.saturating_add(session.session_id);
         session.live_notify_listener = true;
-        let subscribed_sys_id = session.solar_system_id;
-        let sys_rx = ctx
-            .systems
-            .get_or_spawn(subscribed_sys_id.unwrap_or(0))
-            .subscribe();
+        let (subscribed_sys_id, sys_rx) = initial_wire_tick_subscription(ctx, &session);
         let wire_state = build_wire_state_for_session(ctx, &session, client_id);
         if ctx.flight_recorder.get_wire_state(session.session_id).is_none() {
             ctx.flight_recorder.record_wire_state(&wire_state);
@@ -242,11 +260,7 @@ pub async fn dispatch_call_on_wire(
     let prev_live = session.live_notify_listener;
     session.live_notify_listener = true;
     let client_id = 1_000_000_000_000_u64.saturating_add(session.session_id);
-    let mut subscribed_sys_id = session.solar_system_id;
-    let mut sys_rx = ctx
-        .systems
-        .get_or_spawn(subscribed_sys_id.unwrap_or(0))
-        .subscribe();
+    let (mut subscribed_sys_id, mut sys_rx) = initial_wire_tick_subscription(ctx, session);
     let mut wire_state = build_wire_state_for_session(ctx, session, client_id);
     let mut deferred_ship_id = None;
     let mut wire_refs = CallReqWireRefs {
@@ -335,5 +349,163 @@ async fn execute_wire_step(
         notifications: raw.notifications,
         drained_char_notifications: raw.drained_char_notifications,
         used_unmapped_custom_info_fallback: raw.used_unmapped_custom_info_fallback,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::outbound_sequencer::{DestinyStream, OutFrame};
+    use crate::system_actor::SystemLifecycleState;
+    use eve_db::{CharacterRecord, InventoryFlag, InventoryItemRecord};
+
+    #[tokio::test]
+    async fn prechar_and_docked_wire_sessions_keep_systems_cold_and_undock_subscribes_set_state() {
+        let ctx = ServerContext::new();
+        let sys_id = 30_000_142_u32;
+        let station_id = 60_003_760_i64;
+        let user_id = 91_542_u64;
+        let char_id = 91_542_001_i64;
+        let ship_id = 101_542_001_i64;
+        let session_id = 91_542_010_u64;
+
+        assert!(ctx.sde.solar_systems.contains_key(&sys_id));
+        assert!(ctx.sde.stations.contains_key(&station_id));
+
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.insert(
+                char_id,
+                CharacterRecord {
+                    character_id: char_id,
+                    user_id,
+                    name: "WireColdPilot".into(),
+                    corporation_id: 1_000_009,
+                    station_id: Some(station_id),
+                    structure_id: None,
+                    solar_system_id: sys_id,
+                    constellation_id: 20_000_020,
+                    region_id: 10_000_002,
+                    active_ship_id: ship_id,
+                    home_station_id: station_id,
+                    clone_grade: 2,
+                    version: 1,
+                    system_epoch: 1,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 587,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        let oneshot_session_id = 91_542_011_u64;
+        ctx.db
+            .acquire_online_lock(
+                user_id,
+                oneshot_session_id,
+                Some(char_id),
+                true,
+                ctx.now_unix_secs(),
+            )
+            .expect("acquire online lock for one-shot wire session");
+
+        let kw = HashMap::new();
+
+        // 1. Pre-character wire session must not spawn system 0 or Jita.
+        let mut pre_char_wire = ClientWireSession::new(&ctx, 91_542_009);
+        assert!(pre_char_wire.subscribed_sys_id.is_none());
+        assert!(ctx.systems.get_handle(0).is_none());
+        assert_eq!(
+            ctx.systems.system_lifecycle_state(0),
+            SystemLifecycleState::Cold
+        );
+        let time_out = pre_char_wire
+            .call_wire("machoNet", None, "GetTime", &[], &kw)
+            .await;
+        assert!(time_out.rpc_result.is_ok());
+        assert!(ctx.systems.get_handle(0).is_none());
+        assert!(ctx.systems.get_handle(sys_id).is_none());
+
+        // 2. Docked wire session (`from_session`) and one-shot `dispatch_call_on_wire` must not
+        //    spawn system 0 or the docked solar system.
+        let mut docked_sess = SessionState::new(session_id);
+        docked_sess.user_id = Some(user_id);
+        docked_sess.character_id = Some(char_id);
+        docked_sess.corporation_id = Some(1_000_009);
+        docked_sess.solar_system_id = Some(sys_id);
+        docked_sess.station_id = Some(station_id);
+        docked_sess.ship_id = Some(ship_id);
+        docked_sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+
+        let mut oneshot_sess = docked_sess.clone();
+        oneshot_sess.session_id = oneshot_session_id;
+        let bal_out = dispatch_call_on_wire(
+            &ctx,
+            &mut oneshot_sess,
+            "account",
+            None,
+            "GetCashBalance",
+            &[],
+            &kw,
+        )
+        .await;
+        assert!(bal_out.rpc_result.is_ok());
+        assert!(ctx.systems.get_handle(0).is_none());
+        assert!(ctx.systems.get_handle(sys_id).is_none());
+
+        ctx.db
+            .acquire_online_lock(
+                user_id,
+                session_id,
+                Some(char_id),
+                true,
+                ctx.now_unix_secs(),
+            )
+            .expect("acquire online lock for persistent docked wire session");
+
+        let mut wire = ClientWireSession::from_session(&ctx, docked_sess);
+        assert!(wire.subscribed_sys_id.is_none());
+        assert!(matches!(wire.wire_state.destiny, DestinyStream::Detached));
+        assert!(ctx.systems.get_handle(0).is_none());
+        assert!(ctx.systems.get_handle(sys_id).is_none());
+        assert_eq!(
+            ctx.systems.system_lifecycle_state(sys_id),
+            SystemLifecycleState::Cold
+        );
+
+        // 3. Undocking through `call_wire` subscribes to `sys_id` and emits `SetState` without
+        //    ever spawning system 0.
+        let undock_out = wire.call_wire("ship", None, "Undock", &[], &kw).await;
+        assert!(
+            undock_out.rpc_result.is_ok(),
+            "ship.Undock failed: {:?}",
+            undock_out.rpc_result
+        );
+        assert!(undock_out.marshal_errors.is_empty());
+        assert!(ctx.systems.get_handle(0).is_none());
+        assert_eq!(wire.subscribed_sys_id, Some(sys_id));
+        assert!(ctx.systems.get_handle(sys_id).is_some());
+        assert!(
+            undock_out.out_frames.iter().any(|f| matches!(
+                f,
+                OutFrame::DoDestinyUpdate {
+                    has_set_state: true,
+                    ..
+                }
+            )),
+            "undock through call_wire must emit SetState, got {:?}",
+            undock_out.out_frames
+        );
+        assert!(matches!(wire.wire_state.destiny, DestinyStream::Live { .. }));
     }
 }

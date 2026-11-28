@@ -1282,7 +1282,9 @@ impl ServerContext {
                 let Some(ship_id) = session.ship_id else {
                     return Err(deny());
                 };
-                let sys_handle = self.systems.get_or_spawn(sys_id);
+                let Some(sys_handle) = self.systems.get_handle(sys_id) else {
+                    return Err(deny());
+                };
                 let ship_ball = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten();
                 let cont_ball = sys_handle
                     .get_ball_snapshot(container_id)
@@ -1313,7 +1315,9 @@ impl ServerContext {
             let Some(ship_id) = session.ship_id else {
                 return Err(deny());
             };
-            let sys_handle = self.systems.get_or_spawn(sys_id);
+            let Some(sys_handle) = self.systems.get_handle(sys_id) else {
+                return Err(deny());
+            };
             let ship_ball = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten();
             let cont_ball = sys_handle
                 .get_ball_snapshot(container_id)

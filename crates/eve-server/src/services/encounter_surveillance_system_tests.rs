@@ -716,6 +716,48 @@ async fn test_ess_all_error_guards_and_tick_active_links_sever() {
     let _ = sess.solar_system_id;
 }
 
+#[tokio::test]
+async fn cold_system_tick_ess_main_bank_links_severs_stale_link_without_spawning_system() {
+    let (ctx, sess, char_id, _ship_id, null_sys_id, ess_ball_id) = setup_nullsec_ess_ctx();
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap
+            .system_states
+            .get_mut(&null_sys_id)
+            .expect("nullsec system state");
+        st.ess_linked_character_id = Some(char_id);
+        st.ess_link_started_tick = Some(42);
+    });
+    assert!(ctx.systems.get_handle(null_sys_id).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(null_sys_id),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+
+    let link_err = handle_ess_link(
+        &ctx,
+        &sess,
+        "AttemptLinkToMainBank",
+        &[PyRep::Integer(ess_ball_id)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(link_err.code, "ShipNotInSpace");
+    assert!(ctx.systems.get_handle(null_sys_id).is_none());
+
+    let severed = tick_ess_main_bank_links(&ctx).await;
+    assert_eq!(severed, 1);
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.system_states[&null_sys_id];
+        assert_eq!(st.ess_linked_character_id, None);
+        assert_eq!(st.ess_link_started_tick, None);
+    });
+    assert!(ctx.systems.get_handle(null_sys_id).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(null_sys_id),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+}
+
 #[cfg(test)]
 #[path = "encounter_surveillance_system_extra_unit_tests.rs"]
 mod encounter_surveillance_system_extra_unit_tests;

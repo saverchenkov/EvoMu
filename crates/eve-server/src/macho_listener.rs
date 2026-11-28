@@ -1811,8 +1811,7 @@ async fn execute_call_req_wire_inner(
                     if let Some(sys_rx) = wire.sys_rx.as_mut() {
                         let _ = drain_sys_rx_discarding_lag(sys_rx);
                     }
-                } else {
-                    let old_handle = ctx.systems.get_or_spawn(old_sys_id);
+                } else if let Some(old_handle) = ctx.systems.get_handle(old_sys_id) {
                     match bounded_actor_ask(
                         wire.wire_state,
                         "drain_observer_updates_with_seq",
@@ -1865,6 +1864,8 @@ async fn execute_call_req_wire_inner(
                             post_rpc_timeout_err.get_or_insert(timeout_err);
                         }
                     }
+                } else if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                    let _ = drain_sys_rx_discarding_lag(sys_rx);
                 }
             }
         }
@@ -1962,8 +1963,11 @@ async fn execute_call_req_wire_inner(
             if let Some(sys_rx) = wire.sys_rx.as_mut() {
                 let _ = drain_sys_rx_discarding_lag(sys_rx);
             }
-            if let Some(old_sys_id) = prev_session.solar_system_id.or(session.solar_system_id) {
-                let sys_handle = ctx.systems.get_or_spawn(old_sys_id);
+            if let Some(sys_handle) = prev_session
+                .solar_system_id
+                .or(session.solar_system_id)
+                .and_then(|old_sys_id| ctx.systems.get_handle(old_sys_id))
+            {
                 if let Some(old_obs_id) = ballpark_observer_id_for_session(&prev_session) {
                     if !is_shared_structure_observer(&prev_session, old_obs_id) {
                         if let Err(timeout_err) = run_death_respawn_docking_ask_bounded(
@@ -2006,8 +2010,7 @@ async fn execute_call_req_wire_inner(
                 } else if let Some(sys_rx) = wire.sys_rx.as_mut() {
                     let _ = drain_sys_rx_discarding_lag(sys_rx);
                 }
-            } else {
-                let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            } else if let Some(sys_handle) = ctx.systems.get_handle(sys_id) {
                 match run_pre_dock_observer_ask_bounded(
                     ctx,
                     &sys_handle,
@@ -2032,6 +2035,8 @@ async fn execute_call_req_wire_inner(
                         post_rpc_timeout_err.get_or_insert(timeout_err);
                     }
                 }
+            } else if let Some(sys_rx) = wire.sys_rx.as_mut() {
+                let _ = drain_sys_rx_discarding_lag(sys_rx);
             }
         }
     }
@@ -2041,10 +2046,14 @@ async fn execute_call_req_wire_inner(
     }
 
     if post_rpc_timeout_err.is_none() && owns_char_session && docking_transition {
-        if let Some(sys_id) = prev_session.solar_system_id.or(session.solar_system_id) {
+        if let Some(sys_handle) = prev_session
+            .solar_system_id
+            .or(session.solar_system_id)
+            .and_then(|sys_id| ctx.systems.get_handle(sys_id))
+        {
             best_effort_flush_peer_observer_updates_detach(
                 session.session_id,
-                &ctx.systems.get_or_spawn(sys_id),
+                &sys_handle,
                 ballpark_observer_id_for_session(&prev_session)
                     .or_else(|| ballpark_observer_id_for_session(session)),
                 ask_timeout,
@@ -2057,10 +2066,13 @@ async fn execute_call_req_wire_inner(
         && was_in_space
         && prev_session.solar_system_id != session.solar_system_id
     {
-        if let Some(old_sys_id) = prev_session.solar_system_id {
+        if let Some(old_handle) = prev_session
+            .solar_system_id
+            .and_then(|old_sys_id| ctx.systems.get_handle(old_sys_id))
+        {
             best_effort_flush_peer_observer_updates_detach(
                 session.session_id,
-                &ctx.systems.get_or_spawn(old_sys_id),
+                &old_handle,
                 ballpark_observer_id_for_session(&prev_session),
                 ask_timeout,
                 "cross_system_transition",
@@ -2356,10 +2368,14 @@ async fn execute_call_req_wire_inner(
         && !docking_transition
         && (was_in_space || is_in_space)
     {
-        if let Some(sys_id) = session.solar_system_id.or(prev_session.solar_system_id) {
+        if let Some(sys_handle) = session
+            .solar_system_id
+            .or(prev_session.solar_system_id)
+            .and_then(|sys_id| ctx.systems.get_handle(sys_id))
+        {
             let peer_flush_ok = best_effort_flush_peer_observer_updates(
                 wire.wire_state,
-                &ctx.systems.get_or_spawn(sys_id),
+                &sys_handle,
                 ballpark_observer_id_for_session(session)
                     .or_else(|| ballpark_observer_id_for_session(&prev_session)),
                 ask_timeout,
@@ -3305,7 +3321,7 @@ pub async fn handle_macho_client_with_tracker(
                     {
                         session
                             .solar_system_id
-                            .map(|sys_id| ctx.systems.get_or_spawn(sys_id))
+                            .and_then(|sys_id| ctx.systems.get_handle(sys_id))
                     } else {
                         None
                     };
@@ -3474,8 +3490,10 @@ pub async fn handle_macho_client_with_tracker(
                                     || (was_in_space
                                         && session.solar_system_id != prev_session.solar_system_id))
                             {
-                                if let Some(old_sys_id) = prev_session.solar_system_id {
-                                    let old_sys = ctx.systems.get_or_spawn(old_sys_id);
+                                if let Some(old_sys) = prev_session
+                                    .solar_system_id
+                                    .and_then(|old_sys_id| ctx.systems.get_handle(old_sys_id))
+                                {
                                     if session_owns_char_notifications(&ctx, &session) {
                                         let mut pre_drain_ok = true;
                                         if let Some(old_obs_id) = prev_obs_id {
@@ -4216,8 +4234,7 @@ pub async fn handle_macho_client_with_tracker(
                         if let Some(plan) = dock_plan {
                             if !session_owns_char_notifications(&ctx, &session) {
                                 pending_dock = None;
-                            } else {
-                                let handle = ctx.systems.get_or_spawn(plan.sys_id);
+                            } else if let Some(handle) = ctx.systems.get_handle(plan.sys_id) {
                                 if run_pending_dock_settle_destiny_sync(
                                     &ctx,
                                     &handle,
@@ -4279,6 +4296,10 @@ pub async fn handle_macho_client_with_tracker(
                                     });
                                     continue;
                                 }
+                            } else {
+                                // Solar system already hibernated while pending dock settle ran; clear `pending_dock`
+                                // and proceed directly with the dock RPC.
+                                pending_dock = None;
                             }
                         }
                         if safe_logoff_teardown.is_some() {

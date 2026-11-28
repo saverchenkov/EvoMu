@@ -247,13 +247,13 @@ pub(crate) async fn sync_corp_militia_members_after_change(
         }
         notify_member_war_faction_change(ctx, mid, old_wf, eff, direct_opt, corp_fac);
         if old_wf != eff && ship_id > 0 && ship_tid > 0 {
-            if let Some(sys_id) = ctx.systems.find_ball_system_sync(ship_id) {
+            if let Some(sys_h) = ctx
+                .systems
+                .find_ball_system_sync(ship_id)
+                .and_then(|sys_id| ctx.systems.get_handle(sys_id))
+            {
                 let meta = ctx.build_ship_slim_meta(mid, ship_tid);
-                let _ = ctx
-                    .systems
-                    .get_or_spawn(sys_id)
-                    .change_slim_item(ship_id, meta)
-                    .await;
+                let _ = sys_h.change_slim_item(ship_id, meta).await;
             }
         }
     }
@@ -735,9 +735,12 @@ fn set_corp_allowed(ctx: &ServerContext, session: &mut SessionState, args: &[PyR
         }
         notify_member_war_faction_change(ctx, mid, old_wf, eff, direct_opt, corp_fac);
         if old_wf != eff && ship_id > 0 && ship_tid > 0 {
-            if let Some(sys_id) = ctx.systems.find_ball_system_sync(ship_id) {
+            if let Some(sys_h) = ctx
+                .systems
+                .find_ball_system_sync(ship_id)
+                .and_then(|sys_id| ctx.systems.get_handle(sys_id))
+            {
                 if let Ok(rt) = tokio::runtime::Handle::try_current() {
-                    let sys_h = ctx.systems.get_or_spawn(sys_id);
                     let meta = ctx.build_ship_slim_meta(mid, ship_tid);
                     rt.spawn(async move {
                         let _ = sys_h.change_slim_item(ship_id, meta).await;

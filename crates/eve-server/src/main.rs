@@ -961,10 +961,11 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                         if was_in_space
                             && prev_session.solar_system_id != session.solar_system_id
                         {
-                            if let Some(old_sys_id) = prev_session.solar_system_id {
-                                let _ = ctx
-                                    .systems
-                                    .get_or_spawn(old_sys_id)
+                            if let Some(old_handle) = prev_session
+                                .solar_system_id
+                                .and_then(|old_sys_id| ctx.systems.get_handle(old_sys_id))
+                            {
+                                let _ = old_handle
                                     .flush_peer_observer_updates(prev_session.ship_id)
                                     .await;
                             }

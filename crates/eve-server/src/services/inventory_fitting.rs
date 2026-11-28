@@ -635,8 +635,10 @@ pub(crate) async fn handle_invbroker_add(
                             }
                         }
                     }
-                    if let Some(sys_id) = session.solar_system_id {
-                        let sys = ctx.systems.get_or_spawn(sys_id);
+                    if let Some(sys) = session
+                        .solar_system_id
+                        .and_then(|sys_id| ctx.systems.get_handle(sys_id))
+                    {
                         if sys.has_active_nanite_repair_sync(src_item.location_id, item_id) {
                             return Some(Err(BridgeRpcError { code: "ModuleBeingRepaired".into(), message: format!("Module {item_id} cannot be unfitted while undergoing nanite repair"), client_error: None }));
                         }

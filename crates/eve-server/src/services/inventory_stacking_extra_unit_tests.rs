@@ -1661,3 +1661,85 @@ fn multi_merge_batch_lock_index_rejects_escrow_and_non_empty_and_commits_once() 
     assert_eq!(ok.dict_get("mergedCount"), Some(&PyRep::Integer(2)));
 }
 
+#[tokio::test]
+async fn cold_system_station_multi_unfit_and_empty_jetcan_despawn_do_not_spawn_system() {
+    let ctx = make_ctx();
+    let char_id = 91_542_001_i64;
+    let corp_id = 98_542_001_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 1_100_542_100_i64;
+    let mod_id = 1_100_542_101_i64;
+    let jetcan_id = 1_100_542_102_i64;
+    let mut sess = seed_char(&ctx, char_id, corp_id, Some(station_id), sys_id, ship_id);
+    let kw = HashMap::new();
+
+    put_item(
+        &ctx,
+        ship_id,
+        587,
+        char_id,
+        station_id,
+        InventoryFlag::Hangar,
+        1,
+        true,
+    );
+    put_item(
+        &ctx,
+        mod_id,
+        484,
+        char_id,
+        ship_id,
+        InventoryFlag::HiSlot0,
+        1,
+        true,
+    );
+    put_item(
+        &ctx,
+        jetcan_id,
+        23,
+        char_id,
+        i64::from(sys_id),
+        InventoryFlag::None,
+        1,
+        true,
+    );
+
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(sys_id),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+
+    let unfit_rep = handle_multi_add(
+        &ctx,
+        &mut sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(mod_id)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("station multi-unfit must succeed");
+    assert_eq!(unfit_rep.dict_get("movedCount"), Some(&PyRep::Integer(1)));
+    ctx.db.with_snapshot(|snap| {
+        let item = &snap.items[&mod_id];
+        assert_eq!(item.location_id, station_id);
+        assert_eq!(item.flag, InventoryFlag::Hangar);
+    });
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+
+    let despawned = despawn_empty_jetcan_if_needed(&ctx, Some(sys_id), jetcan_id).await;
+    assert!(despawned);
+    ctx.db
+        .with_snapshot(|snap| assert!(!snap.items.contains_key(&jetcan_id)));
+    assert!(ctx.systems.get_handle(sys_id).is_none());
+    assert_eq!(
+        ctx.systems.system_lifecycle_state(sys_id),
+        crate::system_actor::SystemLifecycleState::Cold
+    );
+}
+
