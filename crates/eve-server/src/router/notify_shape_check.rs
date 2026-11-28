@@ -308,40 +308,45 @@ fn match_dict_entries(
     let sample_has_string_keys = sample
         .iter()
         .any(|(sk, _)| matches!(sk, PyRep::String(_)));
+    let is_dynamic_map = is_dynamic_string_map_event(event);
     for (idx, (ak, av)) in actual.iter().enumerate() {
-        if let PyRep::String(k_str) = ak {
-            let fixed_val_samples: Vec<&PyRep> = sample
-                .iter()
-                .filter_map(|(sk, sv)| matches!(sk, PyRep::String(s) if s == k_str).then_some(sv))
-                .collect();
-            if !fixed_val_samples.is_empty() {
-                let val_path = format!("{path}[{k_str:?}]");
-                if !fixed_val_samples
+        if !is_dynamic_map {
+            if let PyRep::String(k_str) = ak {
+                let fixed_val_samples: Vec<&PyRep> = sample
                     .iter()
-                    .any(|sv| match_pyrep_recursive(event, av, sv, &val_path, depth + 1).is_ok())
-                {
-                    let expected: Vec<String> = fixed_val_samples
+                    .filter_map(|(sk, sv)| {
+                        matches!(sk, PyRep::String(s) if s == k_str).then_some(sv)
+                    })
+                    .collect();
+                if !fixed_val_samples.is_empty() {
+                    let val_path = format!("{path}[{k_str:?}]");
+                    if !fixed_val_samples
                         .iter()
-                        .map(|sv| summarize_pyrep_shape(sv))
+                        .any(|sv| match_pyrep_recursive(event, av, sv, &val_path, depth + 1).is_ok())
+                    {
+                        let expected: Vec<String> = fixed_val_samples
+                            .iter()
+                            .map(|sv| summarize_pyrep_shape(sv))
+                            .collect();
+                        return Err(format!(
+                            "{val_path}: Dict value {} does not match expected shape(s) [{}] for fixed string key {k_str:?}",
+                            summarize_pyrep_shape(av),
+                            expected.join(" | ")
+                        ));
+                    }
+                    continue;
+                }
+                if sample_has_string_keys {
+                    let mut expected_keys: Vec<&str> = sample
+                        .iter()
+                        .filter_map(|(sk, _)| sk.as_str())
                         .collect();
+                    expected_keys.sort();
+                    expected_keys.dedup();
                     return Err(format!(
-                        "{val_path}: Dict value {} does not match expected shape(s) [{}] for fixed string key {k_str:?}",
-                        summarize_pyrep_shape(av),
-                        expected.join(" | ")
+                        "{path}[{k_str:?}]: unexpected Dict string key {k_str:?} for fixed-schema event '{event}' (expected keys: {expected_keys:?})"
                     ));
                 }
-                continue;
-            }
-            if sample_has_string_keys && !is_dynamic_string_map_event(event) {
-                let mut expected_keys: Vec<&str> = sample
-                    .iter()
-                    .filter_map(|(sk, _)| sk.as_str())
-                    .collect();
-                expected_keys.sort();
-                expected_keys.dedup();
-                return Err(format!(
-                    "{path}[{k_str:?}]: unexpected Dict string key {k_str:?} for fixed-schema event '{event}' (expected keys: {expected_keys:?})"
-                ));
             }
         }
         let key_path = format!("{path}[key#{idx}]");
@@ -723,8 +728,6 @@ fn check_shared_bookmarks_folder_updated(
             _ => None,
         })
         .collect();
-    part2_candidates.push(PyRep::Integer(1));
-    part2_candidates.push(PyRep::Bool(false));
     part2_candidates.push(PyRep::List(vec![PyRep::keyval([(
         "bookmarkID",
         PyRep::Integer(1),
@@ -760,12 +763,19 @@ fn check_shared_bookmarks_folder_updated(
             1,
         )?;
         let part2_path = format!("arg[0][{idx}][2]");
-        if !part2_candidates
-            .iter()
-            .any(|cand| match_pyrep_recursive(event, &parts[2], cand, &part2_path, 1).is_ok())
+        let action_str = parts[1].as_str().unwrap_or("");
+        let legacy_action_ok = match action_str {
+            "FolderChanged" => matches!(parts[2], PyRep::Integer(_) | PyRep::Bool(_)),
+            "BookmarkUpdated" => matches!(parts[2], PyRep::Integer(_)),
+            _ => false,
+        };
+        if !legacy_action_ok
+            && !part2_candidates
+                .iter()
+                .any(|cand| match_pyrep_recursive(event, &parts[2], cand, &part2_path, 1).is_ok())
         {
             return Err(format!(
-                "Notification shape mismatch for allowlisted event '{event}' at {part2_path}: got {}, expected bookmark update payload or legacy FolderChanged Integer/Bool",
+                "Notification shape mismatch for allowlisted event '{event}' at {part2_path}: got {}, expected bookmark update payload or legacy {action_str} payload",
                 summarize_pyrep_shape(&parts[2])
             ));
         }
@@ -800,7 +810,7 @@ fn check_deferred_6b2_compat(
                     ));
                 }
             }
-            if matches!(args[4], PyRep::List(_))
+            if matches!(&args[4], PyRep::List(items) if items.is_empty())
                 || same_len
                     .iter()
                     .any(|s| match_pyrep_recursive(event, &args[4], &s[4], "arg[4]", 0).is_ok())
@@ -1616,6 +1626,55 @@ mod tests {
             ],
         )
         .is_ok());
+        // BF-02: placeholder key colliding with sample key ("ANOM-1") must accept alternate union value ("ANOM-2" dungeonNameID=Integer).
+        assert!(check_notification_shape(
+            on_anom,
+            &[
+                PyRep::Integer(30_000_142),
+                PyRep::Dict(vec![(
+                    PyRep::String("ANOM-1".into()),
+                    PyRep::keyval([
+                        ("instanceID", PyRep::String("ANOM-1".into())),
+                        (
+                            "position",
+                            PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+                        ),
+                        ("targetID", PyRep::String("ANOM-1".into())),
+                        ("difficulty", PyRep::Integer(1)),
+                        ("dungeonID", PyRep::Integer(2_134)),
+                        ("archetypeID", PyRep::Integer(24)),
+                        ("dungeonName", PyRep::String("Anomaly".into())),
+                        ("dungeonNameID", PyRep::Integer(1_000)),
+                        ("factionID", PyRep::Integer(500_010)),
+                        ("scanStrengthAttribute", PyRep::Integer(210)),
+                        ("allowedTypes", PyRep::None),
+                    ]),
+                )]),
+                PyRep::List(Vec::new()),
+            ],
+        )
+        .is_ok());
+
+        let on_ng = all_registered_notifications()
+            .into_iter()
+            .find(|e| e.event == "OnClientNodeGraphUpdate")
+            .expect("OnClientNodeGraphUpdate entry");
+        assert!(check_notification_shape(
+            on_ng,
+            &[
+                PyRep::Integer(1),
+                PyRep::Dict(vec![(PyRep::String("progress".into()), PyRep::String("phase2".into()))]),
+            ],
+        )
+        .is_ok());
+        assert!(check_notification_shape(
+            on_ng,
+            &[
+                PyRep::Integer(1),
+                PyRep::Dict(vec![(PyRep::String("progress".into()), PyRep::Real(1.5))]),
+            ],
+        )
+        .is_err());
     }
 
     #[test]
@@ -1691,6 +1750,16 @@ mod tests {
             ])])],
         )
         .is_ok());
+
+        assert!(check_notification_shape(
+            entry,
+            &[PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Tuple(vec![PyRep::Integer(7)]),
+                PyRep::String("BookmarksCreated".into()),
+                PyRep::Bool(false),
+            ])])],
+        )
+        .is_err());
     }
 
     #[test]
@@ -1757,5 +1826,55 @@ mod tests {
             ],
         )
         .is_err());
+    }
+
+    #[test]
+    fn shape_check_deferred_6b2_compat_enforces_branches_strictly() {
+        let entry_for = |name: &str| {
+            all_registered_notifications()
+                .into_iter()
+                .find(|e| e.event == name)
+                .unwrap_or_else(|| panic!("missing entry {name}"))
+        };
+
+        // 1. OnFighterAddedToController (BF-01): canonical populated/empty Dict & transitional empty List pass; non-empty List & bad Dict fail.
+        let fighter = entry_for("OnFighterAddedToController");
+        let canonical_fighter = &(fighter.sample_payloads)()[0];
+        assert!(check_notification_shape(fighter, canonical_fighter).is_ok());
+        assert!(check_notification_shape(fighter, &[PyRep::Integer(1), PyRep::Integer(23055), PyRep::Integer(159), PyRep::Integer(9), PyRep::Dict(Vec::new())]).is_ok());
+        assert!(check_notification_shape(fighter, &[PyRep::Integer(1), PyRep::Integer(23055), PyRep::Integer(159), PyRep::Integer(9), PyRep::List(Vec::new())]).is_ok());
+        assert!(check_notification_shape(fighter, &[PyRep::Integer(1), PyRep::Integer(23055), PyRep::Integer(159), PyRep::Integer(9), PyRep::List(vec![PyRep::String("garbage".into())])]).is_err());
+        assert!(check_notification_shape(fighter, &[PyRep::Integer(1), PyRep::Integer(23055), PyRep::Integer(159), PyRep::Integer(9), PyRep::Dict(vec![(PyRep::String("bad".into()), PyRep::Integer(1))])]).is_err());
+
+        // 2. OnDeathzoneStateUpdate: None, KeyVal, & legacy abyssal Dict pass; List fails.
+        let dz = entry_for("OnDeathzoneStateUpdate");
+        for sample in (dz.sample_payloads)() {
+            assert!(check_notification_shape(dz, &sample).is_ok());
+        }
+        assert!(check_notification_shape(dz, &[PyRep::Integer(32_000_001), PyRep::Integer(1), PyRep::Dict(vec![(PyRep::String("timeRemainingMs".into()), PyRep::Real(1_000.0)), (PyRep::String("dangerLevel".into()), PyRep::Real(1.0))])]).is_ok());
+        assert!(check_notification_shape(dz, &[PyRep::Integer(32_000_001), PyRep::Integer(1), PyRep::List(Vec::new())]).is_err());
+
+        // 3. OnTaleData: canonical nested Dict & transitional KeyVal({taleID: Int}) pass; wrong KeyVal & scalar fail.
+        let tale = entry_for("OnTaleData");
+        assert!(check_notification_shape(tale, &(tale.sample_payloads)()[0]).is_ok());
+        assert!(check_notification_shape(tale, &[PyRep::Integer(30_000_142), PyRep::Dict(vec![(PyRep::Integer(701), PyRep::keyval([("taleID", PyRep::Integer(701))]))])]).is_ok());
+        assert!(check_notification_shape(tale, &[PyRep::Integer(30_000_142), PyRep::Dict(vec![(PyRep::Integer(701), PyRep::keyval([("wrong", PyRep::Integer(701))]))])]).is_err());
+
+        // 4. OnMissionsUpdated: canonical Dict & transitional KeyVal pass; unexpected KeyVal field & String fail.
+        let missions = entry_for("OnMissionsUpdated");
+        let canonical_mission_sample = (missions.sample_payloads)();
+        assert!(check_notification_shape(missions, &canonical_mission_sample[0]).is_ok());
+        let PyRep::List(ref items) = canonical_mission_sample[0][0] else { panic!("expected List") };
+        let PyRep::Dict(ref pairs) = items[0] else { panic!("expected Dict") };
+        let legacy_kv = PyRep::KeyVal(pairs.iter().filter_map(|(k, v)| k.as_str().map(|ks| (ks.to_string(), v.clone()))).collect());
+        assert!(check_notification_shape(missions, &[PyRep::List(vec![legacy_kv])]).is_ok());
+        assert!(check_notification_shape(missions, &[PyRep::List(vec![PyRep::String("bad".into())])]).is_err());
+
+        // 5. OnProgressionTaskWidgetUpdate: canonical Dict & transitional Integer/String pass; List fails.
+        let prog = entry_for("OnProgressionTaskWidgetUpdate");
+        assert!(check_notification_shape(prog, &(prog.sample_payloads)()[0]).is_ok());
+        assert!(check_notification_shape(prog, &[PyRep::Integer(9), PyRep::Integer(1), PyRep::Integer(5)]).is_ok());
+        assert!(check_notification_shape(prog, &[PyRep::Integer(9), PyRep::Integer(1), PyRep::String("done".into())]).is_ok());
+        assert!(check_notification_shape(prog, &[PyRep::Integer(9), PyRep::Integer(1), PyRep::List(Vec::new())]).is_err());
     }
 }

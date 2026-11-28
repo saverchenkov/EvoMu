@@ -4154,13 +4154,30 @@ define_notifications! {
             squadron_size: i64,
             ability_slot_states: PyRep,
         },
-        // Canonical V24 `ShipFighterState.OnFighterAddedToController` passes Dict `abilitySlotStates`.
+        // Canonical V24 `ShipFighterState.OnFighterAddedToController` passes Dict `abilitySlotStates`
+        // keyed by `ability_slot_id` (`0..=2`), mapping to `(start_time, duration_ms)` or `None`.
         samples: || vec![vec![
             PyRep::Integer(100_000_050),
             PyRep::Integer(23055),
             PyRep::Integer(159),
             PyRep::Integer(9),
-            PyRep::Dict(Vec::new()),
+            PyRep::Dict(vec![
+                (
+                    PyRep::Integer(0),
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(1_335_000_000_000_000_00),
+                        PyRep::Real(10_000.0),
+                    ]),
+                ),
+                (
+                    PyRep::Integer(2),
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(1_335_000_000_000_000_00),
+                        PyRep::Integer(1_335_000_001_000_000_00),
+                    ]),
+                ),
+                (PyRep::Integer(1), PyRep::None),
+            ]),
         ]],
     },
     OnFighterRemovedFromController => "OnFighterRemovedFromController" ("charid") {
