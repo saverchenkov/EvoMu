@@ -107,9 +107,13 @@ pub(super) async fn handle_return_players(
     if res.is_ok() {
         for (cid, ship_id, old_sys, old_st, home_st_id, home_sys) in returned_transfers {
             if ship_id > 0 {
-                let _ = ctx.systems.get_or_spawn(old_sys).remove_ball(ship_id).await;
+                if let Some(h) = ctx.systems.get_handle(old_sys) {
+                    let _ = h.remove_ball(ship_id).await;
+                }
                 if home_sys != old_sys {
-                    let _ = ctx.systems.get_or_spawn(home_sys).remove_ball(ship_id).await;
+                    if let Some(h) = ctx.systems.get_handle(home_sys) {
+                        let _ = h.remove_ball(ship_id).await;
+                    }
                 }
             }
             if session.character_id == Some(cid) {
@@ -230,9 +234,13 @@ pub(super) async fn handle_teleport_ref_home(
     if res.is_ok() {
         if let Some((ref_ship_id, old_sys, old_st, home_st_id, home_sys)) = transfer_info {
             if ref_ship_id > 0 {
-                let _ = ctx.systems.get_or_spawn(old_sys).remove_ball(ref_ship_id).await;
+                if let Some(h) = ctx.systems.get_handle(old_sys) {
+                    let _ = h.remove_ball(ref_ship_id).await;
+                }
                 if home_sys != old_sys {
-                    let _ = ctx.systems.get_or_spawn(home_sys).remove_ball(ref_ship_id).await;
+                    if let Some(h) = ctx.systems.get_handle(home_sys) {
+                        let _ = h.remove_ball(ref_ship_id).await;
+                    }
                 }
             }
             let _ = ctx.execute_session_transition_sync(

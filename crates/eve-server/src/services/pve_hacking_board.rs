@@ -590,7 +590,9 @@ pub async fn handle_second_hack_failure_explosion(
             .retain(|_, c| c.parent_container_id != container_id);
     });
 
-    let _ = ctx.systems.get_or_spawn(solar_system_id).remove_ball(container_id).await;
+    if let Some(h) = ctx.systems.get_handle(solar_system_id) {
+        let _ = h.remove_ball(container_id).await;
+    }
     let _ = is_relic;
     let destroyed_loot_count = ctx.db.with_mut_snapshot(|snap| {
         let before = snap.items.len();
@@ -669,13 +671,15 @@ pub async fn detonate_ghost_site_with_can(
         6_000.0
     };
 
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let sys_handle_opt = ctx.systems.get_handle(solar_system_id);
     let mut blast_center = glam::DVec3::from_array(pos);
-    for &cid in &cans_to_destroy {
-        if let Ok(Some((_, cb))) = sys_handle.get_ball_snapshot(cid).await {
-            blast_center = cb.position;
+    if let Some(ref sys_handle) = sys_handle_opt {
+        for &cid in &cans_to_destroy {
+            if let Ok(Some((_, cb))) = sys_handle.get_ball_snapshot(cid).await {
+                blast_center = cb.position;
+            }
+            let _ = sys_handle.remove_ball(cid).await;
         }
-        let _ = sys_handle.remove_ball(cid).await;
     }
     if !cans_to_destroy.is_empty() {
         ctx.db.with_mut_snapshot(|snap| {
@@ -692,42 +696,46 @@ pub async fn detonate_ghost_site_with_can(
         explosive: explosive_damage,
         ..Default::default()
     };
-    if let Ok(balls) = sys_handle.list_balls().await {
-        for b in balls {
-            let is_ship = ctx.db.with_snapshot(|snap| {
-                snap.items
-                    .get(&b.id)
-                    .and_then(|i| ctx.sde.types.get(&i.type_id))
-                    .is_some_and(|t| t.category_id == 6)
-            }) || ctx
-                .sde
-                .types
-                .get(&b.type_id)
-                .is_some_and(|t| t.category_id == 6);
-            if is_ship && b.position.distance(blast_center) <= 10_000.0 {
-                let _ = sys_handle.apply_damage(b.id, dmg_vec).await;
+    if let Some(ref sys_handle) = sys_handle_opt {
+        if let Ok(balls) = sys_handle.list_balls().await {
+            for b in balls {
+                let is_ship = ctx.db.with_snapshot(|snap| {
+                    snap.items
+                        .get(&b.id)
+                        .and_then(|i| ctx.sde.types.get(&i.type_id))
+                        .is_some_and(|t| t.category_id == 6)
+                }) || ctx
+                    .sde
+                    .types
+                    .get(&b.type_id)
+                    .is_some_and(|t| t.category_id == 6);
+                if is_ship && b.position.distance(blast_center) <= 10_000.0 {
+                    let _ = sys_handle.apply_damage(b.id, dmg_vec).await;
+                }
             }
         }
     }
 
     let mut ambush_ids = Vec::new();
     if !already_detonated {
-        let ambush_balls =
-            build_wave_npc_balls(&ctx.sde, &ctx.db, solar_system_id, 2, pos, None);
-        for b in ambush_balls {
-            ambush_ids.push(b.id);
-            let cs = crate::services::pve_exploration_seeding::build_type_combat_state_from_sde(
-                &ctx.sde, b.type_id,
-            );
-            let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
-        }
-        with_pve_exploration_reg(ctx, |reg| {
-            if let Some(sites) = reg.sites_by_system.get_mut(&solar_system_id) {
-                if let Some(site) = sites.iter_mut().find(|s| s.site_id == site_id) {
-                    site.active_npc_ball_ids.extend(ambush_ids.iter().copied());
-                }
+        if let Some(ref sys_handle) = sys_handle_opt {
+            let ambush_balls =
+                build_wave_npc_balls(&ctx.sde, &ctx.db, solar_system_id, 2, pos, None);
+            for b in ambush_balls {
+                ambush_ids.push(b.id);
+                let cs = crate::services::pve_exploration_seeding::build_type_combat_state_from_sde(
+                    &ctx.sde, b.type_id,
+                );
+                let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
             }
-        });
+            with_pve_exploration_reg(ctx, |reg| {
+                if let Some(sites) = reg.sites_by_system.get_mut(&solar_system_id) {
+                    if let Some(site) = sites.iter_mut().find(|s| s.site_id == site_id) {
+                        site.active_npc_ball_ids.extend(ambush_ids.iter().copied());
+                    }
+                }
+            });
+        }
     }
     (explosive_damage, ambush_ids)
 }

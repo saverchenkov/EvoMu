@@ -256,21 +256,22 @@ pub async fn trigger_fob_defense_response(
     } else {
         16_984 // Pith Dismantler
     };
-    let sys = ctx.systems.get_or_spawn(sys_id);
     let mut defender_ids = Vec::with_capacity(defender_count);
-    for idx in 1..=(defender_count as i64) {
-        let def_id = fob_id + 10 + idx;
-        let _ = sys
-            .spawn_ball_with_combat(
-                make_site_npc_ball(
-                    def_id,
-                    defender_type_id,
-                    fob_pos + DVec3::new(0.0, (idx as f64) * 1_500.0, 2_500.0),
-                ),
-                ctx.build_type_combat_state(defender_type_id),
-            )
-            .await;
-        defender_ids.push(def_id);
+    if let Some(sys) = ctx.systems.get_handle(sys_id) {
+        for idx in 1..=(defender_count as i64) {
+            let def_id = fob_id + 10 + idx;
+            let _ = sys
+                .spawn_ball_with_combat(
+                    make_site_npc_ball(
+                        def_id,
+                        defender_type_id,
+                        fob_pos + DVec3::new(0.0, (idx as f64) * 1_500.0, 2_500.0),
+                    ),
+                    ctx.build_type_combat_state(defender_type_id),
+                )
+                .await;
+            defender_ids.push(def_id);
+        }
     }
 
     Ok(PyRep::keyval([
@@ -325,16 +326,16 @@ pub async fn destroy_pirate_fob_and_payout(
         Ok((s_id, f_pos, fac_id, combatants))
     })?;
 
-    let sys = ctx.systems.get_or_spawn(sys_id);
-    let _ = sys.remove_ball(fob_id).await;
-
     let loot_container_id = fob_id + 90;
-    let mut cont_ball = make_site_npc_ball(loot_container_id, 23, fob_pos);
-    cont_ball.max_velocity = 0.0;
-    cont_ball.mode = BallMode::Rigid;
-    let _ = sys.spawn_ball(cont_ball).await;
+    let sys_opt = ctx.systems.get_handle(sys_id);
+    let (live_on_grid_combatants, live_ineligible, all_grid_balls) = if let Some(ref sys) = sys_opt {
+        let _ = sys.remove_ball(fob_id).await;
 
-    let (live_on_grid_combatants, live_ineligible, all_grid_balls) = {
+        let mut cont_ball = make_site_npc_ball(loot_container_id, 23, fob_pos);
+        cont_ball.max_velocity = 0.0;
+        cont_ball.mode = BallMode::Rigid;
+        let _ = sys.spawn_ball(cont_ball).await;
+
         let view = sys.view();
         let mut eligible_balls = BTreeSet::new();
         let mut blocked_balls = BTreeSet::new();
@@ -354,6 +355,8 @@ pub async fn destroy_pirate_fob_and_payout(
             }
         }
         (eligible_balls, blocked_balls, any_balls)
+    } else {
+        (BTreeSet::new(), BTreeSet::new(), BTreeSet::new())
     };
     let eligible_attackers: Vec<i64> = ctx.db.with_snapshot(|snap| {
         on_grid_char_ids
@@ -834,7 +837,15 @@ pub async fn try_activate_observatory_gate(
         }));
     };
 
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        return Some(Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "fob_gate_activate",
+            "Active ship ball is not in space",
+        )));
+    };
     let all_balls = sys.list_balls().await.unwrap_or_default();
     let Some(ship_ball) = all_balls.iter().find(|b| b.id == ship_id) else {
         return Some(Err(BridgeRpcError::ship_not_in_space(
@@ -953,7 +964,9 @@ pub async fn on_world_ark_boss_killed(ctx: &ServerContext, sys_id: u32, killer_c
         return;
     };
     let site_pos = DVec3::from_array(obs_state.site_pos);
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    let Some(sys) = ctx.systems.get_handle(sys_id) else {
+        return;
+    };
     let all_balls = sys.list_balls().await.unwrap_or_default();
     let pocket_ship_ids: BTreeSet<i64> = all_balls
         .iter()

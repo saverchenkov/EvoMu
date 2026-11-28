@@ -505,7 +505,14 @@ pub async fn process_incursion_site_completion_and_payout_core(
 
     let (target_cid, target_sys, boss_ball_id, matched_site_id, site_pos) = incursion_found;
 
-    let sys_handle = systems.get_or_spawn(target_sys);
+    let sys_handle = systems.get_handle(target_sys).ok_or_else(|| {
+        let msg = format!("Incursion site {site_id} system {target_sys} is not loaded");
+        BridgeRpcError::with_client_error(
+            "IncursionSystemNotLoaded",
+            msg.clone(),
+            eve_proto::ClientError::CustomInfo(msg),
+        )
+    })?;
     let ball_alive = sys_handle
         .get_ball_snapshot(boss_ball_id)
         .await
@@ -579,7 +586,8 @@ pub async fn process_incursion_site_completion_and_payout_core(
         let ship_id = ch.active_ship_id;
         let mut on_grid = false;
         if ship_id > 0 {
-            if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+            let live_ball = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten();
+            if let Some((_, ball)) = live_ball {
                 on_grid = ball.position.distance(site_pos) <= 500_000.0;
             } else {
                 let pos_opt = db.with_snapshot(|snap| {

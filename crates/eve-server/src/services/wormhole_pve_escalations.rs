@@ -26,7 +26,7 @@ use eve_db::lock_rank::AnyRwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-async fn cleanup_unclaimed_wh_balls(
+pub(crate) async fn cleanup_unclaimed_wh_balls(
     ctx: &ServerContext,
     solar_system_id: SolarSystemId,
     ids: &[i64],
@@ -34,9 +34,10 @@ async fn cleanup_unclaimed_wh_balls(
     if ids.is_empty() {
         return;
     }
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    for &bid in ids {
-        let _ = sys_handle.remove_ball(bid).await;
+    if let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) {
+        for &bid in ids {
+            let _ = sys_handle.remove_ball(bid).await;
+        }
     }
     with_mut_combat_runtime(ctx, |rt| {
         for bid in ids {
@@ -480,7 +481,9 @@ pub async fn step_wormhole_pve_system(
     if !(31_000_000..32_000_000).contains(&solar_system_id) {
         return;
     }
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let Some(sys_handle) = ctx.systems.get_handle(solar_system_id) else {
+        return;
+    };
     let view = sys_handle.view();
     let active_ships: HashMap<i64, (i64, u32)> = ctx.db.with_snapshot(|snap| {
         snap.characters
@@ -1151,8 +1154,9 @@ pub fn process_wormhole_sites_on_downtime(ctx: &ServerContext) -> usize {
     }
 
     for (sys_id, bid) in all_removed_balls.iter().chain(removed_ast_balls.iter()) {
-        let sys_handle = ctx.systems.get_or_spawn(*sys_id);
-        sys_handle.try_remove_ball(*bid);
+        if let Some(sys_handle) = ctx.systems.get_handle(*sys_id) {
+            sys_handle.try_remove_ball(*bid);
+        }
     }
 
     for (sys_id, ids) in per_sys_removed_ids {

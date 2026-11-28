@@ -440,8 +440,12 @@ pub async fn handle(
                     client_error: None,
                 }));
             }
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
+            let sys_handle_opt = ctx.systems.get_handle(sys_id);
+            let ship_ball_opt = match sys_handle_opt.as_ref() {
+                Some(sys_handle) => sys_handle.get_ball_snapshot(ship_id).await.ok().flatten(),
+                None => None,
+            };
+            let (Some(sys_handle), Some((_, ship_ball))) = (sys_handle_opt, ship_ball_opt) else {
                 return Some(Err(BridgeRpcError {
                     code: "OutsideEssLinkRange".into(),
                     message: "Active ship is not present in system space near the ESS beacon".into(),
@@ -1030,9 +1034,12 @@ async fn handle_admin_get_bubble_id(
         .first()
         .and_then(|a| a.as_i64())
         .unwrap_or(ship_id);
-    let handle = ctx.systems.get_or_spawn(sys_id);
+    let handle_opt = ctx.systems.get_handle(sys_id);
     if target_ball_id != ship_id {
-        let visible = handle.list_balls_in_bubble(ship_id).await.unwrap_or_default();
+        let visible = match handle_opt.as_ref() {
+            Some(handle) => handle.list_balls_in_bubble(ship_id).await.unwrap_or_default(),
+            None => Vec::new(),
+        };
         if !visible.iter().any(|b| b.id == target_ball_id) {
             return Err(BridgeRpcError {
                 code: "BallNotVisible".into(),
@@ -1043,7 +1050,11 @@ async fn handle_admin_get_bubble_id(
             });
         }
     }
-    match handle.get_bubble_id_for_ball(target_ball_id).await {
+    let bubble_res = match handle_opt {
+        Some(handle) => handle.get_bubble_id_for_ball(target_ball_id).await,
+        None => Ok(None),
+    };
+    match bubble_res {
         Ok(Some(bid)) => Ok(PyRep::Integer(bid as i64)),
         Ok(None) => Err(BridgeRpcError {
             code: "BallNotFound".into(),
@@ -1151,19 +1162,25 @@ async fn handle_call_component_from_client(
             client_error: None,
         })? as i32;
 
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    let ship_ball = handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|(_, b)| b);
-    let trader_ball = handle
-        .get_ball_snapshot(trader_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|(_, b)| b);
+    let handle_opt = ctx.systems.get_handle(sys_id);
+    let (ship_ball, trader_ball) = if let Some(ref handle) = handle_opt {
+        (
+            handle
+                .get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b),
+            handle
+                .get_ball_snapshot(trader_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b),
+        )
+    } else {
+        (None, None)
+    };
     let (trader_type_id, trader_pos, trader_radius) = if let Some(tb) = trader_ball {
         (tb.type_id, Some(tb.position), tb.radius)
     } else {

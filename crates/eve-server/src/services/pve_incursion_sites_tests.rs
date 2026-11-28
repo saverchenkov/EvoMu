@@ -300,6 +300,7 @@ async fn test_incursion_site_completion_scaling_and_mothership_finale() {
         0.0,
     );
 
+    let _ = ctx.systems.get_or_spawn(vg_site.solar_system_id);
     let res = process_incursion_site_completion_and_payout(
         &ctx,
         Some(92_000_001),

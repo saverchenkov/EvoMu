@@ -607,6 +607,7 @@ async fn abyssal_trace_item_position_fallback_and_fleet_access_denied() {
     sess_other.station_id = None;
     sess_other.structure_id = None;
     sess_other.ship_id = Some(ship_other);
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
     let kw = HashMap::new();
     let err = handle(&ctx, &mut sess_other, "abyssalMgr", "AbyssalEntranceGateActivation", &[PyRep::Integer(trace_id)], &kw)
         .await
@@ -615,7 +616,6 @@ async fn abyssal_trace_item_position_fallback_and_fleet_access_denied() {
     assert_eq!(err.code, "AccessDenied");
 
     // Also test ShipIsTethered on Abyssal trace activation when ship ball combat state is tethered
-    let sys_h = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_h
         .spawn_ball_with_combat(
             Ball {

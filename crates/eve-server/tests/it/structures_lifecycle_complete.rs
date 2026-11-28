@@ -992,6 +992,7 @@ async fn test_r4_172_incursion_wave_respawn_attaches_combat_state_and_site_claim
         );
     });
 
+    let _ = ctx.systems.get_or_spawn(sys_id);
     let res = eve_server::services::pve_incursion_sites::process_incursion_site_completion_and_payout_core(
         &ctx.systems,
         &ctx.db,

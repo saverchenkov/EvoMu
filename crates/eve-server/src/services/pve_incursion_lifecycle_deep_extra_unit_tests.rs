@@ -167,6 +167,7 @@ async fn deep_fleet_size_payout_scaling_undersized_sweet_spot_overstack_and_zero
     });
 
     let (vg_sys, site_pos) = prepare_site_ready_for_completion(&ctx, cid, &vg_site_id);
+    let _ = ctx.systems.get_or_spawn(vg_sys);
     let fleet_id = 9101;
     let mut pilot_ids = Vec::new();
     for i in 0..14_i64 {

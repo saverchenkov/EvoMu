@@ -265,7 +265,15 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
         },
     )
     .await?;
-    let old_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(old_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(BridgeRpcError::ship_not_in_space(
+            ship_id,
+            Some(char_id),
+            Some(sys_id),
+            "AnsiblexJump",
+            "Ship is not in space",
+        ));
+    };
     let Some((cur_tick, ship_ball)) = old_handle.get_ball_snapshot(ship_id).await.map_err(|e| err("DestinyQueryFailed", e))? else {
         return Err(BridgeRpcError::ship_not_in_space(ship_id, Some(char_id), Some(sys_id), "AnsiblexJump", "Ship is not in space"));
     };

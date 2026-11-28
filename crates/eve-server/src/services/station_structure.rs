@@ -772,7 +772,15 @@ pub async fn handle(
                 || dock_id >= 1_000_000_000_000
                 || ctx.db.with_snapshot(|snap| snap.structures.contains_key(&dock_id));
 
-            let handle = ctx.systems.get_or_spawn(sys_id);
+            let Some(handle) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "Dock",
+                    format!("Ship {ship_id} is not spawned in solar system {sys_id} Ballpark"),
+                )));
+            };
             let Some((_, ball)) = (match handle.get_ball_snapshot(ship_id).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -1285,7 +1293,15 @@ pub async fn handle(
                 }));
             }
 
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(BridgeRpcError::ship_not_in_space(
+                    ship_id,
+                    Some(char_id),
+                    Some(sys_id),
+                    "DeployItem",
+                    "Active ship is not spawned in space",
+                )));
+            };
             let Some((_, ship_ball)) = (match sys_handle.get_ball_snapshot(ship_id).await {
                 Ok(v) => v,
                 Err(e) => {
