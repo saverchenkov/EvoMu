@@ -193,7 +193,7 @@ impl super::SystemHandle {
     pub fn try_remove_module_cycle(&self, ship_id: BallId, module_id: i64) {
         if !eve_db::lock_rank::held_lock_ranks().is_empty() {
             let (tx, _rx) = tokio::sync::oneshot::channel();
-            let _ = self.cmd_tx.try_send(SystemCommand::TryRemoveModuleCycle {
+            let _ = self.try_send_actor_cmd(SystemCommand::TryRemoveModuleCycle {
                 ship_id,
                 module_id,
                 wait_for_post_unlock: false,

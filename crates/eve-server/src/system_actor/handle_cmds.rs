@@ -1030,11 +1030,23 @@ fn dispatch_try_queued_via_runtime<P, T: Send + 'static>(
     make_cmd: impl FnOnce(P, oneshot::Sender<T>) -> SystemCommand,
     use_block_in_place: bool,
 ) -> TryQueuedReply<T> {
-    let Ok(permit) = handle.cmd_sender().try_reserve() else {
-        return TryQueuedReply::FullOrClosed;
-    };
     let (reply_tx, reply_rx) = oneshot::channel::<T>();
-    permit.send(make_cmd(payload, reply_tx));
+    if handle.is_on_post_unlock_callback_thread() {
+        let cmd = make_cmd(payload, reply_tx);
+        if handle.worker_cb_tx.is_closed()
+            || handle
+                .worker_cb_tx
+                .send(post_unlock::PostUnlockActorCallback::ActorCmd(Box::new(cmd)))
+                .is_err()
+        {
+            return TryQueuedReply::FullOrClosed;
+        }
+    } else {
+        let Ok(permit) = handle.cmd_sender().try_reserve() else {
+            return TryQueuedReply::FullOrClosed;
+        };
+        permit.send(make_cmd(payload, reply_tx));
+    }
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<TryQueuedReply<T>>(1);
     target_rt.spawn(async move {
         let res = match tokio::time::timeout(timeout_dur, reply_rx).await {
@@ -1064,10 +1076,10 @@ pub(in crate::system_actor) fn dispatch_actor_sync_try_queued_with_timeout<P, T:
     make_cmd: impl FnOnce(P, oneshot::Sender<T>) -> SystemCommand,
     _direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
 ) -> TryQueuedReply<T> {
-    if handle.cmd_tx.is_closed() {
+    eve_db::lock_rank::assert_no_locks_held();
+    if handle.is_actor_closed_for_current_thread() {
         return TryQueuedReply::FullOrClosed;
     }
-    let _worker_await_guard = ball_ops::WorkerAwaitingActorCmdGuard::enter(handle);
     match tokio::runtime::Handle::try_current() {
         Ok(rt_handle) => match rt_handle.runtime_flavor() {
             tokio::runtime::RuntimeFlavor::CurrentThread => {
@@ -1083,11 +1095,23 @@ pub(in crate::system_actor) fn dispatch_actor_sync_try_queued_with_timeout<P, T:
             _ => dispatch_try_queued_via_runtime(handle, &rt_handle, timeout_dur, payload, make_cmd, true),
         },
         Err(_) => {
-            let Ok(permit) = handle.cmd_sender().try_reserve() else {
-                return TryQueuedReply::FullOrClosed;
-            };
             let (reply_tx, reply_rx) = oneshot::channel::<T>();
-            permit.send(make_cmd(payload, reply_tx));
+            if handle.is_on_post_unlock_callback_thread() {
+                if handle
+                    .worker_cb_tx
+                    .send(post_unlock::PostUnlockActorCallback::ActorCmd(Box::new(
+                        make_cmd(payload, reply_tx),
+                    )))
+                    .is_err()
+                {
+                    return TryQueuedReply::FullOrClosed;
+                }
+            } else {
+                let Ok(permit) = handle.cmd_sender().try_reserve() else {
+                    return TryQueuedReply::FullOrClosed;
+                };
+                permit.send(make_cmd(payload, reply_tx));
+            }
             let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_time().build() else {
                 return TryQueuedReply::QueuedTimedOut;
             };
@@ -1161,7 +1185,7 @@ impl SystemHandle {
     ) -> T {
         if !held_lock_ranks().is_empty() {
             let (tx, _rx) = oneshot::channel();
-            let _ = self.cmd_tx.try_send(make_cmd(payload, tx));
+            let _ = self.try_send_actor_cmd(make_cmd(payload, tx));
             return default;
         }
         ball_ops::dispatch_actor_sync_reply_with_deadline(self, label, ACTOR_CMD_TIMEOUT, payload, make_cmd, direct_fn)
@@ -1210,7 +1234,7 @@ impl SystemHandle {
         if hull_delta <= 0.0 && armor_delta <= 0.0 && shield_delta <= 0.0 {
             return TryRepairCombatOutcome::Applied;
         }
-        if self.cmd_tx.is_closed() || self.get_ball_position_sync(ball_id).is_none() {
+        if self.is_actor_closed_for_current_thread() || self.get_ball_position_sync(ball_id).is_none() {
             return TryRepairCombatOutcome::NotPresent;
         }
         if !held_lock_ranks().is_empty() {
@@ -1305,7 +1329,7 @@ impl SystemHandle {
 
     pub fn cancel_ship_nanite_repairs_sync(&self, ship_id: BallId, refund_paste: bool) {
         if !held_lock_ranks().is_empty() {
-            if let Err(err) = self.cmd_tx.try_send(SystemCommand::CancelShipNaniteRepairs { ship_id, refund_paste }) {
+            if let Err(err) = self.try_send_actor_cmd(SystemCommand::CancelShipNaniteRepairs { ship_id, refund_paste }) {
                 tracing::warn!(solar_system_id = self.solar_system_id, ship_id, error = %err, "Failed to enqueue CancelShipNaniteRepairs under held lock");
             }
             return;
@@ -1376,7 +1400,7 @@ impl SystemHandle {
     /// Registers or clears a sim-clock-governed module reload deadline on the system actor (`#1081`).
     pub fn try_track_module_reload_sim(&self, module_id: i64, ship_id: BallId, remaining_sim_s: f64) {
         if !held_lock_ranks().is_empty() {
-            let _ = self.cmd_tx.try_send(SystemCommand::TrackModuleReloadSim { module_id, ship_id, remaining_sim_s });
+            let _ = self.try_send_actor_cmd(SystemCommand::TrackModuleReloadSim { module_id, ship_id, remaining_sim_s });
             return;
         }
         let tidi = self.tidi_factor();
@@ -1628,7 +1652,8 @@ impl SystemHandle {
     ///
     /// Requires no ranked locks held by the caller (panics under held locks).
     pub fn remove_ball_sync(&self, ball_id: BallId) -> Result<Option<Ball>, String> {
-        if self.cmd_sender().is_closed() {
+        eve_db::lock_rank::assert_no_locks_held();
+        if self.is_actor_closed_for_current_thread() {
             return Err(format!("system {} actor closed", self.solar_system_id));
         }
         ball_ops::dispatch_actor_sync_reply_with_deadline(

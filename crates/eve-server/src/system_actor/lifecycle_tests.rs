@@ -77,7 +77,8 @@ fn dummy_system_handle(solar_system_id: SolarSystemId) -> SystemHandle {
         post_unlock_actions_in_flight: Arc::new(AtomicUsize::new(0)),
         post_unlock_fallback_drain_lock: Arc::new(std::sync::Mutex::new(())),
         post_unlock_fallback_owner_tid: Arc::new(std::sync::Mutex::new(None)),
-        worker_awaiting_actor_cmd: Arc::new(AtomicUsize::new(0)),
+        post_unlock_fallback_scheduled: Arc::new(AtomicBool::new(false)),
+        actor_shutting_down: Arc::new(AtomicBool::new(false)),
         published_live: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cooldown_persist_gate: Arc::new(super::CooldownPersistGate::default()),
     }

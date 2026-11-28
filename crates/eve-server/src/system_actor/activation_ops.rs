@@ -1126,9 +1126,13 @@ impl SystemHandle {
         ship_id: BallId,
         projection: eve_dogma::FitProjection,
     ) -> bool {
-        self.cmd_sender()
-            .try_send(SystemCommand::ApplyFitProjection { ship_id, projection, reply: None })
-            .is_ok()
+        eve_db::lock_rank::assert_no_locks_held();
+        self.try_send_actor_cmd(SystemCommand::ApplyFitProjection {
+            ship_id,
+            projection,
+            reply: None,
+        })
+        .is_ok()
     }
 
     /// Reads the latest [`eve_dogma::FitProjection`] stored in actor state for `ship_id`, if any.
@@ -1344,8 +1348,7 @@ impl SystemHandle {
         if !eve_db::lock_rank::held_lock_ranks().is_empty() {
             let (tx, _rx) = tokio::sync::oneshot::channel();
             let _ = self
-                .cmd_tx
-                .try_send(SystemCommand::MutateExternalActiveModule { op, reply: tx });
+                .try_send_actor_cmd(SystemCommand::MutateExternalActiveModule { op, reply: tx });
             return;
         }
         let _ = self.dispatch_external_active_module_op(op);

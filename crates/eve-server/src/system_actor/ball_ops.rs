@@ -88,7 +88,67 @@ pub(crate) async fn call_actor_reply_with_deadline<T>(
 ) -> Result<T, String> {
     let (tx, rx) = oneshot::channel();
     let cmd = make_cmd(tx);
-    await_actor_cmd_with_deadline(handle.cmd_sender(), handle.solar_system_id, label, timeout_dur, cmd, rx).await
+    let from_callback = handle.is_on_post_unlock_callback_thread();
+    let worker_cb_tx = from_callback.then_some(&handle.worker_cb_tx);
+    await_actor_cmd_on_channels(
+        handle.cmd_sender(),
+        worker_cb_tx,
+        Some(&handle.actor_shutting_down),
+        handle.solar_system_id,
+        label,
+        timeout_dur,
+        cmd,
+        rx,
+    )
+    .await
+}
+
+async fn await_actor_cmd_on_channels<T>(
+    cmd_sender: &tokio::sync::mpsc::Sender<SystemCommand>,
+    worker_cb_tx: Option<
+        &tokio::sync::mpsc::UnboundedSender<super::post_unlock::PostUnlockActorCallback>,
+    >,
+    shutting_down: Option<&std::sync::atomic::AtomicBool>,
+    solar_system_id: SolarSystemId,
+    label: &str,
+    timeout_dur: Duration,
+    cmd: SystemCommand,
+    rx: oneshot::Receiver<T>,
+) -> Result<T, String> {
+    if let Some(cb_tx) = worker_cb_tx.filter(|_| !matches!(cmd, SystemCommand::ShutdownActor { .. }))
+    {
+        if cb_tx.is_closed()
+            || cb_tx
+                .send(super::post_unlock::PostUnlockActorCallback::ActorCmd(Box::new(cmd)))
+                .is_err()
+        {
+            return Err(format!("system {solar_system_id} actor closed"));
+        }
+    } else {
+        if cmd_sender.is_closed()
+            || shutting_down.is_some_and(|s| s.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            return Err(format!("system {solar_system_id} actor closed"));
+        }
+        match tokio::time::timeout(timeout_dur, cmd_sender.send(cmd)).await {
+            Err(_) => {
+                return Err(format!(
+                    "system {solar_system_id} actor timed out queuing {label} after {}ms",
+                    timeout_dur.as_millis()
+                ));
+            }
+            Ok(Err(_)) => return Err(format!("system {solar_system_id} actor closed")),
+            Ok(Ok(())) => {}
+        }
+    }
+    match tokio::time::timeout(timeout_dur, rx).await {
+        Err(_) => Err(format!(
+            "system {solar_system_id} actor timed out awaiting {label} after {}ms",
+            timeout_dur.as_millis()
+        )),
+        Ok(Err(_)) => Err(format!("system {solar_system_id} actor dropped {label} reply")),
+        Ok(Ok(reply)) => Ok(reply),
+    }
 }
 
 pub(in crate::system_actor) async fn await_actor_cmd_with_deadline<T>(
@@ -99,24 +159,17 @@ pub(in crate::system_actor) async fn await_actor_cmd_with_deadline<T>(
     cmd: SystemCommand,
     rx: oneshot::Receiver<T>,
 ) -> Result<T, String> {
-    match tokio::time::timeout(timeout_dur, cmd_sender.send(cmd)).await {
-        Err(_) => {
-            return Err(format!(
-                "system {solar_system_id} actor timed out queuing {label} after {}ms",
-                timeout_dur.as_millis()
-            ));
-        }
-        Ok(Err(_)) => return Err(format!("system {solar_system_id} actor closed")),
-        Ok(Ok(())) => {}
-    }
-    match tokio::time::timeout(timeout_dur, rx).await {
-        Err(_) => Err(format!(
-            "system {solar_system_id} actor timed out awaiting {label} after {}ms",
-            timeout_dur.as_millis()
-        )),
-        Ok(Err(_)) => Err(format!("system {solar_system_id} actor dropped {label} reply")),
-        Ok(Ok(reply)) => Ok(reply),
-    }
+    await_actor_cmd_on_channels(
+        cmd_sender,
+        None,
+        None,
+        solar_system_id,
+        label,
+        timeout_dur,
+        cmd,
+        rx,
+    )
+    .await
 }
 
 /// Sends a [`SystemCommand`] with bounded enqueue and reply deadlines (`timeout_dur`), returning an
@@ -130,31 +183,6 @@ pub(crate) async fn call_actor_result_with_deadline<T>(
     call_actor_reply_with_deadline(handle, label, timeout_dur, make_cmd).await?
 }
 
-pub(in crate::system_actor) struct WorkerAwaitingActorCmdGuard<'a>(
-    Option<&'a std::sync::atomic::AtomicUsize>,
-);
-
-impl<'a> WorkerAwaitingActorCmdGuard<'a> {
-    pub(in crate::system_actor) fn enter(handle: &'a SystemHandle) -> Self {
-        if handle.is_on_post_unlock_callback_thread() {
-            handle
-                .worker_awaiting_actor_cmd
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Self(Some(&handle.worker_awaiting_actor_cmd))
-        } else {
-            Self(None)
-        }
-    }
-}
-
-impl Drop for WorkerAwaitingActorCmdGuard<'_> {
-    fn drop(&mut self) {
-        if let Some(cnt) = self.0.take() {
-            cnt.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-}
-
 fn await_actor_cmd_via_runtime<T: Send + 'static>(
     handle: &SystemHandle,
     target_rt: &tokio::runtime::Handle,
@@ -165,12 +193,17 @@ fn await_actor_cmd_via_runtime<T: Send + 'static>(
     use_block_in_place: bool,
 ) -> Result<T, String> {
     let cmd_sender = handle.cmd_sender().clone();
+    let from_callback = handle.is_on_post_unlock_callback_thread();
+    let worker_cb_tx = from_callback.then(|| handle.worker_cb_tx.clone());
+    let shutting_down = Arc::clone(&handle.actor_shutting_down);
     let sys_id = handle.solar_system_id;
     let label_owned = label.to_owned();
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Result<T, String>>(1);
     target_rt.spawn(async move {
-        let res = await_actor_cmd_with_deadline(
+        let res = await_actor_cmd_on_channels(
             &cmd_sender,
+            worker_cb_tx.as_ref(),
+            Some(&shutting_down),
             sys_id,
             &label_owned,
             timeout_dur,
@@ -195,7 +228,12 @@ fn await_actor_cmd_via_runtime<T: Send + 'static>(
             wait_dur.as_millis()
         )),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            if handle.cmd_sender().is_closed() {
+            let closed = if from_callback {
+                handle.worker_cb_tx.is_closed()
+            } else {
+                handle.is_actor_closed()
+            };
+            if closed {
                 Err(format!("system {sys_id} actor closed"))
             } else {
                 Err(format!(
@@ -216,10 +254,11 @@ fn dispatch_actor_sync_reply_with_deadline_inner<P, T: Send + 'static>(
     make_cmd: impl FnOnce(P, oneshot::Sender<T>) -> SystemCommand,
     _direct_fn: impl FnOnce(&mut BallOpsCtx<'_>, P) -> T,
 ) -> Result<T, String> {
-    if handle.cmd_sender().is_closed() {
+    eve_db::lock_rank::assert_no_locks_held();
+    if handle.is_actor_closed_for_current_thread() {
         return Err(format!("system {} actor closed", handle.solar_system_id));
     }
-    let _worker_await_guard = WorkerAwaitingActorCmdGuard::enter(handle);
+    let from_callback = handle.is_on_post_unlock_callback_thread();
     match tokio::runtime::Handle::try_current() {
         Ok(rt_handle) => match rt_handle.runtime_flavor() {
             tokio::runtime::RuntimeFlavor::CurrentThread => {
@@ -267,7 +306,17 @@ fn dispatch_actor_sync_reply_with_deadline_inner<P, T: Send + 'static>(
                 .map_err(|e| format!("failed to build transient runtime for {label}: {e}"))?;
             let (reply_tx, reply_rx) = oneshot::channel::<T>();
             let cmd = make_cmd(payload, reply_tx);
-            rt.block_on(await_actor_cmd_with_deadline(handle.cmd_sender(), handle.solar_system_id, label, timeout_dur, cmd, reply_rx))
+            let worker_cb_tx = from_callback.then_some(&handle.worker_cb_tx);
+            rt.block_on(await_actor_cmd_on_channels(
+                handle.cmd_sender(),
+                worker_cb_tx,
+                Some(&handle.actor_shutting_down),
+                handle.solar_system_id,
+                label,
+                timeout_dur,
+                cmd,
+                reply_rx,
+            ))
         }
     }
 }
@@ -2190,7 +2239,8 @@ mod tests {
             post_unlock_actions_in_flight: Arc::new(AtomicUsize::new(0)),
             post_unlock_fallback_drain_lock: Arc::new(std::sync::Mutex::new(())),
             post_unlock_fallback_owner_tid: Arc::new(std::sync::Mutex::new(None)),
-            worker_awaiting_actor_cmd: Arc::new(AtomicUsize::new(0)),
+            post_unlock_fallback_scheduled: Arc::new(AtomicBool::new(false)),
+            actor_shutting_down: Arc::new(AtomicBool::new(false)),
             published_live: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cooldown_persist_gate: Arc::new(crate::system_actor::CooldownPersistGate::default()),
         };

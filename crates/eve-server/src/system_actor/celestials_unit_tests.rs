@@ -662,7 +662,8 @@ fn make_dummy_system_handle(cmd_tx: tokio::sync::mpsc::Sender<SystemCommand>) ->
         post_unlock_actions_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         post_unlock_fallback_drain_lock: Arc::new(std::sync::Mutex::new(())),
         post_unlock_fallback_owner_tid: Arc::new(std::sync::Mutex::new(None)),
-        worker_awaiting_actor_cmd: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        post_unlock_fallback_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        actor_shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         published_live: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cooldown_persist_gate: Arc::new(super::super::CooldownPersistGate::default()),
     };
@@ -2770,5 +2771,279 @@ async fn arch_1342_4d5_post_unlock_actions_callback_runs_on_worker_via_mailbox_m
     assert!(
         ct_join.is_ok(),
         "CurrentThread post_unlock_actions callback test must complete without deadlock"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4d5_shutdown_with_sync_post_unlock_actions_fails_fast_mt_and_ct() {
+    async fn run_case(ctx: ServerContext) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let sys_a = 30_000_142_u32;
+        let sys_b = 30_002_187_u32;
+        let (ship_a, ship_b) = (799_811_i64, 799_812_i64);
+
+        // Part A: `post_unlock_worker` executing sync `SystemHandle` commands during `stop_system`
+        // completes via `worker_cb_tx` without hitting the 5s `ACTOR_CMD_TIMEOUT` / `shutdown_deadline`.
+        let h_a = ctx.systems.get_or_spawn(sys_a);
+        let fresh_a = make_combat_state(150.0, 150.0, 150.0, 150.0);
+        h_a.try_spawn_ball_with_meta(
+            make_ball(ship_a, 587, DVec3::ZERO),
+            make_combat_state(100.0, 100.0, 100.0, 100.0),
+            SlimItemMeta::default(),
+        );
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        let worker_sync_ok = Arc::new(AtomicBool::new(false));
+        let (h_a_cb, worker_sync_cl, fresh_a_cb) =
+            (h_a.clone(), Arc::clone(&worker_sync_ok), fresh_a.clone());
+        h_a.enqueue_post_unlock_action(Box::new(move || {
+            let _ = entered_tx.send(());
+            let _ = release_rx.lock().unwrap().recv();
+            let stats_ok = h_a_cb.try_sync_ship_ballpark_stats(ship_a, &fresh_a_cb);
+            let destiny_ok = h_a_cb.try_emit_destiny_event(
+                ship_a,
+                DestinyEvent::SetSpeedFraction { ball_id: ship_a, fraction: 0.25 },
+            );
+            worker_sync_cl.store(stats_ok && destiny_ok, Ordering::Release);
+        }));
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("worker entered");
+        })
+        .await
+        .unwrap();
+
+        let started_a = std::time::Instant::now();
+        let stop_a = tokio::spawn({
+            let reg = Arc::clone(&ctx.systems);
+            async move { reg.stop_system(sys_a).await }
+        });
+        for _ in 0..200 {
+            if h_a.is_actor_closed() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(h_a.is_actor_closed());
+        // External sync calls while `ShutdownActor` waits on `post_unlock_worker` must fail fast.
+        let ext_stats = h_a.try_sync_ship_ballpark_stats(ship_a, &fresh_a);
+        let ext_destiny = h_a.try_emit_destiny_event(
+            ship_a,
+            DestinyEvent::SetSpeedFraction { ball_id: ship_a, fraction: 0.1 },
+        );
+        assert!(!ext_stats && !ext_destiny);
+        release_tx.send(()).unwrap();
+        let stopped_a = tokio::time::timeout(std::time::Duration::from_secs(2), stop_a)
+            .await
+            .expect("Part A stop_system must complete well under ACTOR_CMD_TIMEOUT")
+            .unwrap();
+        assert!(stopped_a);
+        assert!(started_a.elapsed() < std::time::Duration::from_secs(2));
+        assert!(worker_sync_ok.load(Ordering::Acquire));
+
+        // Part B: Post-worker actor-exit drain (`flush_post_unlock_actions_catching` on actor exit)
+        // must fail fast on sync `SystemHandle` commands after `cmd_rx` and `worker_cb_rx` closed.
+        let h_b = ctx.systems.get_or_spawn(sys_b);
+        let fresh_b = make_combat_state(150.0, 150.0, 150.0, 150.0);
+        h_b.try_spawn_ball_with_meta(
+            make_ball(ship_b, 587, DVec3::ZERO),
+            make_combat_state(100.0, 100.0, 100.0, 100.0),
+            SlimItemMeta::default(),
+        );
+        let _ = h_b.post_unlock_tx.send(crate::system_actor::post_unlock::PostUnlockMsg::Shutdown);
+        for _ in 0..100 {
+            if h_b.post_unlock_tx.is_closed() { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(h_b.post_unlock_tx.is_closed());
+        let shutdown_action_failed_fast = Arc::new(AtomicBool::new(false));
+        let (h_b_cb, dead_cl) = (h_b.clone(), Arc::clone(&shutdown_action_failed_fast));
+        h_b.post_unlock_actions.lock().unwrap().push(Box::new(move || {
+            let t0 = std::time::Instant::now();
+            let stats = h_b_cb.try_sync_ship_ballpark_stats(ship_b, &fresh_b);
+            let destiny = h_b_cb.try_emit_destiny_event(
+                ship_b,
+                DestinyEvent::SetSpeedFraction { ball_id: ship_b, fraction: 0.5 },
+            );
+            dead_cl.store(
+                !stats && !destiny && t0.elapsed() < std::time::Duration::from_secs(1),
+                Ordering::Release,
+            );
+        }));
+        let started_b = std::time::Instant::now();
+        let stopped_b = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            ctx.systems.stop_system(sys_b),
+        )
+        .await
+        .expect("Part B stop_system must complete well under ACTOR_CMD_TIMEOUT");
+        assert!(stopped_b);
+        assert!(started_b.elapsed() < std::time::Duration::from_secs(2));
+        assert!(shutdown_action_failed_fast.load(Ordering::Acquire));
+    }
+
+    run_case(test_ctx()).await;
+
+    let ct_join = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            run_case(test_ctx()).await;
+        });
+    })
+    .join();
+    assert!(
+        ct_join.is_ok(),
+        "CurrentThread shutdown post_unlock_actions test must complete without deadlock"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arch_1342_4d5_callback_barrier_reentrancy_and_external_isolation_mt_and_ct() {
+    async fn run_case(ctx: ServerContext) {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let sys_id = 30_000_142_u32;
+        let (char_id, ship_live, ship_fb, ship_ext, mod_id, target_id) = (
+            90_000_801_i64,
+            799_911_i64,
+            799_912_i64,
+            799_913_i64,
+            799_914_i64,
+            799_915_i64,
+        );
+        let h = ctx.systems.get_or_spawn(sys_id);
+        for sid in [ship_live, ship_fb, ship_ext] {
+            h.try_spawn_ball_with_meta(
+                make_ball(sid, 587, DVec3::ZERO),
+                make_combat_state(100.0, 100.0, 100.0, 100.0),
+                SlimItemMeta { char_id: Some(char_id), ..Default::default() },
+            );
+        }
+        h.record_active_ewar_start_sync(ship_fb, mod_id, target_id, "web").unwrap();
+
+        // Part A: Live worker calls barrier command `remove_ball_sync` without deadlocking AND
+        // without causing concurrent external callers to bypass pending `post_unlock_actions`.
+        let (live_entered_tx, live_entered_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let (live_release_tx, live_release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let live_release_rx = Arc::new(std::sync::Mutex::new(live_release_rx));
+        let worker_rm_ok = Arc::new(AtomicBool::new(false));
+        let action_two_ran = Arc::new(AtomicBool::new(false));
+        let (h_cb, rm_ok_cl, act2_cl) = (h.clone(), Arc::clone(&worker_rm_ok), Arc::clone(&action_two_ran));
+        h.enqueue_post_unlock_action(Box::new(move || {
+            let t0 = std::time::Instant::now();
+            let removed = h_cb.remove_ball_sync(ship_live);
+            let _ = live_entered_tx.send(());
+            let _ = live_release_rx.lock().unwrap().recv();
+            rm_ok_cl.store(
+                removed.is_ok_and(|b| b.is_some()) && t0.elapsed() < std::time::Duration::from_secs(2),
+                Ordering::Release,
+            );
+        }));
+        h.enqueue_post_unlock_action(Box::new(move || {
+            act2_cl.store(true, Ordering::Release);
+        }));
+        tokio::task::spawn_blocking(move || {
+            live_entered_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("worker entered");
+        })
+        .await
+        .unwrap();
+        let ext_tick_fut = tokio::spawn({
+            let h_ext = h.clone();
+            async move { h_ext.query_current_tick().await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert!(
+            !ext_tick_fut.is_finished(),
+            "external query_current_tick must still observe post_unlock_actions barrier"
+        );
+        live_release_tx.send(()).unwrap();
+        let tick_res = tokio::time::timeout(std::time::Duration::from_secs(2), ext_tick_fut)
+            .await
+            .expect("external tick must complete promptly")
+            .unwrap();
+        assert!(tick_res.is_ok());
+        assert!(action_two_ran.load(Ordering::Acquire));
+        assert!(worker_rm_ok.load(Ordering::Acquire));
+
+        // Part B: Closed-worker fallback thread calls barrier command `remove_ball_sync` (which
+        // also queues `batch_unsent_direct_items` / fallback #2) + `flush_module_ewar_sync` while
+        // holding `fallback_drain_lock` without AB-BA deadlock, and `step_manual` waits for fallback.
+        let _ = h.post_unlock_tx.send(crate::system_actor::post_unlock::PostUnlockMsg::Shutdown);
+        for _ in 0..100 {
+            if h.post_unlock_tx.is_closed() { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(h.post_unlock_tx.is_closed());
+
+        let (fb_entered_tx, fb_entered_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let (fb_release_tx, fb_release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let fb_release_rx = Arc::new(std::sync::Mutex::new(fb_release_rx));
+        let fb_reentry_ok = Arc::new(AtomicBool::new(false));
+        let coalesced_count = Arc::new(AtomicUsize::new(0));
+        let (h_fb, fb_ok_cl) = (h.clone(), Arc::clone(&fb_reentry_ok));
+        h.enqueue_post_unlock_action(Box::new(move || {
+            let _ = fb_entered_tx.send(());
+            let _ = fb_release_rx.lock().unwrap().recv();
+            let on_fb = h_fb.is_on_post_unlock_fallback_thread()
+                && h_fb.is_on_post_unlock_callback_thread();
+            let t0 = std::time::Instant::now();
+            let rm_res = h_fb.remove_ball_sync(ship_fb);
+            let ewar_res = h_fb.flush_module_ewar_sync(ship_fb, mod_id, false);
+            fb_ok_cl.store(
+                on_fb
+                    && rm_res.is_ok_and(|b| b.is_some())
+                    && ewar_res.is_ok_and(|s| !s.started_targets.is_empty())
+                    && t0.elapsed() < std::time::Duration::from_secs(2),
+                Ordering::Release,
+            );
+        }));
+        tokio::task::spawn_blocking(move || {
+            fb_entered_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("fallback entered");
+        })
+        .await
+        .unwrap();
+        for _ in 0..6 {
+            let c = Arc::clone(&coalesced_count);
+            h.enqueue_post_unlock_action(Box::new(move || {
+                c.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        let step_fut = tokio::spawn({
+            let h_step = h.clone();
+            async move { h_step.step_manual(0.1).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert!(
+            !step_fut.is_finished(),
+            "step_manual must wait for closed-worker fallback post_unlock_actions drain"
+        );
+        fb_release_tx.send(()).unwrap();
+        let step_res = tokio::time::timeout(std::time::Duration::from_secs(2), step_fut)
+            .await
+            .expect("step_manual must complete after fallback unblocks")
+            .unwrap();
+        assert!(step_res.is_ok());
+        assert!(fb_reentry_ok.load(Ordering::Acquire));
+        assert_eq!(coalesced_count.load(Ordering::SeqCst), 6);
+        assert!(h.view().ball(ship_fb).is_none() && h.view().ball(ship_ext).is_some());
+    }
+
+    run_case(test_ctx()).await;
+
+    let ct_join = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            run_case(test_ctx()).await;
+        });
+    })
+    .join();
+    assert!(
+        ct_join.is_ok(),
+        "CurrentThread callback reentrancy test must complete without deadlock"
     );
 }

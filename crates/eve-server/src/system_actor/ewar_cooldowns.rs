@@ -928,7 +928,7 @@ impl SystemHandle {
         &self,
         op: super::post_unlock::WorkerEwarSyncOp,
     ) -> Result<ModuleEwarFlushSnapshot, String> {
-        if self.cmd_tx.is_closed() {
+        if self.worker_cb_tx.is_closed() {
             return Err(format!("system {} actor closed", self.solar_system_id));
         }
         let mut ops = super::post_unlock::PostUnlockOps::default();
@@ -961,7 +961,7 @@ impl SystemHandle {
                 self.solar_system_id
             ));
         }
-        if self.is_on_post_unlock_worker_thread() {
+        if self.is_on_post_unlock_callback_thread() {
             return self.dispatch_worker_ewar_sync(
                 super::post_unlock::WorkerEwarSyncOp::FlushModuleEwar {
                     source_ship_id,
@@ -1033,7 +1033,7 @@ impl SystemHandle {
                 self.solar_system_id
             ));
         }
-        if self.is_on_post_unlock_worker_thread() {
+        if self.is_on_post_unlock_callback_thread() {
             return self
                 .dispatch_worker_ewar_sync(
                     super::post_unlock::WorkerEwarSyncOp::RemoveRemoteAssistanceByModule {
@@ -1128,7 +1128,9 @@ impl SystemHandle {
             token,
             reply: None,
         };
-        if let Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) = self.cmd_tx.try_send(cmd) {
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) =
+            self.try_send_actor_cmd(cmd)
+        {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let tx = self.cmd_tx.clone();
                 handle.spawn(async move {
@@ -1147,6 +1149,9 @@ impl SystemHandle {
             .post_unlock_tx
             .send(super::post_unlock::PostUnlockMsg::FlushActions)
             .is_err()
+            && !self
+                .post_unlock_fallback_scheduled
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
         {
             super::post_unlock::spawn_actions_fallback_thread(
                 self.solar_system_id,
@@ -1154,6 +1159,7 @@ impl SystemHandle {
                 Arc::clone(&self.post_unlock_actions_in_flight),
                 Arc::clone(&self.post_unlock_fallback_drain_lock),
                 Arc::clone(&self.post_unlock_fallback_owner_tid),
+                Arc::clone(&self.post_unlock_fallback_scheduled),
                 Arc::clone(&self.command_panics),
             );
         }

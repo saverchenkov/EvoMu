@@ -14,7 +14,7 @@ use eve_sde::{attr_ids, SdeRegistry, SolarSystemId, TypeId};
 use glam::DVec3;
 use std::{
     collections::HashMap,
-    sync::{atomic::{AtomicU64, AtomicUsize, Ordering}, Arc, OnceLock},
+    sync::{atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}, Arc, OnceLock},
 };
 
 use super::commands::SystemCommand;
@@ -1231,6 +1231,7 @@ pub(in crate::system_actor) enum PostUnlockActorCallback {
         extra_actions: Vec<PendingCycleAction>,
         reply: std::sync::mpsc::SyncSender<()>,
     },
+    ActorCmd(Box<SystemCommand>),
 }
 
 #[derive(Clone, Copy)]
@@ -1943,10 +1944,12 @@ impl Drop for InFlightActionsGuard {
     }
 }
 
-struct FallbackOwnerGuard(Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>);
+pub(in crate::system_actor) struct FallbackOwnerGuard(Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>);
 
 impl FallbackOwnerGuard {
-    fn enter(slot: Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>) -> Self {
+    pub(in crate::system_actor) fn enter(
+        slot: Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
+    ) -> Self {
         *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
         Self(slot)
     }
@@ -1973,13 +1976,16 @@ fn spawn_fallback_thread_impl(
     post_unlock_actions_in_flight: Arc<AtomicUsize>,
     fallback_drain_lock: Arc<std::sync::Mutex<()>>,
     fallback_owner_tid: Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
+    fallback_scheduled: Arc<AtomicBool>,
     command_panics: Arc<AtomicU64>,
     actor_rt_handle: Option<tokio::runtime::Handle>,
     items: Vec<PostUnlockWorkItem>,
     deferred_db_replies: Vec<Box<dyn FnOnce() + Send>>,
 ) {
+    let reset_scheduled_on_err = unsent_ctx.is_none();
     post_unlock_actions_in_flight.fetch_add(1, Ordering::SeqCst);
     let in_flight_for_thread = Arc::clone(&post_unlock_actions_in_flight);
+    let fallback_scheduled_for_thread = Arc::clone(&fallback_scheduled);
     let spawn_res = std::thread::Builder::new()
         .name(format!("post-unlock-fallback-{solar_system_id}"))
         .spawn(move || {
@@ -2031,11 +2037,21 @@ fn spawn_fallback_thread_impl(
                     }
                 }
             }
-            let _ = super::ewar_cooldowns::flush_post_unlock_actions_catching(
-                &post_unlock_actions,
-                solar_system_id,
-                &command_panics,
-            );
+            loop {
+                let _ = super::ewar_cooldowns::flush_post_unlock_actions_catching(
+                    &post_unlock_actions,
+                    solar_system_id,
+                    &command_panics,
+                );
+                fallback_scheduled_for_thread.store(false, Ordering::SeqCst);
+                let still_empty = post_unlock_actions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty();
+                if still_empty || fallback_scheduled_for_thread.swap(true, Ordering::SeqCst) {
+                    break;
+                }
+            }
             drop(_owner_guard);
             drop(_drain_guard);
             drop(_in_flight_guard);
@@ -2044,6 +2060,9 @@ fn spawn_fallback_thread_impl(
             }
         });
     if spawn_res.is_err() {
+        if reset_scheduled_on_err {
+            fallback_scheduled.store(false, Ordering::SeqCst);
+        }
         post_unlock_actions_in_flight.fetch_sub(1, Ordering::SeqCst);
         tracing::error!(solar_system_id, "failed to spawn post-unlock fallback thread");
     }
@@ -2059,6 +2078,7 @@ pub(in crate::system_actor) fn spawn_unsent_fallback_thread(
     post_unlock_actions_in_flight: Arc<AtomicUsize>,
     fallback_drain_lock: Arc<std::sync::Mutex<()>>,
     fallback_owner_tid: Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
+    fallback_scheduled: Arc<AtomicBool>,
     command_panics: Arc<AtomicU64>,
     actor_rt_handle: Option<tokio::runtime::Handle>,
     items: Vec<PostUnlockWorkItem>,
@@ -2077,6 +2097,7 @@ pub(in crate::system_actor) fn spawn_unsent_fallback_thread(
         post_unlock_actions_in_flight,
         fallback_drain_lock,
         fallback_owner_tid,
+        fallback_scheduled,
         command_panics,
         actor_rt_handle,
         items,
@@ -2084,12 +2105,14 @@ pub(in crate::system_actor) fn spawn_unsent_fallback_thread(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::system_actor) fn spawn_actions_fallback_thread(
     solar_system_id: SolarSystemId,
     post_unlock_actions: Arc<RankedMutex<Vec<PostUnlockHookAction>, RANK_LEAF>>,
     post_unlock_actions_in_flight: Arc<AtomicUsize>,
     fallback_drain_lock: Arc<std::sync::Mutex<()>>,
     fallback_owner_tid: Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
+    fallback_scheduled: Arc<AtomicBool>,
     command_panics: Arc<AtomicU64>,
 ) {
     spawn_fallback_thread_impl(
@@ -2099,6 +2122,7 @@ pub(in crate::system_actor) fn spawn_actions_fallback_thread(
         post_unlock_actions_in_flight,
         fallback_drain_lock,
         fallback_owner_tid,
+        fallback_scheduled,
         command_panics,
         None,
         Vec::new(),
@@ -2365,6 +2389,7 @@ fn flush_post_unlock_actions_tracked(
 pub(in crate::system_actor) fn spawn_post_unlock_worker(
     solar_system_id: SolarSystemId,
     worker_thread_id: Arc<OnceLock<std::thread::ThreadId>>,
+    worker_exited: Arc<AtomicBool>,
     completed_seq_worker: Arc<AtomicU64>,
     deact_hook_worker: Arc<RankedRwLock<Option<ModuleDeactivationHook>, RANK_LEAF>>,
     lock_hook_worker: Arc<RankedRwLock<Option<TargetLockCompletedHook>, RANK_LEAF>>,
@@ -2380,9 +2405,16 @@ pub(in crate::system_actor) fn spawn_post_unlock_worker(
     let (post_unlock_tx, mut post_unlock_rx) = tokio::sync::mpsc::unbounded_channel::<PostUnlockMsg>();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
     std::thread::Builder::new().name(format!("post-unlock-{solar_system_id}")).spawn(move || {
-        struct WorkerDoneGuard(Option<tokio::sync::oneshot::Sender<()>>);
-        impl Drop for WorkerDoneGuard { fn drop(&mut self) { if let Some(tx) = self.0.take() { let _ = tx.send(()); } } }
-        let _done_guard = WorkerDoneGuard(Some(done_tx));
+        struct WorkerDoneGuard(Option<tokio::sync::oneshot::Sender<()>>, Arc<AtomicBool>);
+        impl Drop for WorkerDoneGuard {
+            fn drop(&mut self) {
+                self.1.store(true, Ordering::Release);
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        let _done_guard = WorkerDoneGuard(Some(done_tx), worker_exited);
         let _ = worker_thread_id.set(std::thread::current().id());
         let process_item = |item: PostUnlockWorkItem| {
             let deact_hook = deact_hook_worker.read().unwrap_or_else(|e| e.into_inner()).clone();

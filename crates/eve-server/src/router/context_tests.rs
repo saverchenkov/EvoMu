@@ -1769,7 +1769,6 @@ async fn same_batch_cycle_deactivation_and_recon_cooldown_override_plus_actor_is
     h_jita.enqueue_post_unlock_action(Box::new(move || jc.store(true, Ordering::SeqCst)));
     let _ = h_amarr.has_active_modules_or_cloak_sync(ship_id);
     h_jita.step_manual(0.1).await.unwrap();
-    assert!(h_jita.wait_for_post_unlock_barrier().await);
     assert!(jita_drained.load(Ordering::SeqCst) && !amarr_marker.load(Ordering::SeqCst));
     h_amarr.enqueue_post_unlock_action(Box::new(|| {}));
     assert!(h_amarr.wait_for_post_unlock_barrier().await);

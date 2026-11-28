@@ -1928,7 +1928,7 @@ impl SystemHandle {
         }
         let (reply, _) = tokio::sync::oneshot::channel();
         if let Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) =
-            self.cmd_tx.try_send(SystemCommand::FinalizeDroneLaunches {
+            self.try_send_actor_cmd(SystemCommand::FinalizeDroneLaunches {
                 mappings: Vec::new(),
                 rollback_res_ids,
                 reply,
@@ -1950,7 +1950,7 @@ impl SystemHandle {
         }
         let (reply, _) = tokio::sync::oneshot::channel();
         if let Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) =
-            self.cmd_tx.try_send(SystemCommand::ScoopDroneClaimOp {
+            self.try_send_actor_cmd(SystemCommand::ScoopDroneClaimOp {
                 ball_id,
                 action: DroneScoopClaimAction::ReleaseClaim,
                 reply,

@@ -477,8 +477,12 @@ pub(in crate::system_actor) struct CtActorDriver {
     rt_handle: tokio::runtime::Handle,
     shutdown_tx: Option<std::sync::mpsc::SyncSender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
-    post_unlock_worker_thread_ids:
-        std::sync::Mutex<Vec<Arc<std::sync::OnceLock<std::thread::ThreadId>>>>,
+    post_unlock_worker_thread_ids: std::sync::Mutex<
+        Vec<(
+            Arc<std::sync::OnceLock<std::thread::ThreadId>>,
+            Arc<std::sync::atomic::AtomicBool>,
+        )>,
+    >,
 }
 
 impl CtActorDriver {
@@ -516,11 +520,14 @@ impl CtActorDriver {
     pub(in crate::system_actor) fn register_post_unlock_worker_thread_id(
         &self,
         worker_thread_id: Arc<std::sync::OnceLock<std::thread::ThreadId>>,
+        worker_exited: Arc<std::sync::atomic::AtomicBool>,
     ) {
-        self.post_unlock_worker_thread_ids
+        let mut ids = self
+            .post_unlock_worker_thread_ids
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(worker_thread_id);
+            .unwrap_or_else(|e| e.into_inner());
+        ids.retain(|(_, exited)| !exited.load(std::sync::atomic::Ordering::Acquire));
+        ids.push((worker_thread_id, worker_exited));
     }
 }
 
@@ -538,7 +545,7 @@ impl Drop for CtActorDriver {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .any(|id| id.get() == Some(&cur_tid));
+            .any(|(id, _)| id.get() == Some(&cur_tid));
         if let Some(thread) = self.thread.take() {
             if !on_driver_runtime
                 && !on_own_post_unlock_worker
@@ -713,6 +720,9 @@ impl<'a> ActorCallbackState<'a> {
                 if let Some(()) = self.extend_pending_cycle_actions(extra_actions) {
                     let _ = reply.send(());
                 }
+            }
+            PostUnlockActorCallback::ActorCmd(_) => {
+                debug_assert!(false, "ActorCmd must be dispatched by execute_actor_cmd_batch");
             }
         }
     }
@@ -1815,8 +1825,10 @@ impl SystemRegistry {
         let post_unlock_fallback_drain_lock_actor = Arc::clone(&post_unlock_fallback_drain_lock);
         let post_unlock_fallback_owner_tid = Arc::new(std::sync::Mutex::new(None));
         let post_unlock_fallback_owner_tid_actor = Arc::clone(&post_unlock_fallback_owner_tid);
-        let worker_awaiting_actor_cmd = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let worker_awaiting_actor_cmd_actor = Arc::clone(&worker_awaiting_actor_cmd);
+        let post_unlock_fallback_scheduled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let post_unlock_fallback_scheduled_actor = Arc::clone(&post_unlock_fallback_scheduled);
+        let actor_shutting_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let actor_shutting_down_actor = Arc::clone(&actor_shutting_down);
         let cooldown_persist_gate_actor = self.cooldown_persist_gate(solar_system_id);
         let post_unlock_actions_for_handle = Arc::clone(&post_unlock_actions_actor);
         let published_live = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1877,8 +1889,12 @@ impl SystemRegistry {
         }
 
         let post_unlock_worker_thread_id = Arc::new(std::sync::OnceLock::new());
+        let post_unlock_worker_exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
         if let Some(ref driver) = ct_driver {
-            driver.register_post_unlock_worker_thread_id(Arc::clone(&post_unlock_worker_thread_id));
+            driver.register_post_unlock_worker_thread_id(
+                Arc::clone(&post_unlock_worker_thread_id),
+                Arc::clone(&post_unlock_worker_exited),
+            );
         }
         let post_unlock_in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let post_unlock_in_flight_actor = Arc::clone(&post_unlock_in_flight);
@@ -1898,6 +1914,7 @@ impl SystemRegistry {
             post_unlock::spawn_post_unlock_worker(
                 solar_system_id,
                 post_unlock_worker_thread_id.clone(),
+                post_unlock_worker_exited,
                 Arc::clone(&completed_post_unlock_seq),
                 module_deactivation_hook_actor.clone(),
                 target_lock_completed_hook_actor.clone(),
@@ -2046,39 +2063,29 @@ impl SystemRegistry {
                 command_panics_actor: &command_panics_actor,
             };
             let mut worker_cb_open = true;
-            loop {
-                let batch_or_stop = tokio::select! {
-                    biased;
-                    cb_opt = worker_cb_rx.recv(), if worker_cb_open => {
-                        match cb_opt {
-                            Some(cb) => actor_cb_state.run_callback(cb),
-                            None => { worker_cb_open = false; }
+            let mut execute_actor_cmd_batch =
+                |post_unlock_tx_ref: Option<&tokio::sync::mpsc::UnboundedSender<post_unlock::PostUnlockMsg>>,
+                 cmd_batch: Vec<SystemCommand>,
+                 from_post_unlock_callback: bool|
+                 -> Option<tokio::sync::oneshot::Sender<()>> {
+                    let mut batch_shutdown_reply = None;
+                    let mut batch_view_dirty = false;
+                    let mut batch_deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
+                    let mut batch_deferred_db_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
+                    let mut batch_unsent_direct_items: Vec<post_unlock::PostUnlockWorkItem> =
+                        Vec::new();
+                    let mut batch_deliveries: Vec<(
+                        PendingActorDelivery,
+                        Option<commands::ParkedActorReply>,
+                    )> = Vec::new();
+                    for mut cmd in cmd_batch {
+                        if let SystemCommand::ShutdownActor { reply } = cmd {
+                            batch_shutdown_reply = Some(reply);
+                            break;
                         }
-                        continue;
-                    }
-                    _ = async {
-                        if let Some(rx) = rt_alive_rx_opt.as_mut() {
-                            let _ = rx.await;
+                        if cmd.is_cancelled_spawn_with_meta() {
+                            continue;
                         }
-                    }, if rt_alive_rx_opt.is_some() => {
-                        let _ = rt_alive_rx_opt.take();
-                        break;
-                    }
-                    batch_opt = post_unlock::next_actor_cmd_batch(&mut cmd_rx, &mut shutdown_reply.0) => batch_opt,
-                };
-                let Some((cmd_batch, shutdown_requested)) = batch_or_stop else {
-                    break;
-                };
-
-                let mut batch_view_dirty = false;
-                let mut batch_deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
-                let mut batch_deferred_db_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
-                let mut batch_unsent_direct_items: Vec<post_unlock::PostUnlockWorkItem> = Vec::new();
-                let mut batch_deliveries: Vec<(PendingActorDelivery, Option<commands::ParkedActorReply>)> = Vec::new();
-                for mut cmd in cmd_batch {
-                if cmd.is_cancelled_spawn_with_meta() {
-                    continue;
-                }
                 let parked_reply = cmd.park_reply_for_unwind();
                 let cmd_may_mutate_view = cmd.may_mutate_system_view();
                 let (raw_hook_cmd, post_hook_cmd) = ewar_cooldowns::read_deactivation_hooks(
@@ -2905,7 +2912,7 @@ impl SystemRegistry {
                     mut_flag
                 };
                 let unsent_for_db_waiter = post_unlock::enqueue_actor_cmd_post_unlock_ops(
-                    &mut actor_st, post_unlock_tx_opt.0.as_ref(), &post_unlock_in_flight_actor,
+                    &mut actor_st, post_unlock_tx_ref, &post_unlock_in_flight_actor,
                     cmd_post_unlock_ops, !deferred_db_replies.is_empty(),
                 );
                 (deact_mutated, handled_view_and_deact_actor, out, unsent_for_db_waiter)
@@ -2921,15 +2928,23 @@ impl SystemRegistry {
                         }
                         if let Some(delivery) = actor_delivery_out {
                             batch_deliveries.push((delivery, parked_reply));
-                        } else if !deferred_db_replies.is_empty() {
+                        } else if from_post_unlock_callback {
+                            batch_deferred_replies.extend(deferred_replies);
+                            batch_deferred_replies.extend(deferred_db_replies);
                             if let Some(parked) = parked_reply {
-                                deferred_db_replies.push(Box::new(move || parked.forward(solar_system_id)));
+                                batch_deferred_replies.push(Box::new(move || parked.forward(solar_system_id)));
                             }
-                        } else if let Some(parked) = parked_reply {
-                            deferred_replies.push(Box::new(move || parked.forward(solar_system_id)));
+                        } else {
+                            if !deferred_db_replies.is_empty() {
+                                if let Some(parked) = parked_reply {
+                                    deferred_db_replies.push(Box::new(move || parked.forward(solar_system_id)));
+                                }
+                            } else if let Some(parked) = parked_reply {
+                                deferred_replies.push(Box::new(move || parked.forward(solar_system_id)));
+                            }
+                            batch_deferred_replies.extend(deferred_replies);
+                            batch_deferred_db_replies.extend(deferred_db_replies);
                         }
-                        batch_deferred_replies.extend(deferred_replies);
-                        batch_deferred_db_replies.extend(deferred_db_replies);
                         batch_unsent_direct_items.extend(unsent_for_db_waiter);
                     }
                     Err(panic_payload) => {
@@ -2985,23 +3000,20 @@ impl SystemRegistry {
                 weapon_effects::flush_actor_weapon_effects(
                     solar_system_id, &ballpark_actor, &actor_state_actor, &view_tx_actor,
                     &tidi_factor_bits_actor, event_tx_actor.receiver_count(), db_opt_actor.as_deref(),
-                    post_unlock_tx_opt.0.as_ref().map(|tx| (tx, &post_unlock_in_flight_actor)), false,
+                    post_unlock_tx_ref.map(|tx| (tx, &post_unlock_in_flight_actor)), false,
                 );
                 flush_actor_active_drones(false);
-                let has_pending_actions = !post_unlock_actions_actor
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .is_empty()
-                    || post_unlock_actions_in_flight_actor
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                        > 0;
-                if has_pending_actions
-                    && worker_awaiting_actor_cmd_actor
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                        == 0
-                    && !batch_deferred_replies.is_empty()
-                {
-                    batch_deferred_db_replies.append(&mut batch_deferred_replies);
+                if !from_post_unlock_callback && !batch_deferred_replies.is_empty() {
+                    let has_pending_actions = !post_unlock_actions_actor
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_empty()
+                        || post_unlock_actions_in_flight_actor
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                            > 0;
+                    if has_pending_actions {
+                        batch_deferred_db_replies.append(&mut batch_deferred_replies);
+                    }
                 }
                 for send_reply in batch_deferred_replies {
                     send_reply();
@@ -3016,6 +3028,7 @@ impl SystemRegistry {
                         Arc::clone(&post_unlock_actions_in_flight_actor),
                         Arc::clone(&post_unlock_fallback_drain_lock_actor),
                         Arc::clone(&post_unlock_fallback_owner_tid_actor),
+                        Arc::clone(&post_unlock_fallback_scheduled_actor),
                         Arc::clone(&command_panics_actor),
                         Some(actor_rt_handle_actor.clone()),
                         items,
@@ -3033,8 +3046,8 @@ impl SystemRegistry {
                         in_flight_guard: None,
                         work_seq: 0,
                     };
-                    let unsent_opt = match post_unlock_tx_opt.0 {
-                        Some(ref tx) => post_unlock::send_post_unlock_item(
+                    let unsent_opt = match post_unlock_tx_ref {
+                        Some(tx) => post_unlock::send_post_unlock_item(
                             tx,
                             &post_unlock_in_flight_actor,
                             barrier_item,
@@ -3050,11 +3063,7 @@ impl SystemRegistry {
                             || post_unlock_actions_in_flight_actor
                                 .load(std::sync::atomic::Ordering::SeqCst)
                                 > 0;
-                        if has_pending_actions_now
-                            && worker_awaiting_actor_cmd_actor
-                                .load(std::sync::atomic::Ordering::SeqCst)
-                                == 0
-                        {
+                        if has_pending_actions_now {
                             spawn_fallback(Vec::new(), unsent.replies);
                         } else {
                             for send_reply in unsent.replies {
@@ -3138,10 +3147,56 @@ impl SystemRegistry {
                     }
                 }
                 flush_actor_active_drones(false);
+                batch_shutdown_reply
+            };
+            loop {
+                let (cmd_batch, shutdown_requested, from_post_unlock_callback) =
+                    tokio::select! {
+                        biased;
+                        cb_opt = worker_cb_rx.recv(), if worker_cb_open => {
+                            match cb_opt {
+                                Some(post_unlock::PostUnlockActorCallback::ActorCmd(cmd)) => {
+                                    (vec![*cmd], false, true)
+                                }
+                                Some(cb) => {
+                                    actor_cb_state.run_callback(cb);
+                                    continue;
+                                }
+                                None => {
+                                    worker_cb_open = false;
+                                    continue;
+                                }
+                            }
+                        }
+                        _ = async {
+                            if let Some(rx) = rt_alive_rx_opt.as_mut() {
+                                let _ = rx.await;
+                            }
+                        }, if rt_alive_rx_opt.is_some() => {
+                            let _ = rt_alive_rx_opt.take();
+                            break;
+                        }
+                        batch_opt = post_unlock::next_actor_cmd_batch(&mut cmd_rx, &mut shutdown_reply.0) => {
+                            let Some((cmd_batch, shutdown_requested)) = batch_opt else {
+                                break;
+                            };
+                            (cmd_batch, shutdown_requested, false)
+                        }
+                    };
+                if let Some(reply) = execute_actor_cmd_batch(
+                    post_unlock_tx_opt.0.as_ref(),
+                    cmd_batch,
+                    from_post_unlock_callback,
+                ) {
+                    shutdown_reply.0 = Some(reply);
+                    break;
+                }
                 if shutdown_requested {
                     break;
                 }
             }
+            actor_shutting_down_actor.store(true, std::sync::atomic::Ordering::SeqCst);
+            while cmd_rx.try_recv().is_ok() {}
             post_unlock_tx_opt.send_shutdown();
             let shutdown_deadline = tokio::time::sleep(std::time::Duration::from_secs(5));
             tokio::pin!(shutdown_deadline);
@@ -3152,6 +3207,9 @@ impl SystemRegistry {
                     biased;
                     cb_opt = worker_cb_rx.recv(), if worker_cb_open => {
                         match cb_opt {
+                            Some(post_unlock::PostUnlockActorCallback::ActorCmd(cmd)) => {
+                                let _ = execute_actor_cmd_batch(None, vec![*cmd], true);
+                            }
                             Some(cb) => actor_cb_state.run_callback(cb),
                             None => { worker_cb_open = false; }
                         }
@@ -3167,9 +3225,15 @@ impl SystemRegistry {
                 }
             }
             worker_cb_rx.close();
+            while cmd_rx.try_recv().is_ok() {}
             while let Ok(cb) = worker_cb_rx.try_recv() {
                 if worker_joined {
-                    actor_cb_state.run_callback(cb);
+                    match cb {
+                        post_unlock::PostUnlockActorCallback::ActorCmd(cmd) => {
+                            let _ = execute_actor_cmd_batch(None, vec![*cmd], true);
+                        }
+                        other => actor_cb_state.run_callback(other),
+                    }
                 } else {
                     drop(cb);
                 }
@@ -3247,7 +3311,8 @@ impl SystemRegistry {
             post_unlock_actions_in_flight,
             post_unlock_fallback_drain_lock,
             post_unlock_fallback_owner_tid,
-            worker_awaiting_actor_cmd,
+            post_unlock_fallback_scheduled,
+            actor_shutting_down,
             published_live,
             cooldown_persist_gate: cooldown_persist_gate_for_handle,
         };
