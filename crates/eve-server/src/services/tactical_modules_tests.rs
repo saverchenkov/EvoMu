@@ -810,11 +810,9 @@ async fn wire_module_deactivation_hook_flushes_remote_assistance_on_current_thre
     );
     assert!(
         ctx.db.with_snapshot(|s| {
-            !s.combat_crimewatch_state
-                .as_inner()
-                .limited_engagements
-                .iter()
-                .any(|(&(a, b), _)| a == logi_char_id || b == logi_char_id)
+            let le = &s.combat_crimewatch_state.as_inner().limited_engagements;
+            !le.contains_key(&logi_char_id)
+                && !le.values().any(|partners| partners.contains_key(&logi_char_id))
         }),
         "failed actor upsert must leave DB limited_engagements unmutated"
     );
@@ -848,11 +846,9 @@ async fn wire_module_deactivation_hook_flushes_remote_assistance_on_current_thre
     );
     assert!(
         ctx.db.with_snapshot(|s| {
-            !s.combat_crimewatch_state
-                .as_inner()
-                .limited_engagements
-                .iter()
-                .any(|(&(a, b), _)| a == logi_char_id || b == logi_char_id)
+            let le = &s.combat_crimewatch_state.as_inner().limited_engagements;
+            !le.contains_key(&logi_char_id)
+                && !le.values().any(|partners| partners.contains_key(&logi_char_id))
         }),
         "cold/missing system handle must leave DB limited_engagements unmutated"
     );
