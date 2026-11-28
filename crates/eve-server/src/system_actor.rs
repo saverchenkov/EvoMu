@@ -2935,6 +2935,7 @@ impl SystemRegistry {
                     &tidi_factor_bits_actor, event_tx_actor.receiver_count(), db_opt_actor.as_deref(),
                     post_unlock_tx_opt.0.as_ref().map(|tx| (tx, &post_unlock_in_flight_actor)), false,
                 );
+                flush_actor_active_drones(false);
                 for send_reply in batch_deferred_replies {
                     send_reply();
                 }
