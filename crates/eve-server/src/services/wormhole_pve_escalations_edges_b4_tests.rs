@@ -367,6 +367,7 @@ fn pick_drifter_roam_destination_covers_celestial_standoff_and_empty_fallback() 
 async fn step_wormhole_pve_system_direct_spawns_relay_on_cleared_site() {
     let (ctx, _sess, _cid, _sid, _sys) = make_fighter_ctx_and_session();
     let wh_sys: SolarSystemId = 31_000_099;
+    let _ = ctx.systems.get_or_spawn(wh_sys);
     with_pve_exploration_reg(&ctx, |reg| {
         reg.sites_by_system.insert(
             wh_sys,

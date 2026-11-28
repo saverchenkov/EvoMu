@@ -3774,15 +3774,22 @@ async fn cold_system_ticks_cleanups_and_tourney_return_do_not_spawn() {
     let gm_cid: i64 = 956_303;
     let gm_ship: i64 = 956_304;
     let match_id: i64 = 8_801;
+    let other_st_id = ctx
+        .sde
+        .stations
+        .keys()
+        .copied()
+        .find(|&id| id != home_st_id)
+        .unwrap_or(home_st_id);
     ctx.db
         .provision_gm_account("cold_tr_p1", "pw", p_red, "ColdTourneyPilot");
     ctx.db
         .provision_gm_account("cold_tr_gm", "pw", gm_cid, "ColdTourneyRef");
     let gm_uid = ctx.db.with_mut_snapshot(|snap| {
-        for (cid, sid) in [(p_red, p_ship), (gm_cid, gm_ship)] {
+        for (cid, sid, st_opt) in [(p_red, p_ship, None), (gm_cid, gm_ship, Some(other_st_id))] {
             if let Some(ch) = snap.characters.get_mut(&cid) {
                 ch.solar_system_id = arena_sys;
-                ch.station_id = None;
+                ch.station_id = st_opt;
                 ch.structure_id = None;
                 ch.active_ship_id = sid;
                 ch.home_station_id = home_st_id;
@@ -3828,6 +3835,10 @@ async fn cold_system_ticks_cleanups_and_tourney_return_do_not_spawn() {
         service_roles::ROLE_GMH,
     );
     gm_sess.user_id = Some(gm_uid);
+    // Keep referee docked (`departing.in_space == false`) so TeleportRefHome exercises
+    // `tourney_return_ops::handle_teleport_ref_home` without triggering out-of-scope
+    // `teardown_registry` -> `drone_return::abandon_drones_and_fighters_for_ship_sync`.
+    gm_sess.station_id = Some(other_st_id);
     assert!(ctx.systems.get_handle(arena_sys).is_none());
     assert!(ctx.systems.get_handle(home_sys).is_none());
 
@@ -3842,6 +3853,9 @@ async fn cold_system_ticks_cleanups_and_tourney_return_do_not_spawn() {
     .await
     .unwrap()
     .unwrap();
+    assert!(ctx.systems.get_handle(arena_sys).is_none());
+    assert!(ctx.systems.get_handle(home_sys).is_none());
+
     crate::services::tourney_service::handle(
         &ctx,
         &mut gm_sess,
